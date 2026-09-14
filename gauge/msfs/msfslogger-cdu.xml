@@ -1,0 +1,5 @@
+<Project Version="2" Name="msfslogger-cdu" FolderName="Packages">
+  <OutputDirectory>.</OutputDirectory>
+  <TemporaryOutputDirectory>_PackageInt</TemporaryOutputDirectory>
+  <Packages><Package>PackageDefinitions\msfslogger-cdu.xml</Package></Packages>
+</Project>

@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "serverUrl": "http://192.168.0.30:3000",
+  "ingestToken": "PLACEHOLDER-TOKEN",
+  "autoUplink": "yes"
+}

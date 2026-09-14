@@ -1,0 +1,1 @@
+{"main":{"identifier":"main","description":"Local FMC panel event subscriptions","local":true,"windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten"]}}

@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>msfslogger</title>
+    <link rel="stylesheet" href="css/fmc.css" />
+    <link rel="stylesheet" href="css/pages.css" />
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="fmc-unit">
+      <div class="unit-head">
+        <span class="unit-brand">MSFSLOGGER</span>
+        <span class="unit-type">CDU-1</span>
+      </div>
+
+      <div class="unit-face">
+        <div class="lsk-column lsk-column-left">
+          <button type="button" class="lsk lsk-left" data-lsk="L1" aria-label="Line select key L1"></button>
+          <button type="button" class="lsk lsk-left" data-lsk="L2" aria-label="Line select key L2"></button>
+          <button type="button" class="lsk lsk-left" data-lsk="L3" aria-label="Line select key L3"></button>
+          <button type="button" class="lsk lsk-left" data-lsk="L4" aria-label="Line select key L4"></button>
+          <button type="button" class="lsk lsk-left" data-lsk="L5" aria-label="Line select key L5"></button>
+          <button type="button" class="lsk lsk-left" data-lsk="L6" aria-label="Line select key L6"></button>
+        </div>
+
+        <div id="fmc-screen" data-page="STATUS">
+          <div class="screen-grid">
+            <div class="row row-title">
+              <span id="page-title">ACARS STATUS</span>
+              <span id="page-number"></span>
+            </div>
+
+            <div id="page-body">
+              <div class="page-view" data-page-view="STATUS">
+                <div class="row row-label"><span class="cell-l">SIDECAR</span></div>
+                <div class="row row-value">
+                  <span
+                    class="cell-l status-line"
+                    id="status-app"
+                    data-state="app.starting"
+                    data-severity="caution"
+                    >SIDECAR STARTING</span
+                  >
+                </div>
+
+                <div class="row row-label"><span class="cell-l">SIM LINK</span></div>
+                <div class="row row-value">
+                  <span
+                    class="cell-l status-line"
+                    id="status-sim"
+                    data-state="sim.idle"
+                    data-severity="idle"
+                    >SIM LINK STANDBY</span
+                  >
+                </div>
+
+                <div class="row row-label"><span class="cell-l">ACARS</span></div>
+                <div class="row row-value">
+                  <span
+                    class="cell-l status-line"
+                    id="status-net"
+                    data-state="net.idle"
+                    data-severity="idle"
+                    >ACARS STANDBY</span
+                  >
+                </div>
+
+                <div class="row row-label"><span class="cell-l">PAUSE</span></div>
+                <div class="row row-value">
+                  <span
+                    class="cell-l status-line"
+                    id="status-pause"
+                    data-state="pause.off"
+                    data-severity="idle"
+                    >PAUSE OFF</span
+                  >
+                </div>
+
+                <div class="row row-label"><span class="cell-l">TRAFFIC</span></div>
+                <div class="row row-value">
+                  <span class="cell-l status-line advisory" id="status-traffic" data-state="traffic.idle"
+                    >TFC STBY</span
+                  >
+                  <span class="cell-r prompt prompt-hidden" id="restart-prompt">RESTART&gt;</span>
+                </div>
+
+                <div class="row row-label">
+                  <span class="cell-l">CONFIG</span>
+                  <span class="cell-r dim" id="status-config-path">--------</span>
+                </div>
+                <div class="row row-value row-prompts">
+                  <span class="cell-l prompt">&lt;INDEX</span>
+                  <span class="cell-r prompt" id="uplink-prompt">START&gt;</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="row row-scratchpad">
+              <span id="scratchpad" data-message-kind="entry"></span>
+            </div>
+          </div>
+          <div class="screen-vignette" aria-hidden="true"></div>
+        </div>
+
+        <div class="lsk-column lsk-column-right">
+          <button type="button" class="lsk lsk-right" data-lsk="R1" aria-label="Line select key R1"></button>
+          <button type="button" class="lsk lsk-right" data-lsk="R2" aria-label="Line select key R2"></button>
+          <button type="button" class="lsk lsk-right" data-lsk="R3" aria-label="Line select key R3"></button>
+          <button type="button" class="lsk lsk-right" data-lsk="R4" aria-label="Line select key R4"></button>
+          <button type="button" class="lsk lsk-right" data-lsk="R5" aria-label="Line select key R5"></button>
+          <button type="button" class="lsk lsk-right" data-lsk="R6" aria-label="Line select key R6"></button>
+        </div>
+      </div>
+
+      <div class="unit-annunciators">
+        <span id="msg-line"></span>
+        <span id="bridge-mode" data-stub="false">TAURI</span>
+      </div>
+
+      <div class="unit-keys">
+        <div class="key-block key-block-left">
+          <div class="key-row key-row-fn">
+            <button type="button" class="key key-fn" data-key="MENU">MENU</button>
+            <button type="button" class="key key-fn" data-key="PREV">PREV</button>
+            <button type="button" class="key key-fn" data-key="NEXT">NEXT</button>
+          </div>
+          <div class="key-grid key-grid-num">
+            <button type="button" class="key" data-key="1">1</button>
+            <button type="button" class="key" data-key="2">2</button>
+            <button type="button" class="key" data-key="3">3</button>
+            <button type="button" class="key" data-key="4">4</button>
+            <button type="button" class="key" data-key="5">5</button>
+            <button type="button" class="key" data-key="6">6</button>
+            <button type="button" class="key" data-key="7">7</button>
+            <button type="button" class="key" data-key="8">8</button>
+            <button type="button" class="key" data-key="9">9</button>
+            <button type="button" class="key" data-key=".">.</button>
+            <button type="button" class="key" data-key="0">0</button>
+            <button type="button" class="key" data-key="+/-">+/-</button>
+          </div>
+        </div>
+
+        <div class="key-block key-block-right">
+          <div class="key-grid key-grid-alpha">
+            <button type="button" class="key" data-key="A">A</button>
+            <button type="button" class="key" data-key="B">B</button>
+            <button type="button" class="key" data-key="C">C</button>
+            <button type="button" class="key" data-key="D">D</button>
+            <button type="button" class="key" data-key="E">E</button>
+            <button type="button" class="key" data-key="F">F</button>
+            <button type="button" class="key" data-key="G">G</button>
+            <button type="button" class="key" data-key="H">H</button>
+            <button type="button" class="key" data-key="I">I</button>
+            <button type="button" class="key" data-key="J">J</button>
+            <button type="button" class="key" data-key="K">K</button>
+            <button type="button" class="key" data-key="L">L</button>
+            <button type="button" class="key" data-key="M">M</button>
+            <button type="button" class="key" data-key="N">N</button>
+            <button type="button" class="key" data-key="O">O</button>
+            <button type="button" class="key" data-key="P">P</button>
+            <button type="button" class="key" data-key="Q">Q</button>
+            <button type="button" class="key" data-key="R">R</button>
+            <button type="button" class="key" data-key="S">S</button>
+            <button type="button" class="key" data-key="T">T</button>
+            <button type="button" class="key" data-key="U">U</button>
+            <button type="button" class="key" data-key="V">V</button>
+            <button type="button" class="key" data-key="W">W</button>
+            <button type="button" class="key" data-key="X">X</button>
+            <button type="button" class="key" data-key="Y">Y</button>
+            <button type="button" class="key" data-key="Z">Z</button>
+            <button type="button" class="key" data-key="/">/</button>
+            <button type="button" class="key" data-key="SP">SP</button>
+            <button type="button" class="key key-wide" data-key="DEL">DEL</button>
+            <button type="button" class="key key-wide" data-key="CLR">CLR</button>
+          </div>
+          <div class="key-row key-row-exec">
+            <button type="button" class="key key-exec" data-key="EXEC">EXEC</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <template id="page-network-template">
+      <div class="page-view config-page" data-page-view="NETWORK">
+        <div class="config-field" data-field="serverUrl">
+          <div class="row row-label">SERVER URL</div>
+          <div class="row row-value"><span class="cell-l" data-field-value="serverUrl"></span></div>
+        </div>
+        <div class="config-field" data-field="ingestToken" data-masked="true">
+          <div class="row row-label">INGEST TOKEN</div>
+          <div class="row row-value"><span class="cell-l" data-field-value="ingestToken"></span></div>
+        </div>
+        <div class="config-field" data-field="certPath">
+          <div class="row row-label">CERTIFICATE PATH</div>
+          <div class="row row-value"><span class="cell-l" data-field-value="certPath"></span></div>
+        </div>
+        <div class="config-feedback row row-label" data-config-feedback></div>
+        <div class="row row-value config-prompts"><span class="prompt">&lt;INDEX</span><span class="prompt">SAVE&gt;</span></div>
+      </div>
+    </template>
+    <template id="page-sim-template">
+      <div class="page-view config-page" data-page-view="SIM">
+        <div class="config-field" data-field="sim">
+          <div class="row row-label">SIM VERSION</div>
+          <div class="row row-value"><span class="cell-l" data-field-value="sim"></span></div>
+        </div>
+        <div class="config-field" data-field="autoUplink">
+          <div class="row row-label">AUTO UPLINK</div>
+          <div class="row row-value"><span class="cell-l" data-field-value="autoUplink"></span></div>
+        </div>
+        <div class="config-feedback row row-label" data-config-feedback></div>
+        <div class="row row-value config-prompts"><span class="prompt">&lt;INDEX</span><span class="prompt">SAVE&gt;</span></div>
+      </div>
+    </template>
+    <template id="page-traffic-template">
+      <div class="page-view config-page" data-page-view="TRAFFIC">
+        <div class="config-field" data-field="trafficEnabled">
+          <div class="row row-label">TRAFFIC</div>
+          <div class="row row-value"><span class="cell-l" data-field-value="trafficEnabled"></span></div>
+        </div>
+        <div class="config-field" data-field="trafficRadiusM">
+          <div class="row row-label">RADIUS METRES</div>
+          <div class="row row-value"><span class="cell-l" data-field-value="trafficRadiusM"></span></div>
+        </div>
+        <div class="config-feedback row row-label" data-config-feedback></div>
+        <div class="row row-value config-prompts"><span class="prompt">&lt;INDEX</span><span class="prompt">SAVE&gt;</span></div>
+      </div>
+    </template>
+
+    <script type="module" src="src/app.js"></script>
+  </body>
+</html>

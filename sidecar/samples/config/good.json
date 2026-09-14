@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "serverUrl": "https://192.168.0.30:3000",
+  "ingestToken": "PLACEHOLDER-TOKEN",
+  "certPath": null,
+  "trafficEnabled": true,
+  "trafficRadiusM": 40000,
+  "sim": "2024",
+  "autoUplink": false,
+  "nodePath": null
+}

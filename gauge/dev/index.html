@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MSFSLOGGER gauge development</title>
+<style>
+body { margin: 0; background: #15191e; color: #eee; font: 15px system-ui; }
+header { padding: 16px 24px; background: #242b34; }
+h1 { font-size: 20px; margin: 0 0 8px; }
+select, button { padding: 6px; margin-right: 16px; }
+iframe { display: block; width: 600px; height: 900px; max-width: 100%; border: 0; margin: 20px auto; background: #15191e; }
+#connection { color: #ffd184; }
+</style>
+<header>
+<h1>MSFSLOGGER · Gauge development</h1>
+<p>Browser preview · simulated host data · configuration resets on reload</p>
+<label>Scenario <select id="scenario">
+<option value="stopped">Stopped</option><option value="online">Online</option>
+<option value="retry">Sim reconnect</option><option value="offline">Server unreachable</option>
+<option value="unauthorized">Unauthorized</option><option value="paused">Full pause</option>
+<option value="active-pause">Active pause</option><option value="crashed">Host crash</option>
+</select></label>
+<label>Viewport <select id="size"><option value="600">600 px</option><option value="480">480 px</option><option value="800">800 px</option></select></label>
+<button id="reload">Reload</button><label><input type="checkbox" id="auto" checked> Reload on save</label>
+<p>F12 opens DevTools. Select the CDU iframe context to inspect <code>window.gaugeDev</code>. <span id="connection"></span></p>
+</header>
+<iframe id="gauge" title="CDU gauge preview" src="/ui/index.html"></iframe>
+<script src="/gauge/dev/preview.js"></script>
+</html>

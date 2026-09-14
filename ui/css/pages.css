@@ -1,0 +1,21 @@
+.config-field {
+  grid-row: span 2;
+  min-width: 0;
+}
+.config-field [data-field-value] {
+  max-width: 24ch;
+}
+.config-field [data-edited="true"] {
+  color: var(--fmc-cyan);
+}
+.config-feedback {
+  grid-row: 10 / 12;
+  height: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  align-items: center;
+  color: var(--fmc-amber);
+}
+.config-prompts {
+  grid-row: 12;
+}

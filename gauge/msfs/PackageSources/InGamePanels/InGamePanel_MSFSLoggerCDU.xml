@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<SimBase.Document Type="InGamePanels" version="1.0">
+  <Filename>InGamePanel_MSFSLoggerCDU.spb</Filename>
+  <InGamePanels.InGamePanelDefinition id="PANEL_MSFSLOGGER_CDU" Name="MSFSLogger CDU" url="html_ui/InGamePanels/MSFSLoggerCDU/MSFSLoggerCDUPanel.html" resizeDirections="Both" minWidth="24" minHeight="36" defaultWidth="34" defaultHeight="90" defaultTop="5" defaultRight="2" icon="ICON_TOOLBAR_MSFSLOGGER_CDU" buttonVisible="true"></InGamePanels.InGamePanelDefinition>
+</SimBase.Document>

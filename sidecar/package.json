@@ -1,0 +1,21 @@
+{
+  "name": "msfslogger-sidecar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "msfslogger Windows client sidecar - SimConnect reader and ingest uplink",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "node-simconnect": "4.2.0",
+    "undici": "7.29.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.39",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

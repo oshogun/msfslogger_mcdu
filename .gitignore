@@ -1,0 +1,14 @@
+# Never commit build output or dependencies for the Windows client.
+node_modules/
+dist/
+
+# Rust build output - hundreds of megabytes.
+target/
+.tools/
+gauge/msfs/.build/
+gauge/msfs/Packages/
+gauge/msfs/_PackageInt/
+
+# Local coding-agent state and historical run artifacts.
+.claude/
+.codex/

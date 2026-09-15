@@ -30,6 +30,7 @@ const COMMANDS = {
   uplinkStop: 'uplink_stop',
   sidecarRestart: 'sidecar_restart',
   statusGet: 'status_get',
+  gaugePairBegin: 'gauge_pair_begin',
 };
 
 /** Event names the shell emits into the webview. */
@@ -183,6 +184,10 @@ function createTauriBridge(host) {
     stopUplink: () => host.invoke(COMMANDS.uplinkStop),
     restartSidecar: () => host.invoke(COMMANDS.sidecarRestart),
     getStatus: () => host.invoke(COMMANDS.statusGet),
+    // Only the desktop shell can issue gauge pairing codes; installed hosts
+    // (the in-simulator gauge) deliberately have no equivalent.
+    beginGaugePairing: (confirmCorrupt) =>
+      host.invoke(COMMANDS.gaugePairBegin, { confirmCorrupt: confirmCorrupt === true }),
     onStatus: (fn) => subscribe(EVENTS.status, fn),
     onLog: (fn) => subscribe(EVENTS.log, fn),
     onExit: (fn) => subscribe(EVENTS.exit, fn),
@@ -263,6 +268,10 @@ function createStubBridge() {
         stub.config = { exists: true, path: result.path || DEFAULT_STUB_PATH, config, raw: clone(config) };
       }
       return clone(result);
+    },
+    async beginGaugePairing(confirmCorrupt) {
+      record('beginGaugePairing', [confirmCorrupt === true]);
+      return { ok: true, code: '12345678', expiresAt: Date.now() + 120000 };
     },
     async getConfigPath() {
       record('getConfigPath', []);

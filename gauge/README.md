@@ -1,4 +1,4 @@
-# Gauge development environment
+# CDU preview harness
 
 Run from the repository root in PowerShell:
 
@@ -50,90 +50,14 @@ annunciates `GAUGE MOCK`. It never connects to the server or simulator.
   picker to run `gaugeDev.scenario('offline')` or inspect `gaugeDev.calls`.
 - In VS Code, start the server, select **Gauge preview (start dev server
   first)**, and press F5. The launch configuration uses Edge on port 8380.
-- Viewport choices exercise narrower/wider layouts; they are CSS pixel sizes,
-  not a simulation of cockpit textures or simulator display scaling.
+- Viewport choices exercise narrower/wider layouts; they are CSS pixel sizes.
 
 ## What this validates
 
-This is a **browser host harness**, not a standalone Coherent GT runtime or
-an MSFS API emulator. It supports fast CDU layout, page interaction, host
-contract, and status development. The small mock is deliberately at the
-existing host boundary: it does not claim to implement `SimVar`, `Coherent`,
-`BaseInstrument`, aircraft electrical systems, or simulator lifecycle timing.
-Unsupported simulator APIs remain absent instead of silently returning fake
-success. Add narrowly scoped fixtures when a future gauge adapter needs them.
+This is a **browser host harness** for fast CDU layout, page interaction, host
+contract, and status development. The small mock sits at the existing host
+boundary and never talks to a real server or simulator.
 
-The new tests cover scenario transitions, unsubscribe behavior, configuration
+The tests cover scenario transitions, unsubscribe behavior, configuration
 isolation, secret omission, adapter injection order, and server route isolation.
-The existing UI boundary and Rust/webview contract checks also pass. Browser
-visual verification and real-engine verification remain pending: this session
-had no connected browser automation surface or running simulator target.
-
-## Build and install the MSFS 2020 gauge
-
-The gauge is an aircraft-independent toolbar panel. It bundles the same CDU UI,
-installs a separate `MSFS GAUGE` host, reads the user aircraft through SimVar,
-and posts one frame per second to the existing `/api/ingest/frame` endpoint.
-The Tauri app and its SimConnect sidecar are unchanged.
-
-Build with the installed SDK:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/build-gauge.ps1 -SdkRoot 'C:\MSFS SDK'
-```
-
-The Community-ready folder is `gauge/msfs/Packages/msfslogger-cdu`. Install it
-after closing MSFS:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/install-gauge.ps1
-```
-
-The installer reads MSFS `UserCfg.opt` to locate Community. For a custom path:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/install-gauge.ps1 -CommunityPath 'D:\MSFS\Community'
-```
-
-Build and install while MSFS is closed. The SDK may return success without
-replacing a package that the running simulator has mounted; the build script
-checks the generated version and assets and rejects that stale result.
-
-After the first install, restart MSFS, enter a flight, open the toolbar, and
-select **MSFSLogger CDU**. On the CDU use `MENU` → `<NETWORK`, enter the server
-URL and ingest token, and press `SAVE>`. The settings live in the gauge's
-browser storage and do not overwrite the Tauri configuration. Return to STATUS
-and press `START>`; `SIM LINK ONLINE` confirms SimVar access and `ACARS UPLINK`
-confirms an accepted ingest response. The server must be reachable from this PC.
-An HTTPS server certificate must already be trusted by Windows/MSFS; a Coherent
-gauge cannot load Tauri's custom certificate file.
-
-The initial gauge sends user-aircraft frames and connected/disconnected events.
-AI traffic remains off because the HTML gauge does not expose the sidecar's
-SimConnect object sweep. Pause remains `PAUSE OFF` because reliable
-`Pause_EX1` system-event parity needs a WASM/SimConnect bridge. Those two lines
-are explicit capability limits, not simulated data.
-
-## Coherent GT debugging
-
-The SDK debugger inspects a running MSFS view. Check the installation with:
-
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File tools/coherent-debugger.ps1 -SdkRoot 'C:\MSFS SDK'
-   ```
-
-Once the gauge is loaded in a flight, add `-Launch` to start the debugger, then
-point it at **http://127.0.0.1:19999** and click Go.
-   Select the relevant VCockpit view and enable **Network > Ignore Cache**.
-   Debugger edits are temporary; copy changes back to source.
-
-SDK 0.24.6.0 compiled the package successfully on this machine. The browser
-host tests verify SimVar-to-frame mapping, secret redaction, local persistence,
-auto-start, and the existing ingest URLs. Rendering, input focus, HTTP/CORS,
-certificate trust, and live SimVar behavior still require the in-simulator test.
-
-Official references:
-
-- [MSFS 2020 Coherent GT Debugger](https://docs.flightsimulator.com/html/Additional_Information/Tools/Coherent_GT_Debugger.htm)
-- [MSFS 2020 JavaScript instruments and lifecycle](https://docs.flightsimulator.com/html/Programming_Tools/JavaScript/JavaScript.htm)
-- [Coherent GT debugging and live editing](https://coherent-labs.com/Documentation/cpp-gt/dd/d68/debugging.html)
+The existing UI boundary and Rust/webview contract checks also pass.

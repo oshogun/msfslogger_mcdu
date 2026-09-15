@@ -1,9 +1,18 @@
 use serde_json::{json, Map, Value};
-use std::{env, fs::{self, OpenOptions}, io::Write, path::{Path, PathBuf}, sync::{Mutex, MutexGuard}, collections::BTreeSet};
+use std::{
+    collections::BTreeSet,
+    env,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Mutex, MutexGuard},
+};
 
 pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A poisoned cache must not turn one failed operation into a blank panel.
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub struct ConfigStore {
@@ -16,8 +25,12 @@ pub fn resolve_path() -> Result<PathBuf, String> {
     if let Ok(value) = env::var("MSFSLOGGER_CONFIG") {
         if !value.trim().is_empty() {
             let path = PathBuf::from(value.trim());
-            return if path.is_absolute() { Ok(path) } else {
-                env::current_dir().map(|cwd| cwd.join(path)).map_err(|_| "Cannot resolve config path".into())
+            return if path.is_absolute() {
+                Ok(path)
+            } else {
+                env::current_dir()
+                    .map(|cwd| cwd.join(path))
+                    .map_err(|_| "Cannot resolve config path".into())
             };
         }
     }
@@ -26,7 +39,9 @@ pub fn resolve_path() -> Result<PathBuf, String> {
         env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("AppData/Roaming"))
     });
     #[cfg(not(windows))]
-    let base = env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
     base.map(|base| base.join("msfslogger/config.json"))
         .ok_or_else(|| "Cannot resolve the user's config directory".into())
@@ -34,7 +49,11 @@ pub fn resolve_path() -> Result<PathBuf, String> {
 
 impl ConfigStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, gate: Mutex::new(()), secrets: Mutex::new(BTreeSet::new()) }
+        Self {
+            path,
+            gate: Mutex::new(()),
+            secrets: Mutex::new(BTreeSet::new()),
+        }
     }
 
     fn read_unlocked(&self) -> Result<Option<Map<String, Value>>, String> {
@@ -46,7 +65,10 @@ impl ConfigStore {
         let text = std::str::from_utf8(&bytes).map_err(|_| "Config file must be UTF-8")?;
         let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
             .map_err(|_| "Config file is not valid JSON; repair it at the displayed config path")?;
-        let object = value.as_object().ok_or("Config must be a JSON object")?.clone();
+        let object = value
+            .as_object()
+            .ok_or("Config must be a JSON object")?
+            .clone();
         self.remember(&object);
         Ok(Some(object))
     }
@@ -57,7 +79,11 @@ impl ConfigStore {
     }
 
     fn remember(&self, object: &Map<String, Value>) {
-        if let Some(token) = object.get("ingestToken").and_then(Value::as_str).filter(|token| !token.is_empty()) {
+        if let Some(token) = object
+            .get("ingestToken")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+        {
             let mut secrets = lock(&self.secrets);
             secrets.insert(token.to_owned());
             // stderr may contain a JSON-escaped representation of a credential.
@@ -83,13 +109,31 @@ impl ConfigStore {
                     // Protocol identifiers and editable non-secret config
                     // fields must survive even if a short token happens to
                     // equal a public value such as "status" or "2020".
-                    if matches!(key.as_str(), "type" | "state" | "level" | "protocol" | "sim"
-                        | "serverUrl" | "certPath" | "nodePath" | "configPath"
-                        | "sidecarVersion" | "nodeVersion") && child.is_string() { continue; }
+                    if matches!(
+                        key.as_str(),
+                        "type"
+                            | "state"
+                            | "level"
+                            | "protocol"
+                            | "sim"
+                            | "serverUrl"
+                            | "certPath"
+                            | "nodePath"
+                            | "configPath"
+                            | "sidecarVersion"
+                            | "nodeVersion"
+                    ) && child.is_string()
+                    {
+                        continue;
+                    }
                     self.redact(child);
                 }
             }
-            Value::Array(values) => for child in values { self.redact(child); },
+            Value::Array(values) => {
+                for child in values {
+                    self.redact(child);
+                }
+            }
             Value::String(text) => *text = self.redact_text(text),
             _ => {}
         }
@@ -98,17 +142,24 @@ impl ConfigStore {
     pub fn snapshot(&self, effective: Value) -> Result<Value, String> {
         let raw = self.read()?;
         let exists = raw.is_some();
-        let mut redacted = raw.map(|mut object| {
-            let token_set = object.remove("ingestToken").and_then(|value| value.as_str().map(|s| !s.trim().is_empty())).unwrap_or(false);
-            object.insert("tokenSet".into(), Value::Bool(token_set));
-            Value::Object(object)
-        }).unwrap_or(Value::Null);
+        let mut redacted = raw
+            .map(|mut object| {
+                let token_set = object
+                    .remove("ingestToken")
+                    .and_then(|value| value.as_str().map(|s| !s.trim().is_empty()))
+                    .unwrap_or(false);
+                object.insert("tokenSet".into(), Value::Bool(token_set));
+                Value::Object(object)
+            })
+            .unwrap_or(Value::Null);
         self.redact(&mut redacted);
         Ok(json!({ "exists": exists, "path": self.path, "config": effective, "raw": redacted }))
     }
 
     pub fn save(&self, patch: Value) -> Result<(), String> {
-        let patch = patch.as_object().ok_or("Config patch must be a JSON object")?;
+        let patch = patch
+            .as_object()
+            .ok_or("Config patch must be a JSON object")?;
         let _guard = lock(&self.gate);
         // Refuse unreadable/non-object files; silently replacing one would lose
         // unknown settings. Semantic errors remain the sidecar's responsibility.
@@ -129,15 +180,20 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temp = path.with_extension("json.tmp");
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&temp).map_err(|_| "Cannot create config.json.tmp; close other instances or remove a stale temporary file")?;
+    let mut file = options.open(&temp).map_err(|_| {
+        "Cannot create config.json.tmp; close other instances or remove a stale temporary file"
+    })?;
     let written = file.write_all(bytes).and_then(|_| file.sync_all());
     drop(file);
     let result = written.and_then(|_| fs::rename(&temp, path));
-    if result.is_err() { let _ = fs::remove_file(&temp); }
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
     result.map_err(|_| "Cannot save config atomically; previous config retained".into())
 }
 
@@ -158,7 +214,8 @@ mod tests {
 
     #[test]
     fn saves_merge_unknown_keys_and_never_return_the_token() {
-        let directory = env::temp_dir().join(format!("msfslogger-config-test-{}", std::process::id()));
+        let directory =
+            env::temp_dir().join(format!("msfslogger-config-test-{}", std::process::id()));
         let store = ConfigStore::new(directory.join("config.json"));
         assert_eq!(store.snapshot(Value::Null).unwrap()["exists"], false);
         store.save(json!({"ingestToken":"PLACEHOLDER-TOKEN", "future": {"kept":true}, "autoUplink":false})).unwrap();

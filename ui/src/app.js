@@ -17,6 +17,7 @@
 
 import bridge from './bridge.js';
 import * as statusPage from './pages/status-page.js';
+import * as pairPage from './pages/pair-page.js';
 import { defaultStatus } from './status.js';
 
 const MAX_SCRATCHPAD_CHARS = 4096;
@@ -166,7 +167,9 @@ async function showPage(id) {
     }
   }
 
-  if (dom.body) dom.body.replaceChildren();
+  // Coherent GT, the MSFS panel engine, has no replaceChildren(); a throw here
+  // would leave no current page and freeze the display.
+  if (dom.body) while (dom.body.firstChild) dom.body.removeChild(dom.body.firstChild);
   if (state.pageId !== id) setScratchpad('');
   state.pageId = id;
   paintScratchpad();
@@ -227,6 +230,7 @@ const MENU_ITEMS = [
   { lsk: 'L2', label: '<NETWORK', page: 'NETWORK' },
   { lsk: 'L3', label: '<SIM', page: 'SIM' },
   { lsk: 'L4', label: '<TRAFFIC', page: 'TRAFFIC' },
+  { lsk: 'L5', label: '<GAUGE PAIR', page: 'PAIR' },
 ];
 
 registerPage({
@@ -290,6 +294,13 @@ function paintStatus() {
 function applyStatus(status) {
   if (!status || typeof status !== 'object') return;
   state.status = status;
+  // A host whose link came up after boot (the MSFS gauge) failed the boot-time
+  // config read; a status proves the link is up, so read it again once.
+  if (!state.configLoaded && !state.configLoading) {
+    state.configLoading = true;
+    const done = () => { state.configLoading = false; };
+    loadConfig().then(done, done);
+  }
   const problems = status.app && Array.isArray(status.app.problems) ? status.app.problems : null;
   if (problems && problems.length > 0) {
     setMessageLine(`CFG ${problems[0].field}: ${problems[0].message}`, 'warn');
@@ -426,7 +437,10 @@ function wireKeys() {
     const key = keyFromEvent(event);
     if (!key) return;
     event.preventDefault();
-    flashKey(document.querySelector(`[data-key="${CSS.escape(key)}"]`));
+    const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? CSS.escape(key)
+      : key.replace(/["\\]/g, '\\$&');
+    flashKey(document.querySelector(`[data-key="${escaped}"]`));
     handleKey(key);
   });
 }
@@ -440,6 +454,7 @@ async function loadConfig() {
       state.config = result.raw || result.config || null;
       if (typeof result.path === 'string') state.configPath = result.path;
     }
+    state.configLoaded = true;
   } catch {
     setMessageLine('CONFIG READ FAILED', 'error');
   }
@@ -477,12 +492,16 @@ function boot() {
     startUplink: () => runCommand(() => bridge.startUplink()),
     stopUplink: () => runCommand(() => bridge.stopUplink()),
     restartSidecar: () => runCommand(() => bridge.restartSidecar()),
+    // Pairing codes exist only where the desktop shell can issue them.
+    canPairGauge: typeof bridge.beginGaugePairing === 'function',
+    beginGaugePairing: (confirmCorrupt) => bridge.beginGaugePairing(confirmCorrupt),
   };
   window.FMC = fmc;
 
   wireKeys();
   paintScratchpad();
   statusPage.register(fmc);
+  pairPage.register(fmc);
   showPage('STATUS');
 
   bridge.onStatus(applyStatus);

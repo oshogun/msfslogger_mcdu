@@ -2,11 +2,13 @@
 
 mod config;
 mod framing;
+mod gauge_sync;
 mod protocol;
 mod restart;
 mod supervisor;
 
 use config::{lock, ConfigStore};
+use gauge_sync::{GaugeEventHub, GaugeService};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use supervisor::{Event, Operation, Supervisor};
@@ -14,7 +16,11 @@ use tauri::{Emitter, Manager, State};
 
 #[tauri::command]
 fn config_get(state: State<'_, Supervisor>) -> Value {
-    let effective = lock(&state.snapshot).status.as_ref().map(|s| s["config"].clone()).unwrap_or(Value::Null);
+    let effective = lock(&state.snapshot)
+        .status
+        .as_ref()
+        .map(|s| s["config"].clone())
+        .unwrap_or(Value::Null);
     state.config.snapshot(effective).unwrap_or_else(|_| json!({
         "exists": state.config.path.exists(), "path": state.config.path, "config":null, "raw":null
     }))
@@ -25,60 +31,131 @@ fn config_set(patch: Value, state: State<'_, Supervisor>) -> Value {
     match state.config.save(patch) {
         Ok(()) => {
             // Read newly saved raw fields until the sidecar validates them.
-            if let Some(status) = lock(&state.snapshot).status.as_mut() { status["config"] = Value::Null; }
+            if let Some(status) = lock(&state.snapshot).status.as_mut() {
+                status["config"] = Value::Null;
+            }
             match state.request(Operation::Reload) {
                 Ok(()) => json!({"ok":true, "path":state.config.path}),
-                Err(_) => json!({"ok":false, "message":"Config saved; supervisor unavailable for reload. Restart the app."}),
+                Err(_) => {
+                    json!({"ok":false, "message":"Config saved; supervisor unavailable for reload. Restart the app."})
+                }
             }
-        },
+        }
         Err(message) => json!({"ok":false, "message":message}),
     }
 }
 
 #[tauri::command]
 fn config_path(state: State<'_, Supervisor>) -> String {
-    lock(&state.snapshot).hello.as_ref().and_then(|h| h["configPath"].as_str()).map(str::to_owned)
+    lock(&state.snapshot)
+        .hello
+        .as_ref()
+        .and_then(|h| h["configPath"].as_str())
+        .map(str::to_owned)
         .unwrap_or_else(|| state.config.path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
-fn uplink_start(state: State<'_, Supervisor>) -> Result<(), String> { state.request(Operation::Start) }
+fn uplink_start(state: State<'_, Supervisor>) -> Result<(), String> {
+    state.request(Operation::Start)
+}
 
 #[tauri::command]
-fn uplink_stop(state: State<'_, Supervisor>) -> Result<(), String> { state.request(Operation::Stop) }
+fn uplink_stop(state: State<'_, Supervisor>) -> Result<(), String> {
+    state.request(Operation::Stop)
+}
 
 #[tauri::command]
-fn sidecar_restart(state: State<'_, Supervisor>) -> Result<(), String> { state.request(Operation::Restart) }
+fn sidecar_restart(state: State<'_, Supervisor>) -> Result<(), String> {
+    state.request(Operation::Restart)
+}
 
 #[tauri::command]
-fn status_get(state: State<'_, Supervisor>) -> Option<Value> { lock(&state.snapshot).status.clone() }
+fn status_get(state: State<'_, Supervisor>) -> Option<Value> {
+    lock(&state.snapshot).status.clone()
+}
+
+#[tauri::command]
+fn gauge_pair_begin(confirm_corrupt: Option<bool>, state: State<'_, GaugeService>) -> Value {
+    state
+        .authorization
+        .begin_pairing(gauge_sync::normalize_confirm_corrupt(confirm_corrupt))
+}
+
+#[tauri::command]
+fn gauge_revoke(state: State<'_, GaugeService>) -> Result<(), String> {
+    state
+        .revoke()
+        .map_err(|_| "Cannot revoke gauge authorization".into())
+}
 
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
-            let resource = app.path().resolve("sidecar/dist/index.js", tauri::path::BaseDirectory::Resource).ok();
+            let gauge_events = Arc::new(GaugeEventHub::default());
+            let gauge_sink = gauge_events.clone();
+            let resource = app
+                .path()
+                .resolve(
+                    "sidecar/dist/index.js",
+                    tauri::path::BaseDirectory::Resource,
+                )
+                .ok();
             let config_path = config::resolve_path().map_err(std::io::Error::other)?;
-            let sink = Arc::new(move |event| match event {
-                Event::Status(value) => { let _ = handle.emit("sidecar:status", value); }
-                Event::Log(value) => { let _ = handle.emit("sidecar:log", value); }
-                Event::Exit(value) => { let _ = handle.emit("sidecar:exit", value); }
+            let sink = Arc::new(move |event: Event| {
+                gauge_sink.publish(event.clone());
+                match event {
+                    Event::Status(value) => {
+                        let _ = handle.emit("sidecar:status", value);
+                    }
+                    Event::Log(value) => {
+                        let _ = handle.emit("sidecar:log", value);
+                    }
+                    Event::Exit(value) => {
+                        let _ = handle.emit("sidecar:exit", value);
+                    }
+                }
             });
-            let supervisor = Supervisor::new(ConfigStore::new(config_path), resource, sink).map_err(std::io::Error::other)?;
+            let supervisor = Supervisor::new(ConfigStore::new(config_path), resource, sink)
+                .map_err(std::io::Error::other)?;
+            match GaugeService::start(supervisor.clone(), gauge_events) {
+                Ok(service) => app.manage(service),
+                Err(message) => {
+                    eprintln!("[gauge-sync] {message}");
+                    false
+                }
+            };
             app.manage(supervisor);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![config_get, config_set, config_path, uplink_start, uplink_stop, sidecar_restart, status_get])
+        .invoke_handler(tauri::generate_handler![
+            config_get,
+            config_set,
+            config_path,
+            uplink_start,
+            uplink_stop,
+            sidecar_restart,
+            status_get,
+            gauge_pair_begin,
+            gauge_revoke
+        ])
         .build(tauri::generate_context!())
         .expect("Cannot initialize msfslogger desktop shell");
-    app.run(|handle, event| {
-        match event {
-            tauri::RunEvent::WindowEvent { event: tauri::WindowEvent::CloseRequested { .. }, .. }
-            | tauri::RunEvent::ExitRequested { .. }
-            | tauri::RunEvent::Exit => {
-                if let Some(supervisor) = handle.try_state::<Supervisor>() { supervisor.shutdown(); }
-            }
-            _ => {}
+    app.run(|handle, event| match event {
+        tauri::RunEvent::WindowEvent {
+            event: tauri::WindowEvent::CloseRequested { .. },
+            ..
         }
+        | tauri::RunEvent::ExitRequested { .. }
+        | tauri::RunEvent::Exit => {
+            if let Some(service) = handle.try_state::<GaugeService>() {
+                service.shutdown();
+            }
+            if let Some(supervisor) = handle.try_state::<Supervisor>() {
+                supervisor.shutdown();
+            }
+        }
+        _ => {}
     });
 }

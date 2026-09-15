@@ -1,0 +1,18 @@
+{
+  "name": "msfslogger-msfs-package",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:stage": "node tools/build.mjs --stage-only",
+    "build:origin-probe:stage": "node tools/build.mjs --origin-probe --stage-only",
+    "build:origin-probe": "node tools/build.mjs --origin-probe",
+    "test": "node --test tools/gauge-host.test.mjs tools/package.test.mjs tools/origin-probe.test.mjs tools/origin-probe-package.test.mjs tools/rfc6455-client.test.mjs tools/real-websocket-e2e-output.test.mjs",
+    "inspect": "node tools/package-inspect.mjs",
+    "origin-probe": "node tools/origin-probe.mjs",
+    "e2e:client": "node tools/real-websocket-e2e.mjs"
+  },
+  "engines": {
+    "node": "20.x"
+  }
+}

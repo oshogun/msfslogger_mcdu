@@ -1,13 +1,13 @@
 # msfslogger Windows client
 
-## Offline gauge development
+## Offline CDU preview
 
 Run `powershell -ExecutionPolicy Bypass -File tools/dev-gauge.ps1` from this
 repository root and open <http://127.0.0.1:8380>. This previews the existing
-CDU with a simulated gauge host, selectable scenarios, and reload-on-save,
-without launching MSFS or changing the Tauri app.
-See [Gauge development environment](gauge/README.md) for debugging, tests,
-setup on another machine, and the limits of browser versus Coherent GT testing.
+CDU with a mock host, selectable scenarios, and reload-on-save, without
+launching MSFS or changing the Tauri app.
+See [CDU preview harness](gauge/README.md) for debugging, tests, and setup on
+another machine.
 
 A Tauri desktop app that replaces [`agent/`](../agent/) as the way to get flight
 data from MSFS into a `msfslogger` server on another machine. It talks to

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<SimBase.Document Type="InGamePanels" version="1.0">
+  <Filename>InGamePanel_MSFSLoggerOriginProbe.spb</Filename>
+  <InGamePanels.InGamePanelDefinition id="PANEL_MSFSLOGGER_ORIGIN_PROBE" Name="MSFSLogger Origin Probe Only" url="html_ui/InGamePanels/MSFSLoggerOriginProbe/MSFSLoggerOriginProbe.html" resizeDirections="Both" minWidth="20" minHeight="20" defaultWidth="28" defaultHeight="30" defaultTop="5" defaultRight="2" icon="ICON_TOOLBAR_MSFSLOGGER_ORIGIN_PROBE" buttonVisible="true"></InGamePanels.InGamePanelDefinition>
+</SimBase.Document>

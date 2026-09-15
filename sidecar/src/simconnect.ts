@@ -60,6 +60,44 @@ export interface FlightFrame {
   onGround: boolean;
   simRunning: number;
   aircraft: string;
+  parkingBrake?: boolean;
+  engineCount?: number;
+  enginesRunning?: number;
+}
+
+/** The subset of RawBuffer that reading the ground-detection SimVars needs. */
+export interface GroundVarsReader {
+  remaining(): number;
+  readInt32(): number;
+}
+
+export interface GroundVars {
+  parkingBrake: boolean;
+  engineCount: number;
+  enginesRunning: number;
+}
+
+// Six INT32 fields (brake, engine count, four combustion flags) = 24 bytes.
+const GROUND_VARS_BYTES = 24;
+const MAX_ENGINES = 4;
+
+/**
+ * Reads the six ground-detection SimVars appended after TITLE, if present.
+ * Older aircraft/definitions can leave the buffer short, so this checks
+ * `remaining()` first and returns null rather than reading past the end.
+ */
+export function readGroundVars(data: GroundVarsReader): GroundVars | null {
+  if (data.remaining() < GROUND_VARS_BYTES) return null;
+
+  const parkingBrakeRaw = data.readInt32();
+  const engineCountRaw = data.readInt32();
+  const combustion = [data.readInt32(), data.readInt32(), data.readInt32(), data.readInt32()];
+
+  const engineCount = Math.max(0, Math.min(MAX_ENGINES, engineCountRaw));
+  const enginesRunning = combustion.slice(0, engineCount).filter((v) => v !== 0).length;
+  const parkingBrake = parkingBrakeRaw !== 0;
+
+  return { parkingBrake, engineCount, enginesRunning };
 }
 
 export interface SimLinkSnapshot {
@@ -299,6 +337,16 @@ export class SimConnectLink {
     handle.addToDataDefinition(DEF_FLIGHT_DATA, 'SIM ON GROUND', 'bool', SimConnectDataType.INT32);
     handle.addToDataDefinition(DEF_FLIGHT_DATA, 'IS SLEW ACTIVE', 'bool', SimConnectDataType.INT32);
     handle.addToDataDefinition(DEF_FLIGHT_DATA, 'TITLE', null, SimConnectDataType.STRING256);
+    // These six must stay last and in this order: readGroundVars() reads them
+    // only if at least 24 bytes remain after TITLE, so a rejected entry drops
+    // all three frame fields. Anything inserted between TITLE and here, or
+    // appended after these, could satisfy that guard with misaligned data.
+    handle.addToDataDefinition(DEF_FLIGHT_DATA, 'BRAKE PARKING INDICATOR', 'bool', SimConnectDataType.INT32);
+    handle.addToDataDefinition(DEF_FLIGHT_DATA, 'NUMBER OF ENGINES', 'number', SimConnectDataType.INT32);
+    handle.addToDataDefinition(DEF_FLIGHT_DATA, 'GENERAL ENG COMBUSTION:1', 'bool', SimConnectDataType.INT32);
+    handle.addToDataDefinition(DEF_FLIGHT_DATA, 'GENERAL ENG COMBUSTION:2', 'bool', SimConnectDataType.INT32);
+    handle.addToDataDefinition(DEF_FLIGHT_DATA, 'GENERAL ENG COMBUSTION:3', 'bool', SimConnectDataType.INT32);
+    handle.addToDataDefinition(DEF_FLIGHT_DATA, 'GENERAL ENG COMBUSTION:4', 'bool', SimConnectDataType.INT32);
 
     // AI traffic — distinct id, registered only when enabled, same read-order
     // rule as the flight-data definition above.
@@ -335,6 +383,7 @@ export class SimConnectLink {
       const onGround = data.readInt32() !== 0;
       const isSlew = data.readInt32() !== 0;
       const aircraft = data.readString256() ?? 'Unknown';
+      const groundVars = readGroundVars(data);
 
       this.cb.onFrame({
         lat,
@@ -347,6 +396,7 @@ export class SimConnectLink {
         onGround,
         simRunning: isSlew ? 3 : 2,
         aircraft,
+        ...(groundVars ?? {}),
       });
 
       // The user's own object id/position, and the throttled re-issue of the

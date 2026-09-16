@@ -4,14 +4,9 @@
   "scripts": {
     "dev:gauge": "node gauge/dev/server.mjs",
     "test:gauge": "node --test gauge/dev/harness.test.mjs",
-    "check:ui": "node ui/tools/boundary-check.mjs",
-    "build:gauge": "node gauge/msfs/tools/build.mjs",
-    "test:msfs-gauge": "node --test gauge/msfs/tools/gauge-host.test.mjs"
+    "check:ui": "node ui/tools/boundary-check.mjs"
   },
   "engines": {
     "node": ">=20"
-  },
-  "devDependencies": {
-    "esbuild": "0.25.9"
   }
 }

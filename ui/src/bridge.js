@@ -7,8 +7,8 @@
 // `window.__TAURI__` / `window.__TAURI_INTERNALS__` / `window.__FMC_HOST__` /
 // `window.__FMC_STUB__` globals, are named here and nowhere else in the UI.
 // That is what lets the whole panel run in a plain browser — and in headless
-// Chromium for screenshots — with no desktop shell at all, and what will let
-// it run inside a sim gauge without a line of page code changing.
+// Chromium for screenshots — with no desktop shell at all, and what lets a new
+// host adopt the panel without a line of page code changing.
 //
 // Three hosts are resolved, in this order: an adapter a host installed on
 // `window.__FMC_HOST__` before this module evaluated, then Tauri, then a
@@ -30,7 +30,6 @@ const COMMANDS = {
   uplinkStop: 'uplink_stop',
   sidecarRestart: 'sidecar_restart',
   statusGet: 'status_get',
-  gaugePairBegin: 'gauge_pair_begin',
 };
 
 /** Event names the shell emits into the webview. */
@@ -72,9 +71,10 @@ const HOST_METHODS = [
 
 /**
  * A host installs itself by assigning `window.__FMC_HOST__` before this module
- * evaluates — in a gauge, from the bootstrap script injected ahead of the panel
- * document. An object missing any method is not adopted at all: a panel that
- * falls back to Tauri or the stub is worth more than one whose buttons throw.
+ * evaluates — from a bootstrap script loaded ahead of the panel document, the
+ * way the browser preview harness installs its mock host. An object missing any
+ * method is not adopted at all: a panel that falls back to Tauri or the stub is
+ * worth more than one whose buttons throw.
  */
 function findInstalledHost() {
   const installed = typeof window !== 'undefined' ? window.__FMC_HOST__ : undefined;
@@ -184,10 +184,6 @@ function createTauriBridge(host) {
     stopUplink: () => host.invoke(COMMANDS.uplinkStop),
     restartSidecar: () => host.invoke(COMMANDS.sidecarRestart),
     getStatus: () => host.invoke(COMMANDS.statusGet),
-    // Only the desktop shell can issue gauge pairing codes; installed hosts
-    // (the in-simulator gauge) deliberately have no equivalent.
-    beginGaugePairing: (confirmCorrupt) =>
-      host.invoke(COMMANDS.gaugePairBegin, { confirmCorrupt: confirmCorrupt === true }),
     onStatus: (fn) => subscribe(EVENTS.status, fn),
     onLog: (fn) => subscribe(EVENTS.log, fn),
     onExit: (fn) => subscribe(EVENTS.exit, fn),
@@ -268,10 +264,6 @@ function createStubBridge() {
         stub.config = { exists: true, path: result.path || DEFAULT_STUB_PATH, config, raw: clone(config) };
       }
       return clone(result);
-    },
-    async beginGaugePairing(confirmCorrupt) {
-      record('beginGaugePairing', [confirmCorrupt === true]);
-      return { ok: true, code: '12345678', expiresAt: Date.now() + 120000 };
     },
     async getConfigPath() {
       record('getConfigPath', []);

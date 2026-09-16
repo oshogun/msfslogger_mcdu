@@ -2,13 +2,11 @@
 
 mod config;
 mod framing;
-mod gauge_sync;
 mod protocol;
 mod restart;
 mod supervisor;
 
 use config::{lock, ConfigStore};
-use gauge_sync::{GaugeEventHub, GaugeService};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use supervisor::{Event, Operation, Supervisor};
@@ -75,26 +73,10 @@ fn status_get(state: State<'_, Supervisor>) -> Option<Value> {
     lock(&state.snapshot).status.clone()
 }
 
-#[tauri::command]
-fn gauge_pair_begin(confirm_corrupt: Option<bool>, state: State<'_, GaugeService>) -> Value {
-    state
-        .authorization
-        .begin_pairing(gauge_sync::normalize_confirm_corrupt(confirm_corrupt))
-}
-
-#[tauri::command]
-fn gauge_revoke(state: State<'_, GaugeService>) -> Result<(), String> {
-    state
-        .revoke()
-        .map_err(|_| "Cannot revoke gauge authorization".into())
-}
-
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
-            let gauge_events = Arc::new(GaugeEventHub::default());
-            let gauge_sink = gauge_events.clone();
             let resource = app
                 .path()
                 .resolve(
@@ -103,29 +85,19 @@ fn main() {
                 )
                 .ok();
             let config_path = config::resolve_path().map_err(std::io::Error::other)?;
-            let sink = Arc::new(move |event: Event| {
-                gauge_sink.publish(event.clone());
-                match event {
-                    Event::Status(value) => {
-                        let _ = handle.emit("sidecar:status", value);
-                    }
-                    Event::Log(value) => {
-                        let _ = handle.emit("sidecar:log", value);
-                    }
-                    Event::Exit(value) => {
-                        let _ = handle.emit("sidecar:exit", value);
-                    }
+            let sink = Arc::new(move |event: Event| match event {
+                Event::Status(value) => {
+                    let _ = handle.emit("sidecar:status", value);
+                }
+                Event::Log(value) => {
+                    let _ = handle.emit("sidecar:log", value);
+                }
+                Event::Exit(value) => {
+                    let _ = handle.emit("sidecar:exit", value);
                 }
             });
             let supervisor = Supervisor::new(ConfigStore::new(config_path), resource, sink)
                 .map_err(std::io::Error::other)?;
-            match GaugeService::start(supervisor.clone(), gauge_events) {
-                Ok(service) => app.manage(service),
-                Err(message) => {
-                    eprintln!("[gauge-sync] {message}");
-                    false
-                }
-            };
             app.manage(supervisor);
             Ok(())
         })
@@ -136,9 +108,7 @@ fn main() {
             uplink_start,
             uplink_stop,
             sidecar_restart,
-            status_get,
-            gauge_pair_begin,
-            gauge_revoke
+            status_get
         ])
         .build(tauri::generate_context!())
         .expect("Cannot initialize msfslogger desktop shell");
@@ -149,9 +119,6 @@ fn main() {
         }
         | tauri::RunEvent::ExitRequested { .. }
         | tauri::RunEvent::Exit => {
-            if let Some(service) = handle.try_state::<GaugeService>() {
-                service.shutdown();
-            }
             if let Some(supervisor) = handle.try_state::<Supervisor>() {
                 supervisor.shutdown();
             }

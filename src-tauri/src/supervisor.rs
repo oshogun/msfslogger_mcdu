@@ -130,8 +130,8 @@ impl Supervisor {
     }
 }
 
-// Supervisor is cloned into the gauge service, so stop-on-drop lives on the
-// shared worker handle: only the last clone going away stops the sidecar.
+// The supervisor is cloneable, so stop-on-drop lives on the shared worker
+// handle: only the last clone going away stops the sidecar.
 struct WorkerHandle {
     stopping: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,

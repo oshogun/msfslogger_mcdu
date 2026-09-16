@@ -1,7 +1,7 @@
 // Live proof that a host other than Tauri or the built-in stub can drive the
 // real panel with no page-code changes. Serves ui/ from a scratch port on
 // 127.0.0.1 (never 3000), installs a synthetic host adapter through the same
-// window.__FMC_HOST__ seam a real gauge would use, and drives the pages with
+// window.__FMC_HOST__ seam every host uses, and drives the pages with
 // real clicks and keyboard input. Takes no output directory and writes no
 // screenshots or other artifacts; there is nothing to override on argv.
 import assert from 'node:assert/strict';

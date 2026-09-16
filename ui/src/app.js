@@ -17,7 +17,6 @@
 
 import bridge from './bridge.js';
 import * as statusPage from './pages/status-page.js';
-import * as pairPage from './pages/pair-page.js';
 import { defaultStatus } from './status.js';
 
 const MAX_SCRATCHPAD_CHARS = 4096;
@@ -167,7 +166,7 @@ async function showPage(id) {
     }
   }
 
-  // Coherent GT, the MSFS panel engine, has no replaceChildren(); a throw here
+  // Cleared child by child rather than with replaceChildren(): a throw here
   // would leave no current page and freeze the display.
   if (dom.body) while (dom.body.firstChild) dom.body.removeChild(dom.body.firstChild);
   if (state.pageId !== id) setScratchpad('');
@@ -230,7 +229,6 @@ const MENU_ITEMS = [
   { lsk: 'L2', label: '<NETWORK', page: 'NETWORK' },
   { lsk: 'L3', label: '<SIM', page: 'SIM' },
   { lsk: 'L4', label: '<TRAFFIC', page: 'TRAFFIC' },
-  { lsk: 'L5', label: '<GAUGE PAIR', page: 'PAIR' },
 ];
 
 registerPage({
@@ -294,8 +292,8 @@ function paintStatus() {
 function applyStatus(status) {
   if (!status || typeof status !== 'object') return;
   state.status = status;
-  // A host whose link came up after boot (the MSFS gauge) failed the boot-time
-  // config read; a status proves the link is up, so read it again once.
+  // A host whose link came up only after boot failed the boot-time config
+  // read; a status proves the link is up, so read it again once.
   if (!state.configLoaded && !state.configLoading) {
     state.configLoading = true;
     const done = () => { state.configLoading = false; };
@@ -492,16 +490,12 @@ function boot() {
     startUplink: () => runCommand(() => bridge.startUplink()),
     stopUplink: () => runCommand(() => bridge.stopUplink()),
     restartSidecar: () => runCommand(() => bridge.restartSidecar()),
-    // Pairing codes exist only where the desktop shell can issue them.
-    canPairGauge: typeof bridge.beginGaugePairing === 'function',
-    beginGaugePairing: (confirmCorrupt) => bridge.beginGaugePairing(confirmCorrupt),
   };
   window.FMC = fmc;
 
   wireKeys();
   paintScratchpad();
   statusPage.register(fmc);
-  pairPage.register(fmc);
   showPage('STATUS');
 
   bridge.onStatus(applyStatus);

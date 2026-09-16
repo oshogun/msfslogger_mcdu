@@ -1,0 +1,33 @@
+{
+  "_sample": "GET /api/status while FLYING with a linked leg. Only the fields the scope selector reads are load-bearing; the rest are the pre-existing body (abridged).",
+  "request": {
+    "method": "GET",
+    "path": "/api/status",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "connected": true,
+      "flightState": "FLYING",
+      "currentFlightId": 92,
+      "paused": false,
+      "pauseFlags": 0,
+      "simRunning": 2,
+      "onGround": false,
+      "aircraft": "A320",
+      "frame": null,
+      "plannedLeg": {
+        "plannedLegId": 12,
+        "tripId": 3,
+        "tripName": "EUROPE"
+      }
+    }
+  }
+}

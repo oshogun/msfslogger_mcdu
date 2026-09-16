@@ -191,8 +191,9 @@ try {
   await page.waitForFunction(() => document.getElementById('scratchpad').textContent === 'CONFIG SAVED');
   assert.equal(await saves(), before + 1);
   const saved = await page.evaluate(() => window.__FMC_STUB__.calls.findLast((call) => call.method === 'setConfig').args[0]);
+  // The stub records the token masked; that it was in the patch is what this checks.
   assert.deepEqual(saved, { version: 1, serverUrl: 'https://example.invalid:4443/a/long/CaseSensitive/path',
-    ingestToken: token, certPath: 'C:\\Certificates\\Long Mixed Case Path\\root-ca.pem', sim: 'fsx', autoUplink: true,
+    ingestToken: '••••••••', certPath: 'C:\\Certificates\\Long Mixed Case Path\\root-ca.pem', sim: 'fsx', autoUplink: true,
     trafficEnabled: false, trafficRadiusM: 1501 });
   assert.equal(await page.evaluate((token) => document.documentElement.textContent.includes(token), token), false);
   assert.equal(await page.evaluate(() => 'ingestToken' in window.__FMC_STUB__.config.config), false);

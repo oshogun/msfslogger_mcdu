@@ -1,0 +1,24 @@
+{
+  "_sample": "403: the request carried an Origin header and/or a cookie. The sidecar never sends either, so receiving this is a client bug.",
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/92/acars-messages",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "body": {
+      "canned_id": "gate-request"
+    }
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Cross-origin request rejected"
+    }
+  }
+}

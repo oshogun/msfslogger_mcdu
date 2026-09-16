@@ -102,12 +102,13 @@ try {
     else console.log('PASS page-global: no page under ui/src/pages/ mentions FMC');
   }
 
-  // page-events: no page may subscribe to host events directly.
+  // page-events: no page may subscribe to host events directly. A page's own
+  // `onDatalink` hook is a property the shell calls, never a call it makes.
   {
-    const pattern = /\.\s*(onLog|onExit)\s*\(/;
+    const pattern = /\.\s*(onLog|onExit|onDatalink)\s*\(/;
     const { violations } = scan(pageFiles, pattern, []);
     if (violations.length) fail('page-events', violations, 'the shell owns host event subscriptions');
-    else console.log('PASS page-events: no page under ui/src/pages/ subscribes to onLog/onExit');
+    else console.log('PASS page-events: no page under ui/src/pages/ subscribes to onLog/onExit/onDatalink');
   }
 
   // adapter-leak: app.js must not expose the adapter as a member of the
@@ -119,19 +120,21 @@ try {
     else console.log('PASS adapter-leak: bridge is not exposed as a member in ui/src/app.js');
   }
 
-  // interface-members: the thirteen §2.2 names must each appear as a
-  // property line in ui/src/app.js.
+  // interface-members: the thirteen original names and the nine datalink
+  // members must each appear as a property line in ui/src/app.js.
   {
     const names = [
       'registerPage', 'showPage', 'setScratchpad', 'getScratchpad', 'hasScratchpadError',
       'getConfigCache', 'getConfigPath', 'getStatus', 'refreshConfig', 'setConfig',
-      'startUplink', 'stopUplink', 'restartSidecar',
+      'startUplink', 'stopUplink', 'restartSidecar', 'getDatalinkState', 'watchDatalink',
+      'refreshDatalink', 'getDatalinkThread', 'getCannedMessages', 'sendCannedMessage',
+      'requestWeather', 'requestLoadsheet', 'setPageNumber',
     ];
     const appFile = files.find((f) => f.path === appJs);
     const lines = appFile ? appFile.body.split('\n') : [];
     const missing = names.filter((name) => !lines.some((line) => new RegExp(`^\\s*${name}[,:]`).test(line)));
     if (missing.length) fail('interface-members', [loc(appJs, 1)], `${missing.join(', ')} missing from the interface built in ui/src/app.js`);
-    else console.log('PASS interface-members: all thirteen present in ui/src/app.js');
+    else console.log('PASS interface-members: all twenty-two present in ui/src/app.js');
   }
 
   process.exitCode = failed ? 1 : 0;

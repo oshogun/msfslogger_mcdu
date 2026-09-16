@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod datalink;
 mod framing;
 mod protocol;
 mod restart;
@@ -73,6 +74,79 @@ fn status_get(state: State<'_, Supervisor>) -> Option<Value> {
     lock(&state.snapshot).status.clone()
 }
 
+#[tauri::command]
+fn datalink_state(state: State<'_, Supervisor>) -> Value {
+    state.current_datalink_state()
+}
+
+// A relayed op can wait seconds for the sidecar, so it runs off the main
+// thread. Err is reserved for the blocking task itself failing; every datalink
+// outcome, including refusals, comes back as an Ok envelope.
+async fn relay_datalink(
+    state: State<'_, Supervisor>,
+    op: &'static str,
+    params: Value,
+) -> Result<Value, String> {
+    let supervisor = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || supervisor.datalink(op, params))
+        .await
+        .map_err(|_| "Datalink relay failed".into())
+}
+
+#[tauri::command]
+async fn datalink_watch(on: bool, state: State<'_, Supervisor>) -> Result<Value, String> {
+    relay_datalink(state, "watch", json!({"on": on})).await
+}
+
+#[tauri::command]
+async fn datalink_refresh(state: State<'_, Supervisor>) -> Result<Value, String> {
+    relay_datalink(state, "refresh", json!({})).await
+}
+
+#[tauri::command]
+async fn datalink_thread(
+    epoch: u64,
+    end_seq: u64,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    relay_datalink(state, "thread", json!({"epoch": epoch, "endSeq": end_seq})).await
+}
+
+#[tauri::command]
+async fn datalink_canned(state: State<'_, Supervisor>) -> Result<Value, String> {
+    relay_datalink(state, "canned-list", json!({})).await
+}
+
+#[tauri::command]
+async fn datalink_send_canned(
+    target_kind: String,
+    target_id: u64,
+    canned_id: String,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    let params = json!({"target": {"kind": target_kind, "id": target_id}, "cannedId": canned_id});
+    relay_datalink(state, "send-canned", params).await
+}
+
+#[tauri::command]
+async fn datalink_wx(
+    target_kind: String,
+    target_id: u64,
+    icao: String,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    let params = json!({"target": {"kind": target_kind, "id": target_id}, "icao": icao});
+    relay_datalink(state, "wx", params).await
+}
+
+#[tauri::command]
+async fn datalink_loadsheet(
+    planned_leg_id: u64,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    relay_datalink(state, "loadsheet", json!({"plannedLegId": planned_leg_id})).await
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
@@ -95,6 +169,9 @@ fn main() {
                 Event::Exit(value) => {
                     let _ = handle.emit("sidecar:exit", value);
                 }
+                Event::Datalink(value) => {
+                    let _ = handle.emit("sidecar:datalink", value);
+                }
             });
             let supervisor = Supervisor::new(ConfigStore::new(config_path), resource, sink)
                 .map_err(std::io::Error::other)?;
@@ -108,7 +185,15 @@ fn main() {
             uplink_start,
             uplink_stop,
             sidecar_restart,
-            status_get
+            status_get,
+            datalink_state,
+            datalink_watch,
+            datalink_refresh,
+            datalink_thread,
+            datalink_canned,
+            datalink_send_canned,
+            datalink_wx,
+            datalink_loadsheet
         ])
         .build(tauri::generate_context!())
         .expect("Cannot initialize msfslogger desktop shell");

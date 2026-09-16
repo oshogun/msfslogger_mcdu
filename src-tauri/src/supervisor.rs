@@ -1,5 +1,6 @@
 use crate::{
     config::{lock, ConfigStore},
+    datalink::{self, DatalinkRelay},
     framing::{self, Line},
     protocol::{self, DecodeError},
     restart::{RestartBudget, RESTART_DELAY, SHUTDOWN_GRACE},
@@ -24,15 +25,23 @@ pub enum Event {
     Status(Value),
     Log(Value),
     Exit(Value),
+    Datalink(Value),
 }
 pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Operation {
     Start,
     Stop,
     Restart,
     Reload,
+    Datalink { id: String, line: String },
+}
+
+/// What the stdin writer thread sends to the sidecar, one line per item.
+enum Input {
+    Control(&'static str),
+    Line(String),
 }
 
 #[derive(Default)]
@@ -40,6 +49,7 @@ pub struct Snapshot {
     pub status: Option<Value>,
     pub hello: Option<Value>,
     pub pong: Option<Value>,
+    pub datalink: Option<Value>,
     logs: VecDeque<Value>,
 }
 
@@ -49,6 +59,8 @@ pub struct Supervisor {
     pub snapshot: Arc<Mutex<Snapshot>>,
     requests: SyncSender<Operation>,
     stopping: Arc<AtomicBool>,
+    sink: EventSink,
+    relay: Arc<DatalinkRelay>,
     worker: Arc<WorkerHandle>,
 }
 
@@ -74,13 +86,15 @@ impl Supervisor {
             ..Snapshot::default()
         }));
         let stopping = Arc::new(AtomicBool::new(false));
+        let relay = Arc::new(DatalinkRelay::default());
         let (requests, receiver) = mpsc::sync_channel(64);
         let (lines, stream) = mpsc::sync_channel(128);
         let mut worker = Worker {
             config: config.clone(),
             snapshot: snapshot.clone(),
             stopping: stopping.clone(),
-            sink,
+            sink: sink.clone(),
+            relay: relay.clone(),
             resource_entry,
             child: None,
             input: None,
@@ -109,6 +123,8 @@ impl Supervisor {
             snapshot,
             requests,
             stopping: stopping.clone(),
+            sink,
+            relay,
             worker: Arc::new(WorkerHandle {
                 stopping,
                 thread: Mutex::new(Some(thread)),
@@ -127,6 +143,107 @@ impl Supervisor {
 
     pub fn shutdown(&self) {
         self.worker.shutdown();
+    }
+
+    /// Relays one datalink op to the sidecar and waits for its answer. Always
+    /// returns an envelope, and never waits longer than the relay deadline.
+    pub fn datalink(&self, op: &str, params: Value) -> Value {
+        let mut envelope = self.relay_datalink(op, params);
+        self.config.redact(&mut envelope);
+        envelope
+    }
+
+    fn relay_datalink(&self, op: &str, params: Value) -> Value {
+        if self.stopping.load(Ordering::Acquire) {
+            return datalink::error_envelope("sidecar-unavailable");
+        }
+        let refused = {
+            let mut snapshot = lock(&self.snapshot);
+            let state = match snapshot.hello.as_ref() {
+                None => Some(datalink::STATE_UNAVAILABLE),
+                Some(hello) if !datalink::supports_datalink(hello) => {
+                    Some(datalink::STATE_OUTDATED)
+                }
+                Some(_) => None,
+            };
+            state.map(|state| {
+                let current = snapshot
+                    .datalink
+                    .as_ref()
+                    .is_some_and(|value| value["state"] == state);
+                let synthetic = (!current).then(|| datalink::synthetic_state(state));
+                if synthetic.is_some() {
+                    snapshot.datalink = synthetic.clone();
+                }
+                (state, synthetic)
+            })
+        };
+        if let Some((state, synthetic)) = refused {
+            if let Some(value) = synthetic {
+                (self.sink)(Event::Datalink(value));
+            }
+            return datalink::error_envelope(if state == datalink::STATE_OUTDATED {
+                "sidecar-outdated"
+            } else {
+                "sidecar-unavailable"
+            });
+        }
+        if !datalink::valid_params(op, &params) {
+            return datalink::error_envelope("bad-request");
+        }
+        let (id, reply) = match self.relay.register() {
+            Ok(registered) => registered,
+            Err(busy) => return busy,
+        };
+        let Some(line) = datalink::request_line(&id, op, &params) else {
+            self.relay.abandon(&id);
+            return datalink::error_envelope("bad-request");
+        };
+        let queued = Operation::Datalink {
+            id: id.clone(),
+            line,
+        };
+        if self.requests.try_send(queued).is_err() {
+            self.relay.abandon(&id);
+            return datalink::error_envelope("busy");
+        }
+        match reply.recv_timeout(datalink::REQUEST_TIMEOUT) {
+            Ok(envelope) => envelope,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.relay.abandon(&id);
+                // An answer that landed between the timeout and the abandon
+                // is still the right answer.
+                if let Ok(envelope) = reply.try_recv() {
+                    return envelope;
+                }
+                record_log(
+                    &self.config,
+                    &self.snapshot,
+                    &self.sink,
+                    "warn",
+                    "Datalink request timed out",
+                );
+                datalink::error_envelope("shell-timeout")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => datalink::error_envelope("sidecar-exited"),
+        }
+    }
+
+    /// The latest datalink state, without waiting on the sidecar.
+    pub fn current_datalink_state(&self) -> Value {
+        let snapshot = lock(&self.snapshot);
+        let mut value = match (snapshot.datalink.as_ref(), snapshot.hello.as_ref()) {
+            (Some(state), _) => state.clone(),
+            (None, None) => datalink::synthetic_state(datalink::STATE_UNAVAILABLE),
+            (None, Some(hello)) if !datalink::supports_datalink(hello) => {
+                datalink::synthetic_state(datalink::STATE_OUTDATED)
+            }
+            // A current sidecar whose own first state has not arrived yet.
+            (None, Some(_)) => Value::Null,
+        };
+        drop(snapshot);
+        self.config.redact(&mut value);
+        value
     }
 }
 
@@ -164,9 +281,10 @@ struct Worker {
     snapshot: Arc<Mutex<Snapshot>>,
     stopping: Arc<AtomicBool>,
     sink: EventSink,
+    relay: Arc<DatalinkRelay>,
     resource_entry: Option<PathBuf>,
     child: Option<Child>,
-    input: Option<SyncSender<&'static str>>,
+    input: Option<SyncSender<Input>>,
     generation: u64,
     lines: SyncSender<StreamLine>,
     stream: Receiver<StreamLine>,
@@ -221,7 +339,9 @@ impl Worker {
                     Ok(Some(status)) => {
                         self.child.take();
                         self.input.take();
+                        let exited = self.generation;
                         self.generation += 1;
+                        self.datalink_lost(exited);
                         self.unexpected_exit(status);
                     }
                     Ok(None) => {}
@@ -241,6 +361,13 @@ impl Worker {
         }
         self.restart_at = None;
         self.terminate();
+        // Requests still queued behind the stop would otherwise wait out the
+        // whole relay deadline for a worker that is gone.
+        while let Ok(operation) = requests.try_recv() {
+            if let Operation::Datalink { id, .. } = operation {
+                self.relay.fail_unbound(&id, "sidecar-unavailable");
+            }
+        }
     }
 
     fn apply(&mut self, operation: Operation) {
@@ -286,6 +413,17 @@ impl Worker {
                     self.control("config");
                 } else if self.restart_at.is_none() {
                     self.synthetic("app.crashed");
+                }
+            }
+            Operation::Datalink { id, line } => {
+                let Some(input) = self.input.as_ref().filter(|_| self.child.is_some()) else {
+                    self.relay.fail_unbound(&id, "sidecar-unavailable");
+                    return;
+                };
+                if input.try_send(Input::Line(line)).is_err() {
+                    self.relay.fail_unbound(&id, "busy");
+                } else {
+                    self.relay.bind_generation(&id, self.generation);
                 }
             }
         }
@@ -458,18 +596,14 @@ impl Worker {
     }
 
     fn writer(&mut self, mut stdin: std::process::ChildStdin) -> std::io::Result<()> {
-        let (sender, receiver) = mpsc::sync_channel::<&'static str>(8);
+        // Room for every pending datalink line plus controls, so a burst of
+        // datalink requests never starves START/STOP.
+        let (sender, receiver) = mpsc::sync_channel::<Input>(16);
         thread::Builder::new()
             .name("sidecar-stdin".into())
             .spawn(move || {
-                for kind in receiver {
-                    if writeln!(stdin, "{}", json!({"v":1,"type":kind}))
-                        .and_then(|_| stdin.flush())
-                        .is_err()
-                    {
-                        break;
-                    }
-                    if kind == "shutdown" {
+                for input in receiver {
+                    if !matches!(write_input(&mut stdin, &input), Ok(true)) {
                         break;
                     }
                 }
@@ -484,7 +618,7 @@ impl Worker {
         if self
             .input
             .as_ref()
-            .is_some_and(|input| input.try_send(kind).is_err())
+            .is_some_and(|input| input.try_send(Input::Control(kind)).is_err())
         {
             self.log(
                 "warn",
@@ -518,8 +652,18 @@ impl Worker {
                 match value["type"].as_str() {
                     Some("status") if current => self.status(value),
                     Some("log") => self.log_value(value),
-                    Some("hello") if current => lock(&self.snapshot).hello = Some(value),
+                    Some("hello") if current => self.hello(value),
                     Some("pong") if current => lock(&self.snapshot).pong = Some(value),
+                    // A response is matched by id and by the generation it was
+                    // sent to, so one from a replaced sidecar is simply unknown.
+                    Some("datalink-response") => {
+                        let envelope = datalink::response_envelope(&value);
+                        let id = value["id"].as_str().unwrap_or_default();
+                        if !self.relay.complete(id, line.generation, envelope) {
+                            self.log("warn", "Dropped datalink response with an unknown id");
+                        }
+                    }
+                    Some("datalink-state") if current => self.set_datalink_state(value),
                     _ => {} // Reserved messages have no webview events yet.
                 }
             }
@@ -534,6 +678,31 @@ impl Worker {
             Err(DecodeError::UnknownType) => {}
             Err(_) => self.log("warn", "Dropped malformed or non-JSON sidecar message"),
         }
+    }
+
+    fn hello(&self, value: Value) {
+        let supported = datalink::supports_datalink(&value);
+        let mut snapshot = lock(&self.snapshot);
+        snapshot.hello = Some(value);
+        if supported {
+            // The sidecar reports its own datalink state right after hello.
+            snapshot.datalink = None;
+        } else {
+            drop(snapshot);
+            self.set_datalink_state(datalink::synthetic_state(datalink::STATE_OUTDATED));
+        }
+    }
+
+    fn set_datalink_state(&self, value: Value) {
+        lock(&self.snapshot).datalink = Some(value.clone());
+        (self.sink)(Event::Datalink(value));
+    }
+
+    /// Everything waiting on the sidecar that just went away is answered now
+    /// rather than at the relay deadline.
+    fn datalink_lost(&self, generation: u64) {
+        self.relay.fail_generation(generation);
+        self.set_datalink_state(datalink::synthetic_state(datalink::STATE_UNAVAILABLE));
     }
 
     fn status(&self, value: Value) {
@@ -556,26 +725,11 @@ impl Worker {
     }
 
     fn log(&self, level: &str, text: &str) {
-        let message = self.config.redact_text(text);
-        // Also visible in the `cargo tauri dev` terminal itself, not just the
-        // webview's one-line scratchpad — the scratchpad only ever shows the
-        // latest message, so a fast crash loop's real cause is otherwise gone
-        // by the time anyone looks at the window.
-        eprintln!("[sidecar:{level}] {message}");
-        self.log_value(
-            json!({"v":1, "type":"log", "at":protocol::now(), "level":level, "message":message}),
-        );
+        record_log(&self.config, &self.snapshot, &self.sink, level, text);
     }
 
     fn log_value(&self, value: Value) {
-        {
-            let mut cache = lock(&self.snapshot);
-            if cache.logs.len() == 200 {
-                cache.logs.pop_front();
-            }
-            cache.logs.push_back(value.clone());
-        }
-        (self.sink)(Event::Log(value));
+        record_log_value(&self.snapshot, &self.sink, value);
     }
 
     fn unexpected_exit(&mut self, status: ExitStatus) {
@@ -610,14 +764,16 @@ impl Worker {
 
     fn terminate(&mut self) {
         if let Some(mut child) = self.child.take() {
+            let exited = self.generation;
             self.generation += 1;
             // Queue graceful shutdown, close the input queue (the writer then
             // closes stdin/EOF), and enforce a two-second kill deadline. Input
             // writes run separately so a child that stops reading cannot block
             // window close. Child::kill uses TerminateProcess on Windows.
             if let Some(input) = self.input.take() {
-                let _ = input.try_send("shutdown");
+                let _ = input.try_send(Input::Control("shutdown"));
             }
+            self.datalink_lost(exited);
             let deadline = Instant::now() + SHUTDOWN_GRACE;
             loop {
                 match child.try_wait() {
@@ -635,6 +791,53 @@ impl Worker {
             }
         }
     }
+}
+
+/// Writes one queued item; false means the writer is done after this line.
+fn write_input(out: &mut impl Write, input: &Input) -> std::io::Result<bool> {
+    match input {
+        Input::Control(kind) => {
+            writeln!(out, "{}", json!({"v":1,"type":kind}))?;
+            out.flush()?;
+            Ok(*kind != "shutdown")
+        }
+        Input::Line(line) => {
+            writeln!(out, "{line}")?;
+            out.flush()?;
+            Ok(true)
+        }
+    }
+}
+
+fn record_log(
+    config: &ConfigStore,
+    snapshot: &Mutex<Snapshot>,
+    sink: &EventSink,
+    level: &str,
+    text: &str,
+) {
+    let message = config.redact_text(text);
+    // Also visible in the `cargo tauri dev` terminal itself, not just the
+    // webview's one-line scratchpad — the scratchpad only ever shows the
+    // latest message, so a fast crash loop's real cause is otherwise gone
+    // by the time anyone looks at the window.
+    eprintln!("[sidecar:{level}] {message}");
+    record_log_value(
+        snapshot,
+        sink,
+        json!({"v":1, "type":"log", "at":protocol::now(), "level":level, "message":message}),
+    );
+}
+
+fn record_log_value(snapshot: &Mutex<Snapshot>, sink: &EventSink, value: Value) {
+    {
+        let mut cache = lock(snapshot);
+        if cache.logs.len() == 200 {
+            cache.logs.pop_front();
+        }
+        cache.logs.push_back(value.clone());
+    }
+    sink(Event::Log(value));
 }
 
 impl Drop for Worker {
@@ -703,7 +906,7 @@ mod tests {
             let captured = events.clone();
             let sink = Arc::new(move |event| {
                 let value = match event {
-                    Event::Status(v) | Event::Log(v) | Event::Exit(v) => v,
+                    Event::Status(v) | Event::Log(v) | Event::Exit(v) | Event::Datalink(v) => v,
                 };
                 lock(&captured).push(value);
             });
@@ -852,5 +1055,345 @@ mod tests {
         assert!(lock(&fixture.events)
             .iter()
             .any(|e| e.get("restartsRemaining") == Some(&json!(4))));
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+
+    #[test]
+    fn control_messages_are_written_byte_for_byte_as_before() {
+        let mut out = Vec::new();
+        for kind in ["start", "stop", "config", "shutdown", "ping"] {
+            let keep_going = write_input(&mut out, &Input::Control(kind)).unwrap();
+            assert_eq!(keep_going, kind != "shutdown");
+        }
+        // Recorded from the writer before datalink lines shared its queue.
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "{\"type\":\"start\",\"v\":1}\n{\"type\":\"stop\",\"v\":1}\n{\"type\":\"config\",\"v\":1}\n{\"type\":\"shutdown\",\"v\":1}\n{\"type\":\"ping\",\"v\":1}\n"
+        );
+        let mut out = Vec::new();
+        assert!(write_input(&mut out, &Input::Line("{\"v\":1}".into())).unwrap());
+        assert_eq!(out, b"{\"v\":1}\n");
+    }
+}
+
+// Runs the Python fixture as the sidecar, on every platform, so the relay is
+// exercised against a real child process and real pipes.
+#[cfg(test)]
+mod datalink_process_tests {
+    use super::*;
+    use std::{fs, sync::atomic::AtomicUsize};
+
+    const SENTINEL: &str = "SENTINEL-DATALINK-TOKEN-0000";
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn python_path() -> &'static str {
+        if cfg!(windows) {
+            "python"
+        } else {
+            "/usr/bin/python3"
+        }
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        supervisor: Supervisor,
+        events: Arc<Mutex<Vec<(&'static str, Value)>>>,
+    }
+
+    impl Fixture {
+        fn new(mode: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "msfslogger-datalink-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::SeqCst)
+            ));
+            fs::create_dir_all(root.join("dist")).unwrap();
+            let entry = root.join("dist").join("index.js");
+            fs::write(&entry, include_str!("../tests/fake-sidecar.py")).unwrap();
+            let config = ConfigStore::new(root.join("config.json"));
+            config
+                .save(
+                    json!({"nodePath":python_path(), "autoUplink":false, "datalinkMode":mode,
+                    "serverUrl":"http://127.0.0.1:1", "ingestToken":SENTINEL}),
+                )
+                .unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let sink = Arc::new(move |event| {
+                let recorded = match event {
+                    Event::Status(v) => ("status", v),
+                    Event::Log(v) => ("log", v),
+                    Event::Exit(v) => ("exit", v),
+                    Event::Datalink(v) => ("datalink", v),
+                };
+                lock(&captured).push(recorded);
+            });
+            let supervisor = Supervisor::new(config, Some(entry), sink).unwrap();
+            let fixture = Self {
+                root,
+                supervisor,
+                events,
+            };
+            fixture.wait(|| fixture.app_state() == "app.stopped", 10);
+            fixture
+        }
+
+        fn wait(&self, predicate: impl Fn() -> bool, seconds: u64) {
+            let deadline = Instant::now() + Duration::from_secs(seconds);
+            while !predicate() {
+                assert!(
+                    Instant::now() < deadline,
+                    "Timed out waiting for fixture state"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn app_state(&self) -> String {
+            lock(&self.supervisor.snapshot).status.as_ref().unwrap()["app"]["state"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+
+        fn backend(&self) -> Value {
+            lock(&self.supervisor.snapshot).status.as_ref().unwrap()["backend"].clone()
+        }
+
+        fn count(&self, kind: &str) -> usize {
+            lock(&self.events)
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .count()
+        }
+
+        fn has_log(&self, message: &str) -> bool {
+            lock(&self.events)
+                .iter()
+                .any(|(kind, v)| *kind == "log" && v["message"] == message)
+        }
+
+        fn has_datalink_state(&self, state: &str) -> bool {
+            lock(&self.events)
+                .iter()
+                .any(|(kind, v)| *kind == "datalink" && v["state"] == state)
+        }
+
+        // One control type per line, whatever newline the platform wrote.
+        fn controls(&self) -> Vec<String> {
+            fs::read_to_string(self.root.join("controls"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        fn timed(&self, op: &str, params: Value) -> (Value, Duration) {
+            let started = Instant::now();
+            let envelope = self.supervisor.datalink(op, params);
+            (envelope, started.elapsed())
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.supervisor.shutdown();
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn code(envelope: &Value) -> &str {
+        envelope["error"]["code"].as_str().unwrap_or_default()
+    }
+
+    #[test]
+    fn a_request_resolves_with_the_response_carrying_its_id() {
+        let fixture = Fixture::new("answer");
+        fixture.wait(|| fixture.has_datalink_state("dl.idle"), 5);
+        let backend = fixture.backend();
+        let statuses = fixture.count("status");
+        let (envelope, _) = fixture.timed("watch", json!({"on":true}));
+        assert_eq!(envelope, json!({"ok":true, "result":{"echo":"watch"}}));
+        let (envelope, _) = fixture.timed(
+            "wx",
+            json!({"target":{"kind":"leg","id":12}, "icao":"LFPG"}),
+        );
+        assert_eq!(envelope, json!({"ok":true, "result":{"echo":"wx"}}));
+        fixture.wait(|| fixture.has_datalink_state("dl.ok"), 5);
+        assert_eq!(
+            fixture.supervisor.current_datalink_state()["state"],
+            "dl.ok"
+        );
+        assert_eq!(fixture.controls(), ["datalink-request", "datalink-request"]);
+        // Invalid params never reach the sidecar.
+        let (envelope, elapsed) = fixture.timed(
+            "send-canned",
+            json!({"target":{"kind":"flight","id":1}, "cannedId":"gate-request", "body":"FREE TEXT"}),
+        );
+        assert_eq!(code(&envelope), "bad-request");
+        assert!(elapsed < Duration::from_secs(1));
+        assert_eq!(fixture.controls(), ["datalink-request", "datalink-request"]);
+        assert_eq!(fixture.backend(), backend);
+        assert_eq!(fixture.count("status"), statuses);
+    }
+
+    #[test]
+    fn datalink_errors_never_move_the_backend_status() {
+        let fixture = Fixture::new("answer-error");
+        fixture.wait(|| fixture.has_datalink_state("dl.idle"), 5);
+        let backend = fixture.backend();
+        let statuses = fixture.count("status");
+        let (envelope, _) = fixture.timed("loadsheet", json!({"plannedLegId":12}));
+        assert_eq!(
+            envelope,
+            json!({"ok":false, "error":{"code":"no-dispatch-data", "httpStatus":409, "serverCode":"NO_DISPATCH_DATA"}})
+        );
+        fixture.wait(|| fixture.has_datalink_state("dl.unavailable"), 5);
+        assert_eq!(fixture.backend(), backend);
+        assert_eq!(fixture.count("status"), statuses);
+        assert_eq!(fixture.backend()["state"], "net.idle");
+    }
+
+    #[test]
+    fn a_response_with_an_unknown_id_is_dropped_without_its_payload() {
+        let fixture = Fixture::new("wrong-id");
+        fixture.wait(|| fixture.has_datalink_state("dl.idle"), 5);
+        let backend = fixture.backend();
+        let (envelope, elapsed) = fixture.timed("refresh", json!({}));
+        assert_eq!(code(&envelope), "shell-timeout");
+        assert!(elapsed >= datalink::REQUEST_TIMEOUT);
+        assert!(elapsed < datalink::REQUEST_TIMEOUT + Duration::from_secs(1));
+        assert!(fixture.has_log("Dropped datalink response with an unknown id"));
+        assert!(fixture.has_log("Datalink request timed out"));
+        let logs = serde_json::to_string(&*lock(&fixture.events)).unwrap();
+        assert!(!logs.contains("dl-999999"));
+        assert!(!logs.contains("echo"));
+        assert_eq!(fixture.backend(), backend);
+    }
+
+    #[test]
+    fn an_ignored_request_times_out_and_the_pending_bound_refuses_the_ninth() {
+        let fixture = Fixture::new("ignore");
+        fixture.wait(|| lock(&fixture.supervisor.snapshot).hello.is_some(), 5);
+        let backend = fixture.backend();
+        let waiting: Vec<_> = (0..datalink::PENDING_MAX)
+            .map(|_| {
+                let supervisor = fixture.supervisor.clone();
+                thread::spawn(move || {
+                    let started = Instant::now();
+                    (supervisor.datalink("refresh", json!({})), started.elapsed())
+                })
+            })
+            .collect();
+        fixture.wait(
+            || fixture.supervisor.relay.pending() == datalink::PENDING_MAX,
+            5,
+        );
+        let (envelope, elapsed) = fixture.timed("canned-list", json!({}));
+        assert_eq!(code(&envelope), "busy");
+        assert!(elapsed < Duration::from_secs(1));
+        for waiter in waiting {
+            let (envelope, elapsed) = waiter.join().unwrap();
+            assert_eq!(code(&envelope), "shell-timeout");
+            assert!(elapsed < datalink::REQUEST_TIMEOUT + Duration::from_secs(1));
+        }
+        assert_eq!(fixture.supervisor.relay.pending(), 0);
+        // The supervisor is still serving everything else.
+        assert!(lock(&fixture.supervisor.snapshot).status.is_some());
+        assert_eq!(fixture.backend(), backend);
+        fixture.supervisor.request(Operation::Start).unwrap();
+        fixture.wait(|| fixture.app_state() == "app.running", 5);
+        assert_eq!(
+            fixture
+                .controls()
+                .iter()
+                .filter(|c| *c == "datalink-request")
+                .count(),
+            datalink::PENDING_MAX
+        );
+    }
+
+    #[test]
+    fn a_sidecar_exit_fails_the_pending_request_promptly() {
+        let fixture = Fixture::new("exit-on-request");
+        fixture.wait(|| fixture.has_datalink_state("dl.idle"), 5);
+        let (envelope, elapsed) = fixture.timed("watch", json!({"on":true}));
+        assert_eq!(code(&envelope), "sidecar-exited");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        fixture.wait(
+            || fixture.has_datalink_state(datalink::STATE_UNAVAILABLE),
+            5,
+        );
+        assert_eq!(fixture.supervisor.relay.pending(), 0);
+    }
+
+    #[test]
+    fn a_restart_fails_the_pending_request_promptly() {
+        let fixture = Fixture::new("ignore");
+        fixture.wait(|| lock(&fixture.supervisor.snapshot).hello.is_some(), 5);
+        let supervisor = fixture.supervisor.clone();
+        let waiter = thread::spawn(move || {
+            let started = Instant::now();
+            (supervisor.datalink("refresh", json!({})), started.elapsed())
+        });
+        fixture.wait(
+            || fixture.controls().iter().any(|c| c == "datalink-request"),
+            5,
+        );
+        fixture.supervisor.request(Operation::Restart).unwrap();
+        let (envelope, elapsed) = waiter.join().unwrap();
+        assert_eq!(code(&envelope), "sidecar-exited");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        fixture.wait(
+            || fixture.has_datalink_state(datalink::STATE_UNAVAILABLE),
+            5,
+        );
+    }
+
+    #[test]
+    fn a_sidecar_without_the_feature_is_refused_without_a_request() {
+        let fixture = Fixture::new("no-features");
+        fixture.wait(|| fixture.has_datalink_state(datalink::STATE_OUTDATED), 5);
+        assert_eq!(
+            fixture.supervisor.current_datalink_state()["state"],
+            datalink::STATE_OUTDATED
+        );
+        for (op, params) in [
+            ("watch", json!({"on":true})),
+            ("thread", json!({"epoch":1, "endSeq":0})),
+            ("loadsheet", json!({"plannedLegId":12})),
+        ] {
+            let (envelope, elapsed) = fixture.timed(op, params);
+            assert_eq!(code(&envelope), "sidecar-outdated");
+            assert!(elapsed < Duration::from_secs(1));
+        }
+        // The sidecar is reading stdin, so an absent line means none was sent.
+        fixture.supervisor.request(Operation::Start).unwrap();
+        fixture.wait(|| fixture.app_state() == "app.running", 5);
+        assert_eq!(fixture.controls(), ["start"]);
+        assert_eq!(fixture.count("datalink"), 1);
+    }
+
+    #[test]
+    fn the_ingest_token_never_leaves_the_shell() {
+        let fixture = Fixture::new("echo-token");
+        fixture.wait(|| fixture.has_datalink_state("dl.idle"), 5);
+        let (envelope, _) = fixture.timed("canned-list", json!({}));
+        assert_eq!(envelope["ok"], true);
+        assert_eq!(envelope["result"]["note"], "token [REDACTED]");
+        fixture.wait(|| fixture.has_datalink_state("dl.ok"), 5);
+        let state = fixture.supervisor.current_datalink_state();
+        assert_eq!(state["scope"]["note"], "[REDACTED]");
+        let events = serde_json::to_string(&*lock(&fixture.events)).unwrap();
+        let logs = serde_json::to_string(&lock(&fixture.supervisor.snapshot).logs).unwrap();
+        for output in [envelope.to_string(), state.to_string(), events, logs] {
+            assert!(!output.contains(SENTINEL));
+        }
+        // The fixture also echoes the token in a log line and on stderr.
+        assert!(fixture.has_log("redact [REDACTED]"));
     }
 }

@@ -20,6 +20,14 @@ iframe { display: block; width: 600px; height: 900px; max-width: 100%; border: 0
 <option value="unauthorized">Unauthorized</option><option value="paused">Full pause</option>
 <option value="active-pause">Active pause</option><option value="crashed">Host crash</option>
 </select></label>
+<label>Datalink <select id="datalink-scenario">
+<option value="flight">Flight scope</option><option value="leg">Leg scope</option>
+<option value="no-flight-plan">No flight plan</option><option value="pre-upgrade">Pre-upgrade server</option>
+<option value="invalid-token">Invalid token</option><option value="unreachable">Unreachable</option>
+<option value="long-taf">Long TAF</option><option value="long-route">900-char route</option>
+<option value="no-dispatch">No dispatch (409)</option><option value="canned-four">Four canned</option>
+<option value="wx-unavailable">WX unavailable</option><option value="sidecar-outdated">Sidecar outdated</option>
+</select></label>
 <label>Viewport <select id="size"><option value="600">600 px</option><option value="480">480 px</option><option value="800">800 px</option></select></label>
 <button id="reload">Reload</button><label><input type="checkbox" id="auto" checked> Reload on save</label>
 <p>F12 opens DevTools. Select the CDU iframe context to inspect <code>window.gaugeDev</code>. <span id="connection"></span></p>

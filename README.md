@@ -203,6 +203,10 @@ status line would have to hide one to show the other.
 | `ACARS CERT FAULT` | TLS handshake failed — the server's certificate isn't trusted | Fix or set the certificate path on `CFG NETWORK` |
 | `ACARS NO COMM` | Can't reach the server at all (refused, timed out, DNS failure) | Check the server is running and the URL/network path is correct |
 
+DATALINK faults never appear on this Backend line — it only ever reflects the
+flight-data/event uplink. See [DATALINK (ACARS messaging)](#datalink-acars-messaging)
+below for the separate DATALINK state line.
+
 ### Pause — what MSFS is doing right now
 
 | Label | Meaning | Operator action |
@@ -212,6 +216,102 @@ status line would have to hide one to show the other.
 | `ACTIVE PAUSE` | Active Pause (aircraft frozen, sim keeps running) | Nothing needed — same clock-stop guarantee as a full pause |
 | `SIM MENU` | Sim is frozen in a menu | Nothing needed |
 | `PAUSE {flags}` | An unrecognized pause bitmask | Informational only; the flight clock still stops for any non-zero flag |
+
+## DATALINK (ACARS messaging)
+
+DATALINK is a second, independent feature from the flight-data uplink above:
+it lets you read and send ACARS-style text messages (dispatch releases,
+free-text/canned downlinks, weather requests, loadsheets) against the
+msfslogger server, over the same connection settings. It has its own state
+line and its own vocabulary, separate from the `STATUS` page's Backend axis.
+
+### Requirements
+
+- **The msfslogger server must be on commit `9a52d2d` or later.** Before that
+  commit, DATALINK pages show `DATALINK UNAVAILABLE` (hint
+  `SERVER MAY PREDATE DATALINK`) and nothing else works on them — but this has
+  **no effect on the regular flight-data uplink**: `STATUS` keeps reading
+  `ACARS UPLINK` or `ACARS READY` as normal, never `ACARS REJECT 401`.
+- DATALINK uses the **same ingest token already set on `CFG NETWORK`** — there
+  is no separate login, token or setting to configure.
+- The token is **never shown on the CDU**, in a DATALINK page, in the sidecar
+  log, or anywhere in an event sent to the webview.
+
+### Reaching DATALINK
+
+`MENU` → `L5` `<DATALINK` opens `DL-INDEX` (`ACARS DATALINK`).
+
+### Page flow
+
+- **`DL-INDEX`** (`ACARS DATALINK`) — current scope and the DATALINK state
+  line. `L3` `<MESSAGES` → `DL-THREAD`; `L4` `<DOWNLINK` → `DL-CANNED`; `R3`
+  `WX REQUEST>` → `DL-WX`; `R4` `LOADSHEET>` → `DL-LOADSHEET`; `R6`
+  `REFRESH>` polls immediately; `L6` `<INDEX` → `MENU`.
+- **`DL-THREAD`** (`ACARS MSGS`) — the message thread for the current scope,
+  five messages per page, oldest first, opening on the newest page. `L1`–`L5`
+  open a message; `L6` `<RETURN`; `R6` `REFRESH>`.
+- **`DL-MSG`** (`ACARS MSG`) — the full text of one message, paged 10 lines at
+  a time; `L6` `<RETURN` goes back to the thread page it came from.
+- **`DL-CANNED`** (`DOWNLINK`) — the list of canned downlink messages the
+  server offers; picking one stages it and opens `DL-CONFIRM`.
+- **`DL-WX`** (`WX REQUEST`) — type an ICAO on the scratchpad, `L1` to stage
+  it, then `R6` `REQUEST>` opens `DL-CONFIRM`.
+- **`DL-WX-RESULT`** (`WX <ICAO>`) — the returned `METAR` and `TAF`, paged;
+  `L6` `<RETURN` goes back to `DL-WX`.
+- **`DL-LOADSHEET`** (`LOADSHEET`) — the last illustrative loadsheet received
+  for the current leg, or `R6` `REQUEST>` to fetch one via `DL-CONFIRM`.
+- **`DL-CONFIRM`** (`CONFIRM SEND`) — every write (canned downlink, WX
+  request, loadsheet request) stops here first. Staging it from the previous
+  page is one key press; `R6` `SEND*` here is the second, separate press that
+  actually sends it. `L6` `<CANCEL` discards it without sending anything. No
+  single key press anywhere in DATALINK sends a message by itself. Row 2
+  reads `NO PENDING REQUEST` if this page is ever reached with nothing
+  staged — not expected through normal navigation.
+
+### Polling
+
+DATALINK polls the server every 20 seconds, but **only while a DATALINK page
+is on screen** — there is no background polling and no new-message
+annunciator on other pages. It works before `START>` is pressed and
+independently of it: the ACARS uplink and DATALINK are unrelated, and
+starting or stopping one has no effect on the other.
+
+### DATALINK vocabulary
+
+**State line** (`DL-INDEX` row 4; also shown on `DL-THREAD` when no thread is
+cached yet):
+
+| CDU text | Hint | Meaning | Operator action |
+|---|---|---|---|
+| `DATALINK STANDBY` | | No DATALINK page has polled yet this session | Nothing needed |
+| `DATALINK CONNECTING` | | The first poll after opening a DATALINK page is in flight | Wait a moment |
+| `DATALINK ONLINE` | | The last poll succeeded | Nothing needed — this is the working state |
+| `DATALINK NO COMM` | | No HTTP response reached the server | Check the server is running and reachable |
+| `DATALINK CERT FAULT` | `CHECK CERTIFICATE PATH` | TLS handshake failed | Fix the certificate path on `CFG NETWORK`, L3 |
+| `DATALINK TIMEOUT` | | No response within 8 seconds | Wait for the next poll; persistent timeouts point at server load or network path |
+| `INGEST TOKEN REJECTED` | `CHECK INGEST TOKEN ON CFG NETWORK` | The server rejected the ingest token; DATALINK stops polling until the config is corrected and re-saved | Re-enter the token on `CFG NETWORK`, L2, and save |
+| `DATALINK TOKEN NOT RECEIVED` | `TOKEN HEADER LOST IN TRANSIT` | The route answered, but the token header never reached the server | Check any reverse proxy between the app and the server |
+| `DATALINK UNAVAILABLE` | `SERVER MAY PREDATE DATALINK` | The server answered, but not on a DATALINK-aware route — normal before it's on commit `9a52d2d` or later | Restart the server onto `9a52d2d` or later, when you choose to |
+| `DATALINK REJECTED 403` | | The server refused the request | Should not happen from this app; report it if seen |
+| `DATALINK FAULT {status}` | | Any other non-2xx server response | Check the server's own logs |
+| `DATALINK BAD DATA` | | The server's response wasn't valid JSON or wasn't the expected shape | Should not happen against a matching server version |
+| `DATALINK NO CONFIG` | `COMPLETE CFG NETWORK` | The sidecar has no valid config yet | Fill in `CFG NETWORK` and save |
+| `SIDECAR UPDATE REQUIRED` | `REBUILD SIDECAR THEN RESTART APP` | The running sidecar predates the DATALINK feature this shell expects | `npm --prefix sidecar run build`, then restart `cargo tauri dev` |
+| `DATALINK OFFLINE` | | No sidecar is running, or it exited with a DATALINK request pending | The shell restarts the sidecar automatically; check the app log if it persists |
+
+**Scratchpad messages** (page actions and requests):
+
+| CDU text | When |
+|---|---|
+| `NO FLIGHT PLAN` | A DATALINK action was pressed with no leg or flight resolved yet |
+| `NO LINKED LEG` | `LOADSHEET` was requested in flight scope, and the flight has no linked planned leg to request one for |
+| `NO DISPATCH DATA` | The leg has no SimBrief dispatch release on the server |
+| `INVALID ENTRY` | An empty or malformed ICAO was entered on `DL-WX` |
+| `DOWNLINK SENT` | A canned downlink send completed |
+| `LOADSHEET RECEIVED` | A loadsheet request generated new figures |
+| `LOADSHEET ON FILE` | A loadsheet request returned the same figures already on file |
+| `NOT A CANNED MESSAGE` / `UNKNOWN CANNED MESSAGE` / `FLIGHT NOT FOUND` / `PLANNED LEG NOT FOUND` / `DATALINK INVALID ID` | Server-side or scope-staleness faults; not expected from normal use of this app's own pages |
+| `DATALINK BUSY` / `DATALINK OFFLINE` / `DATALINK NOT SUPPORTED` / `DATALINK HOST FAULT` | A local fault in the relay between the webview and the sidecar, not a server response |
 
 ## Troubleshooting
 
@@ -228,6 +328,9 @@ log line.
 | MSFS not running yet | Agent logs repeated connect failures | Sim line cycles `SIM LINK CONNECTING` → `SIM LINK RETRY {ss}S`; backend line reads `ACARS READY` if the server itself is reachable, because there's nothing to send yet — that split is the tell that MSFS, not the server, is the problem |
 | Invalid entry on a config page | N/A (agent read env vars, so a bad value just failed at startup) | The scratchpad shows a one-line reason (`INVALID ENTRY`, `ENTRY OUT OF RANGE`) immediately, before it's saved; nothing is written to the config file |
 | Hand-edited `config.json` made invalid | N/A | App line reads `CONFIG INVALID`; the window stays open and usable. Fix the field named in the log/scratchpad on its CFG page, or fix the file by hand and press `RESTART>` |
+| Sidecar rebuilt/updated but the app not restarted (or vice versa) | N/A | Any `DATALINK` page reads `SIDECAR UPDATE REQUIRED` with hint `REBUILD SIDECAR THEN RESTART APP`. Fix: `npm --prefix sidecar run build`, then restart `cargo tauri dev` (or reinstall/relaunch a built app) |
+| Server predates DATALINK support | N/A | Any `DATALINK` page reads `DATALINK UNAVAILABLE` with hint `SERVER MAY PREDATE DATALINK`. The flight-data uplink (`STATUS` page) is unaffected. Fix: restart the server onto commit `9a52d2d` or later, when you choose to |
+| Wrong ingest token, DATALINK specifically | N/A | Any `DATALINK` page reads `INGEST TOKEN REJECTED` with hint `CHECK INGEST TOKEN ON CFG NETWORK`, and DATALINK stops polling until the token is corrected. Fix: re-enter the token on `CFG NETWORK`, L2, and save |
 
 ## Manual test plan (run this on the Windows box)
 

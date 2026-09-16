@@ -24,12 +24,17 @@ import {
   type EffectiveConfig,
 } from './config';
 import {
+  DATALINK_FEATURE,
   decodeControlMessage,
   describeDecodeError,
+  encodeDatalinkResponse,
   encodeSidecarMessage,
   isBlankLine,
   MAX_LINE_BYTES,
   PROTOCOL_VERSION,
+  type DatalinkError,
+  type DatalinkOutcome,
+  type DatalinkRequestMessage,
   type LogLevel,
   type SidecarMessage,
   type StatusMessage,
@@ -42,6 +47,8 @@ import {
 } from './status';
 import { SimConnectLink, type SimLinkSnapshot } from './simconnect';
 import { Uplink } from './uplink';
+import { DatalinkClient } from './datalink-client';
+import { DatalinkService } from './datalink-service';
 
 const SIDECAR_VERSION = '1.0.0';
 
@@ -119,6 +126,17 @@ class Sidecar {
   private uplink: Uplink | null = null;
   private link: SimConnectLink | null = null;
 
+  // The datalink borrows the uplink's config and CA trust and nothing else. It
+  // never reads or writes the backend axis and never starts or stops the
+  // uplink, so it works at the gate before START as well as in flight.
+  private readonly datalink = new DatalinkService({
+    client: new DatalinkClient(() => this.uplink),
+    hasConfig: () => this.config !== null,
+    token: () => this.uplink?.getConfig().ingestToken ?? null,
+    emitState: (message) => this.send(message),
+    log: (level, message) => this.log(level, message),
+  });
+
   private statusTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private probeTimer: NodeJS.Timeout | null = null;
@@ -186,7 +204,9 @@ class Sidecar {
       sidecarVersion: SIDECAR_VERSION,
       nodeVersion: process.version,
       configPath: this.configPath,
+      features: [DATALINK_FEATURE],
     });
+    this.send(this.datalink.buildState());
 
     this.heartbeatTimer = setInterval(() => this.emitStatusNow(), STATUS_HEARTBEAT_MS);
 
@@ -212,6 +232,7 @@ class Sidecar {
       } else {
         this.config = null;
       }
+      this.datalink.onConfigApplied(false);
       this.touch();
       return;
     }
@@ -237,6 +258,7 @@ class Sidecar {
     const wasRunning = this.running || (opts.initial && result.config.autoUplink);
     this.appState = wasRunning ? 'app.running' : 'app.stopped';
     if (wasRunning) this.startUplink();
+    this.datalink.onConfigApplied(true);
     this.touch();
   }
 
@@ -389,9 +411,23 @@ class Sidecar {
   }
 
   private handleLine(line: string): void {
-    if (this.shuttingDown || isBlankLine(line)) return;
+    if (isBlankLine(line)) return;
     const decoded = decodeControlMessage(line.replace(/\r$/, ''));
+    if (this.shuttingDown) {
+      // Only a datalink request still gets an answer, so the shell is not left
+      // waiting out its timeout for a process that is going away.
+      if (decoded.ok && decoded.message.type === 'datalink-request') {
+        this.respondDatalinkError(decoded.message.id, 'sidecar-unavailable');
+      }
+      return;
+    }
     if (!decoded.ok) {
+      if (decoded.error === 'bad-shape' && decoded.requestId !== undefined) {
+        // A malformed request with a usable id is answered rather than logged,
+        // so the shell does not wait out its timeout for nothing.
+        this.respondDatalinkError(decoded.requestId, 'bad-request');
+        return;
+      }
       if (decoded.error !== 'unknown-type') this.log('warn', describeDecodeError(decoded));
       return;
     }
@@ -423,7 +459,38 @@ class Sidecar {
       case 'ping':
         this.send({ v: PROTOCOL_VERSION as 1, type: 'pong', at: Date.now(), id: decoded.message.id });
         return;
+      case 'datalink-request':
+        void this.handleDatalink(decoded.message);
+        return;
     }
+  }
+
+  // ── datalink ──────────────────────────────────────────────────────────────
+
+  private async handleDatalink(request: DatalinkRequestMessage): Promise<void> {
+    let outcome: DatalinkOutcome;
+    try {
+      outcome = await this.datalink.handle(request);
+    } catch {
+      // The service is built never to throw. If it does, the shell still gets
+      // its one answer; the error is not described, as it could carry server
+      // text.
+      outcome = { ok: false, error: { code: 'bad-response', httpStatus: null, serverCode: null } };
+    }
+    this.respondDatalink(request.id, outcome);
+  }
+
+  private respondDatalinkError(id: string, code: DatalinkError['code']): void {
+    this.respondDatalink(id, { ok: false, error: { code, httpStatus: null, serverCode: null } });
+  }
+
+  /** Exactly one response per request id, and never more than one line. */
+  private respondDatalink(id: string, outcome: DatalinkOutcome): void {
+    const base = { v: PROTOCOL_VERSION as 1, type: 'datalink-response' as const, at: Date.now(), id };
+    const line = outcome.ok
+      ? encodeDatalinkResponse({ ...base, ok: true, result: outcome.result })
+      : encodeDatalinkResponse({ ...base, ok: false, error: outcome.error });
+    process.stdout.write(line);
   }
 
   async shutdown(reason: string): Promise<void> {
@@ -432,6 +499,7 @@ class Sidecar {
     this.log('info', `Shutting down (${reason})`);
 
     const disconnected = this.stopUplink();
+    this.datalink.shutdown();
     if (this.statusTimer) clearTimeout(this.statusTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.statusTimer = null;

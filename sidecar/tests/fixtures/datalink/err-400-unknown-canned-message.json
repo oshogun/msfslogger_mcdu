@@ -1,0 +1,25 @@
+{
+  "_sample": "400 UNKNOWN_CANNED_MESSAGE: the id left the server set between list and send.",
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/92/acars-messages",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "body": {
+      "canned_id": "retired-message"
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "canned_id must be one of: wx-request, gate-request, request-pushback",
+      "code": "UNKNOWN_CANNED_MESSAGE"
+    }
+  }
+}

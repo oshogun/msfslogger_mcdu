@@ -30,6 +30,14 @@ const COMMANDS = {
   uplinkStop: 'uplink_stop',
   sidecarRestart: 'sidecar_restart',
   statusGet: 'status_get',
+  datalinkState: 'datalink_state',
+  datalinkWatch: 'datalink_watch',
+  datalinkRefresh: 'datalink_refresh',
+  datalinkThread: 'datalink_thread',
+  datalinkCanned: 'datalink_canned',
+  datalinkSendCanned: 'datalink_send_canned',
+  datalinkWx: 'datalink_wx',
+  datalinkLoadsheet: 'datalink_loadsheet',
 };
 
 /** Event names the shell emits into the webview. */
@@ -37,6 +45,7 @@ const EVENTS = {
   status: 'sidecar:status',
   log: 'sidecar:log',
   exit: 'sidecar:exit',
+  datalink: 'sidecar:datalink',
 };
 
 const DEFAULT_STUB_PATH = 'C:\\Users\\<you>\\AppData\\Roaming\\msfslogger\\config.json';
@@ -70,6 +79,37 @@ const HOST_METHODS = [
 ];
 
 /**
+ * The datalink methods are optional: a host that predates the datalink is still
+ * adopted and gets a per-method fallback, so the rest of the panel keeps
+ * working and the DATALINK pages say NOT SUPPORTED instead of throwing. None of
+ * them takes the ingest token or any other config value; the token stays in the
+ * sidecar. Every one except `onDatalink` returns a Promise, and all but
+ * `getDatalinkState` resolve to an `{ok, result|error}` envelope.
+ */
+const DATALINK_HOST_METHODS = [
+  'getDatalinkState', 'onDatalink', 'watchDatalink', 'refreshDatalink',
+  'getDatalinkThread', 'getCannedMessages', 'sendCannedMessage',
+  'requestWeather', 'requestLoadsheet',
+];
+
+const datalinkError = (code) => ({ ok: false, error: { code, httpStatus: null, serverCode: null } });
+const UNSUPPORTED = datalinkError('host-unsupported');
+const BAD_REQUEST = datalinkError('bad-request');
+
+/** The fallback for a datalink method an installed host does not provide. */
+function datalinkFallback(name) {
+  if (name === 'getDatalinkState') return async () => null;
+  if (name === 'onDatalink') return () => () => {};
+  return async () => clone(UNSUPPORTED);
+}
+
+// Shape checks only; the shell and the sidecar own the value rules. They stop a
+// malformed call before it becomes a command the shell cannot even decode.
+const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+const isTarget = (target) => isPlainObject(target) && typeof target.kind === 'string' && isCount(target.id);
+
+/**
  * A host installs itself by assigning `window.__FMC_HOST__` before this module
  * evaluates — from a bootstrap script loaded ahead of the panel document, the
  * way the browser preview harness installs its mock host. An object missing any
@@ -97,6 +137,11 @@ function adoptHost(installed) {
   const adapter = { isStub: false, hostLabel: label };
   for (const name of HOST_METHODS) {
     adapter[name] = (...args) => installed[name](...args);
+  }
+  for (const name of DATALINK_HOST_METHODS) {
+    adapter[name] = typeof installed[name] === 'function'
+      ? (...args) => installed[name](...args)
+      : datalinkFallback(name);
   }
   return adapter;
 }
@@ -187,13 +232,38 @@ function createTauriBridge(host) {
     onStatus: (fn) => subscribe(EVENTS.status, fn),
     onLog: (fn) => subscribe(EVENTS.log, fn),
     onExit: (fn) => subscribe(EVENTS.exit, fn),
+    getDatalinkState: () => host.invoke(COMMANDS.datalinkState),
+    onDatalink: (fn) => subscribe(EVENTS.datalink, fn),
+    watchDatalink: (on) => host.invoke(COMMANDS.datalinkWatch, { on: on === true }),
+    refreshDatalink: () => host.invoke(COMMANDS.datalinkRefresh),
+    getDatalinkThread: async (req) => {
+      if (!isPlainObject(req) || !isCount(req.epoch) || !isCount(req.endSeq)) return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.datalinkThread, { epoch: req.epoch, endSeq: req.endSeq });
+    },
+    getCannedMessages: () => host.invoke(COMMANDS.datalinkCanned),
+    sendCannedMessage: async (req) => {
+      if (!isPlainObject(req) || !isTarget(req.target) || typeof req.cannedId !== 'string') return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.datalinkSendCanned, {
+        targetKind: req.target.kind,
+        targetId: req.target.id,
+        cannedId: req.cannedId,
+      });
+    },
+    requestWeather: async (req) => {
+      if (!isPlainObject(req) || !isTarget(req.target) || typeof req.icao !== 'string') return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.datalinkWx, { targetKind: req.target.kind, targetId: req.target.id, icao: req.icao });
+    },
+    requestLoadsheet: async (req) => {
+      if (!isPlainObject(req) || !isCount(req.plannedLegId)) return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.datalinkLoadsheet, { plannedLegId: req.plannedLegId });
+    },
   };
 }
 
 // ── Stub bridge ──────────────────────────────────────────────────────────────
 
 function createStubBridge() {
-  const listeners = { status: new Set(), log: new Set(), exit: new Set() };
+  const listeners = { status: new Set(), log: new Set(), exit: new Set(), datalink: new Set() };
 
   const stub = {
     isStub: true,
@@ -224,6 +294,10 @@ function createStubBridge() {
       },
     },
     status: null,
+    datalinkState: null,
+    // Method name → the envelope that method resolves; unset methods answer
+    // host-unsupported, the same as an installed host without the datalink.
+    datalinkResults: {},
     calls: [],
     setConfigResult: { ok: true, path: DEFAULT_STUB_PATH },
     emitStatus(status) {
@@ -235,6 +309,10 @@ function createStubBridge() {
     },
     emitExit(payload) {
       for (const fn of listeners.exit) fn(payload);
+    },
+    emitDatalink(state) {
+      stub.datalinkState = state;
+      for (const fn of listeners.datalink) fn(state);
     },
   };
 
@@ -255,7 +333,11 @@ function createStubBridge() {
       return clone(stub.config);
     },
     async setConfig(patch) {
-      record('setConfig', [clone(patch)]);
+      // The token is recorded as the mask the CFG NETWORK page shows: a harness
+      // can still see that one was sent, but `calls` never holds the secret.
+      const recorded = clone(patch);
+      if (recorded && typeof recorded === 'object' && 'ingestToken' in recorded) recorded.ingestToken = '••••••••';
+      record('setConfig', [recorded]);
       const result = stub.setConfigResult;
       if (result?.ok === true) {
         const { ingestToken, ...safe } = patch;
@@ -297,7 +379,25 @@ function createStubBridge() {
       record('onExit', []);
       return subscribe(listeners.exit, fn);
     },
+    async getDatalinkState() {
+      record('getDatalinkState', []);
+      return clone(stub.datalinkState);
+    },
+    onDatalink(fn) {
+      record('onDatalink', []);
+      return subscribe(listeners.datalink, fn);
+    },
   };
+  for (const name of DATALINK_HOST_METHODS) {
+    if (name === 'getDatalinkState' || name === 'onDatalink') continue;
+    bridge[name] = async (...args) => {
+      record(name, clone(args));
+      const results = stub.datalinkResults;
+      return results && Object.prototype.hasOwnProperty.call(results, name)
+        ? clone(results[name])
+        : clone(UNSUPPORTED);
+    };
+  }
 
   if (typeof window !== 'undefined') window.__FMC_STUB__ = stub;
   return bridge;

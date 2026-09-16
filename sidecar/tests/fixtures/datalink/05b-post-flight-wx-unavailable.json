@@ -1,0 +1,55 @@
+{
+  "_sample": "POST /api/flights/92/acars-messages/wx when no weather is available: still 201, available false, weather null.",
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/92/acars-messages/wx",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "body": {
+      "icao": "ZZZZ"
+    }
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "flight_id": 92,
+      "icao": "ZZZZ",
+      "available": false,
+      "request": {
+        "id": 21,
+        "flight_id": 92,
+        "planned_leg_id": null,
+        "direction": "downlink",
+        "category": "wx",
+        "label": "WX REQUEST ZZZZ",
+        "body": "WX REQUEST ZZZZ",
+        "payload_json": null,
+        "correlation_id": null,
+        "dedup_key": null,
+        "sent_at": "2026-09-16T14:41:00.000Z",
+        "read_at": null
+      },
+      "reply": {
+        "id": 22,
+        "flight_id": 92,
+        "planned_leg_id": null,
+        "direction": "uplink",
+        "category": "wx",
+        "label": "WX ZZZZ",
+        "body": "WX NOT AVAILABLE FOR ZZZZ",
+        "payload_json": null,
+        "correlation_id": 21,
+        "dedup_key": null,
+        "sent_at": "2026-09-16T14:41:00.300Z",
+        "read_at": null
+      },
+      "weather": null
+    }
+  }
+}

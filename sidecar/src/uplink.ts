@@ -122,6 +122,14 @@ export class Uplink {
     return (this.dispatcher ? { ...init, dispatcher: this.dispatcher } : init) as RequestInit;
   }
 
+  /**
+   * The same request init, CA dispatcher included, for another HTTP client in
+   * this process that must trust exactly what the uplink trusts.
+   */
+  dispatchInit(init: Record<string, unknown>): RequestInit {
+    return this.requestInit(init);
+  }
+
   private headers(): Record<string, string> {
     return {
       'Content-Type': 'application/json',

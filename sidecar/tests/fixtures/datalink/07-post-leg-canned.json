@@ -1,0 +1,37 @@
+{
+  "_sample": "POST /api/planned-legs/12/acars-messages. ASSUMED success body; the client treats any 2xx as sent.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "body": {
+      "canned_id": "request-pushback"
+    }
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "message": {
+        "id": 14,
+        "flight_id": null,
+        "planned_leg_id": 12,
+        "direction": "downlink",
+        "category": "freetext",
+        "label": "REQUEST PUSHBACK",
+        "body": "REQUEST PUSHBACK",
+        "payload_json": null,
+        "correlation_id": null,
+        "dedup_key": null,
+        "sent_at": "2026-09-16T12:55:00.000Z",
+        "read_at": null
+      }
+    }
+  }
+}

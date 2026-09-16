@@ -1,0 +1,63 @@
+{
+  "_sample": "Same POST again: 200, created false, the SAME rows and sheet (idempotent).",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/loadsheet",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "planned_leg_id": 12,
+      "created": false,
+      "request": {
+        "id": 12,
+        "flight_id": null,
+        "planned_leg_id": 12,
+        "direction": "downlink",
+        "category": "freetext",
+        "label": "LOADSHEET REQUEST",
+        "body": "LOADSHEET REQUEST",
+        "payload_json": null,
+        "correlation_id": null,
+        "dedup_key": null,
+        "sent_at": "2026-09-16T12:40:00.000Z",
+        "read_at": null
+      },
+      "reply": {
+        "id": 13,
+        "flight_id": null,
+        "planned_leg_id": 12,
+        "direction": "uplink",
+        "category": "dispatch",
+        "label": "LOADSHEET",
+        "body": "LOADSHEET EGLL-LFPG ILLUSTRATIVE\nZFW 56350 KG  TOW -----\nBLOCK FUEL 6200 KG",
+        "payload_json": "{\"units\":\"kg\",\"block_fuel\":6200,\"taxi_fuel\":200,\"takeoff_fuel\":6000,\"trip_fuel\":3100,\"payload\":13850,\"payload_source\":\"simbrief\",\"zero_fuel_weight\":56350,\"zfw_source\":\"simbrief\",\"max_zero_fuel_weight\":62500,\"dry_operating_weight\":42500,\"takeoff_weight\":null}",
+        "correlation_id": 12,
+        "dedup_key": "loadsheet:12",
+        "sent_at": "2026-09-16T12:40:00.500Z",
+        "read_at": null
+      },
+      "sheet": {
+        "units": "kg",
+        "block_fuel": 6200,
+        "taxi_fuel": 200,
+        "takeoff_fuel": 6000,
+        "trip_fuel": 3100,
+        "payload": 13850,
+        "payload_source": "simbrief",
+        "zero_fuel_weight": 56350,
+        "zfw_source": "simbrief",
+        "max_zero_fuel_weight": 62500,
+        "dry_operating_weight": 42500,
+        "takeoff_weight": null
+      }
+    }
+  }
+}

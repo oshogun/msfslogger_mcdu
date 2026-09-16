@@ -1,0 +1,32 @@
+{
+  "_sample": "GET /api/status on the GROUND with no flight row yet and a ground session linked to leg 12 -> leg scope, no ground-sessions/current request.",
+  "request": {
+    "method": "GET",
+    "path": "/api/status",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "connected": true,
+      "flightState": "GROUND",
+      "currentFlightId": null,
+      "paused": false,
+      "pauseFlags": 0,
+      "simRunning": 2,
+      "onGround": true,
+      "aircraft": "A320",
+      "frame": null,
+      "groundSession": {
+        "groundSessionId": 4,
+        "plannedLegId": 12
+      }
+    }
+  }
+}

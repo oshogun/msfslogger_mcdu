@@ -1,6 +1,6 @@
-// The three CFG pages. A shared draft keeps edits across them. Existing
-// credentials stay in the shell: an untouched token is omitted from the patch
-// so the writer preserves it.
+// The three CFG pages, plus the DATALINK pages that load in the same bundle.
+// A shared draft keeps CFG edits across them. Existing credentials stay in the
+// shell: an untouched token is omitted from the patch so the writer preserves it.
 //
 // Import rule for this directory: a page reaches the outside world only through
 // the page interface it is handed — `register` at load time, `ctx.fmc` inside a
@@ -8,6 +8,9 @@
 // name the host adapter, read a global for the interface, or subscribe to host
 // events; the shell owns all three. That is why the same page code will run
 // unchanged on a host this build has never seen.
+import { register as registerDatalinkPages } from './datalink-pages.js';
+import { register as registerDatalinkWritePages } from './datalink-write-pages.js';
+
 let fmc = null;
 const DEFAULTS = { version: 1, serverUrl: '', certPath: null, sim: '2020',
   autoUplink: false, trafficEnabled: true, trafficRadiusM: 40000, tokenSet: false };
@@ -214,4 +217,5 @@ export function register(api) {
       },
     });
   }
+  registerDatalinkWritePages(api, registerDatalinkPages(api));
 }

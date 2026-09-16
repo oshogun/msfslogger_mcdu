@@ -13,6 +13,7 @@ import {
   decodeSidecarMessage,
   describeDecodeError,
   encodeControlMessage,
+  encodeDatalinkResponse,
   encodeSidecarMessage,
   isBlankLine,
   MAX_LINE_BYTES,
@@ -306,5 +307,120 @@ describe('decode failures are typed results, never throws', () => {
         expect(text.length).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe('datalink messages', () => {
+  const REQUESTS = [
+    '{"v":1,"type":"datalink-request","id":"dl-1","op":"watch","params":{"on":true}}',
+    '{"v":1,"type":"datalink-request","id":"dl-2","op":"refresh","params":{}}',
+    '{"v":1,"type":"datalink-request","id":"dl-3","op":"thread","params":{"epoch":2,"endSeq":5}}',
+    '{"v":1,"type":"datalink-request","id":"dl-4","op":"canned-list","params":{}}',
+    '{"v":1,"type":"datalink-request","id":"dl-5","op":"send-canned","params":{"target":{"kind":"flight","id":92},"cannedId":"any-canned.id_1"}}',
+    '{"v":1,"type":"datalink-request","id":"dl-6","op":"wx","params":{"target":{"kind":"leg","id":12},"icao":"LFPG"}}',
+    '{"v":1,"type":"datalink-request","id":"dl-7","op":"loadsheet","params":{"plannedLegId":12}}',
+    '{"v":1,"type":"datalink-request","id":"dl-8","op":"watch","params":{"on":false}}',
+  ];
+
+  it('decodes each op and round-trips it', () => {
+    for (const line of REQUESTS) {
+      const result = decodeControlMessage(line);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.message).toEqual(JSON.parse(line));
+        expect(decodeControlMessage(encodeControlMessage(result.message).trim())).toEqual(result);
+      }
+    }
+    expect(new Set(REQUESTS.map((line) => JSON.parse(line).op))).toEqual(
+      new Set(['watch', 'refresh', 'thread', 'canned-list', 'send-canned', 'wx', 'loadsheet']),
+    );
+  });
+
+  it('rejects free text next to or instead of a canned id as bad-shape, keeping the request id', () => {
+    const smuggled = [
+      ['dl-9', '{"v":1,"type":"datalink-request","id":"dl-9","op":"send-canned","params":{"target":{"kind":"flight","id":92},"cannedId":"gate-ok","body":"HELLO DISPATCH"}}'],
+      ['dl-10', '{"v":1,"type":"datalink-request","id":"dl-10","op":"send-canned","params":{"target":{"kind":"flight","id":92},"text":"ANY FREE TEXT"}}'],
+      ['dl-11', '{"v":1,"type":"datalink-request","id":"dl-11","op":"send-canned","params":{"target":{"kind":"flight","id":92},"cannedId":"HELLO DISPATCH PLEASE"}}'],
+      ['dl-12', '{"v":1,"type":"datalink-request","id":"dl-12","op":"wx","params":{"target":{"kind":"leg","id":12},"icao":"LFPG","text":"x"}}'],
+      ['dl-13', '{"v":1,"type":"datalink-request","id":"dl-13","op":"loadsheet","params":{"plannedLegId":12,"body":"x"}}'],
+      ['dl-14', '{"v":1,"type":"datalink-request","id":"dl-14","op":"send-canned","params":{"target":{"kind":"flight","id":92,"note":"x"},"cannedId":"ok"}}'],
+      ['dl-15', '{"v":1,"type":"datalink-request","id":"dl-15","op":"refresh","params":{"text":"x"}}'],
+    ];
+    for (const [id, line] of smuggled) {
+      const result = decodeControlMessage(line);
+      expect(result).toMatchObject({ ok: false, error: 'bad-shape', messageType: 'datalink-request', requestId: id });
+      if (!result.ok) {
+        const text = describeDecodeError(result);
+        expect(text).not.toContain('HELLO');
+        expect(text).not.toContain('FREE TEXT');
+      }
+    }
+  });
+
+  it('rejects wrong types and unknown ops as bad-shape with the request id', () => {
+    const rows = [
+      '{"v":1,"type":"datalink-request","id":"dl-20","op":"post-anything","params":{}}',
+      '{"v":1,"type":"datalink-request","id":"dl-21","op":"watch","params":{"on":"yes"}}',
+      '{"v":1,"type":"datalink-request","id":"dl-22","op":"thread","params":{"epoch":0,"endSeq":1}}',
+      '{"v":1,"type":"datalink-request","id":"dl-23","op":"thread","params":{"epoch":1,"endSeq":-1}}',
+      '{"v":1,"type":"datalink-request","id":"dl-24","op":"wx","params":{"target":{"kind":"leg","id":12},"icao":"lfpg"}}',
+      '{"v":1,"type":"datalink-request","id":"dl-25","op":"wx","params":{"target":{"kind":"gate","id":12},"icao":"LFPG"}}',
+      '{"v":1,"type":"datalink-request","id":"dl-26","op":"loadsheet","params":{"plannedLegId":1.5}}',
+      '{"v":1,"type":"datalink-request","id":"dl-27","op":"loadsheet","params":[12]}',
+      '{"v":1,"type":"datalink-request","id":"dl-28","op":"loadsheet"}',
+    ];
+    for (const line of rows) {
+      expect(decodeControlMessage(line)).toMatchObject({
+        ok: false, error: 'bad-shape', requestId: JSON.parse(line).id,
+      });
+    }
+  });
+
+  it('rejects a request with an unusable id without a request id', () => {
+    for (const id of ['7', '"dl-"', '"dl-abc"', '"dl-123456789012345678901"', 'null']) {
+      const result = decodeControlMessage(`{"v":1,"type":"datalink-request","id":${id},"op":"refresh","params":{}}`);
+      expect(result).toMatchObject({ ok: false, error: 'bad-shape' });
+      expect(result.ok === false && 'requestId' in result).toBe(false);
+    }
+  });
+
+  it('accepts a hello with and without features', () => {
+    const base = { v: 1, type: 'hello', at: AT, pid: 1, sidecarVersion: '1.0.0', nodeVersion: 'v20', configPath: '/x' };
+    expect(decodeSidecarMessage(JSON.stringify(base)).ok).toBe(true);
+    const withFeatures = decodeSidecarMessage(JSON.stringify({ ...base, features: ['datalink'] }));
+    expect(withFeatures).toEqual({ ok: true, message: { ...base, features: ['datalink'] } });
+    expect(decodeSidecarMessage(JSON.stringify({ ...base, features: 'datalink' }))).toMatchObject({ ok: false, error: 'bad-shape' });
+  });
+
+  it('decodes datalink-state and datalink-response, and rejects malformed ones', () => {
+    const state = '{"v":1,"type":"datalink-state","at":1789569127113,"state":"dl.ok","watching":true,"httpStatus":null,"serverCode":null,"lastOkAt":1789569127113,"lastErrorAt":null,"nextPollAt":1789569147113,"scope":{"kind":"flight","flightId":92,"plannedLegId":12},"thread":{"epoch":2,"total":5,"firstSeq":0,"newestId":18,"droppedRows":0}}';
+    const okResponse = '{"v":1,"type":"datalink-response","at":1789569127113,"id":"dl-1","ok":true,"result":{"watching":true,"leaseMs":65000}}';
+    const errResponse = '{"v":1,"type":"datalink-response","at":1789569127113,"id":"dl-7","ok":false,"error":{"code":"no-dispatch-data","httpStatus":409,"serverCode":"NO_DISPATCH_DATA"}}';
+    for (const line of [state, okResponse, errResponse]) {
+      const result = decodeSidecarMessage(line);
+      expect(result).toEqual({ ok: true, message: JSON.parse(line) });
+      if (result.ok) expect(encodeSidecarMessage(result.message)).toBe(`${line}\n`);
+    }
+    expect(decodeSidecarMessage(state.replace('"watching":true', '"watching":1'))).toMatchObject({ error: 'bad-shape' });
+    expect(decodeSidecarMessage(state.replace('"scope":{', '"scope":[{').replace('"plannedLegId":12}', '"plannedLegId":12}]'))).toMatchObject({ error: 'bad-shape' });
+    expect(decodeSidecarMessage(okResponse.replace('"result":{', '"result":[{').replace('65000}', '65000}]'))).toMatchObject({ error: 'bad-shape' });
+    expect(decodeSidecarMessage(errResponse.replace('"code":"no-dispatch-data",', ''))).toMatchObject({ error: 'bad-shape' });
+  });
+
+  it('encodes a datalink-response as one line, and an oversize one as too-large', () => {
+    const small = encodeDatalinkResponse({
+      v: 1, type: 'datalink-response', at: AT, id: 'dl-3', ok: true, result: { accepted: true, coalesced: false },
+    });
+    expect(small).toBe(`{"v":1,"type":"datalink-response","at":${AT},"id":"dl-3","ok":true,"result":{"accepted":true,"coalesced":false}}\n`);
+    const big = encodeDatalinkResponse({
+      v: 1, type: 'datalink-response', at: AT, id: 'dl-4', ok: true,
+      result: { icao: 'EGLL', available: true, metar: 'x'.repeat(MAX_LINE_BYTES), taf: null, fetchedAt: null },
+    });
+    expect(Buffer.byteLength(big)).toBeLessThanOrEqual(MAX_LINE_BYTES);
+    expect(JSON.parse(big)).toMatchObject({ id: 'dl-4', ok: false, error: { code: 'too-large', httpStatus: null, serverCode: null } });
+  });
+
+  it('keeps the protocol version at 1', () => {
+    expect(PROTOCOL_VERSION).toBe(1);
   });
 });

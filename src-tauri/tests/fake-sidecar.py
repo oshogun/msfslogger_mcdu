@@ -13,8 +13,24 @@ with config_path.with_name('starts').open('a') as log:
 def emit(value):
     print(json.dumps(value), flush=True)
 
-emit(dict(v=1, type='hello', at=1, pid=os.getpid(), sidecarVersion='fixture',
-          nodeVersion='fixture', configPath=str(config_path)))
+# datalinkMode: answer (default), answer-error, ignore, no-features (a sidecar
+# that predates the datalink), echo-token, exit-on-request or wrong-id.
+datalink_mode = config.get('datalinkMode', 'answer')
+hello = dict(v=1, type='hello', at=1, pid=os.getpid(), sidecarVersion='fixture',
+             nodeVersion='fixture', configPath=str(config_path))
+if datalink_mode != 'no-features':
+    hello['features'] = ['datalink']
+emit(hello)
+
+def datalink_state(state, **members):
+    value = dict(v=1, type='datalink-state', at=1, state=state, watching=False, httpStatus=None,
+                 serverCode=None, lastOkAt=None, lastErrorAt=None, nextPollAt=None, scope=None,
+                 thread=None)
+    value.update(members)
+    return value
+
+if datalink_mode != 'no-features':
+    emit(datalink_state('dl.idle'))
 if config.get('fixtureMode') == 'crash':
     sys.exit(21)
 if config.get('fixtureMode') == 'stalled':
@@ -51,6 +67,26 @@ for line in sys.stdin:
         log.write(control['type'] + '\n')
     if control['type'] == 'shutdown':
         break
+    if control['type'] == 'datalink-request':
+        if datalink_mode == 'exit-on-request':
+            sys.exit(3)
+        response = dict(v=1, type='datalink-response', at=1, id=control['id'], ok=True,
+                        result=dict(echo=control['op']))
+        state = datalink_state('dl.ok', watching=True, lastOkAt=1)
+        if datalink_mode == 'answer-error':
+            response = dict(v=1, type='datalink-response', at=1, id=control['id'], ok=False,
+                            error=dict(code='no-dispatch-data', httpStatus=409,
+                                       serverCode='NO_DISPATCH_DATA'))
+            state = datalink_state('dl.unavailable', watching=True, httpStatus=401, lastErrorAt=1)
+        elif datalink_mode == 'echo-token':
+            response['result']['note'] = 'token ' + str(token)
+            state['scope'] = dict(kind='flight', flightId=1, note=token)
+        elif datalink_mode == 'wrong-id':
+            response['id'] = 'dl-999999'
+        if datalink_mode not in ('ignore', 'no-features'):
+            emit(response)
+            emit(state)
+        continue
     if control['type'] == 'start':
         # Mirrors the sidecar: START is refused while the config is unusable.
         if idle_state == 'app.stopped':

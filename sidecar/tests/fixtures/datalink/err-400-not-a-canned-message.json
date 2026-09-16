@@ -1,0 +1,25 @@
+{
+  "_sample": "400 NOT_A_CANNED_MESSAGE (the client can only produce this through a bug: it never sends free text).",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "body": {
+      "canned_id": "gate-request"
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Only canned messages can be sent from a client. Free text is not accepted.",
+      "code": "NOT_A_CANNED_MESSAGE"
+    }
+  }
+}

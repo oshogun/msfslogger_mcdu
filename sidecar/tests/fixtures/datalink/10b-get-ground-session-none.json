@@ -1,0 +1,20 @@
+{
+  "_sample": "GET /api/ground-sessions/current with no open session -> NO FLIGHT PLAN.",
+  "request": {
+    "method": "GET",
+    "path": "/api/ground-sessions/current",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "session": null
+    }
+  }
+}

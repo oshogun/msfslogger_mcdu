@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   linkStart: vi.fn(),
   linkStop: vi.fn(),
   linkConfig: vi.fn(),
+  getConfig: vi.fn(),
+  datalinkRequest: vi.fn(),
   callbacks: null as SimConnectCallbacks | null,
 }));
 
@@ -31,6 +33,13 @@ vi.mock('../src/uplink', () => ({
     postTraffic = mocks.postTraffic;
     probe = mocks.probe;
     close = mocks.close;
+    getConfig = mocks.getConfig;
+  },
+}));
+vi.mock('../src/datalink-client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/datalink-client')>(),
+  DatalinkClient: class {
+    request = mocks.datalinkRequest;
   },
 }));
 vi.mock('../src/simconnect', () => ({
@@ -234,5 +243,152 @@ describe('sidecar config recovery and lifecycle through control messages', () =>
     expect(status().app).toEqual({ state: 'app.no-config', problems });
     expect(status().config).toBeNull();
     expect(mocks.postEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('datalink wiring', () => {
+  const SENTINEL = 'SENTINEL-DATALINK-TOKEN-0000';
+  const sentinelConfig: EffectiveConfig = { ...config, ingestToken: SENTINEL };
+  let nextId = 1;
+
+  type Outcome =
+    | { kind: 'response'; status: number; scopeHeader: string | null; bodyText: string | null; bodyTooLarge: boolean }
+    | { kind: 'transport'; errorName: string | null; errorCode: string | null };
+
+  const respond = (status: number, body: unknown, scopeHeader: string | null = null): Outcome => ({
+    kind: 'response', status, scopeHeader, bodyText: JSON.stringify(body), bodyTooLarge: false,
+  });
+  const UNREACHABLE: Outcome = { kind: 'transport', errorName: 'TypeError', errorCode: 'ECONNREFUSED' };
+  const FAULTS: [string, Outcome][] = [
+    ['401 invalid token', respond(401, { error: `rejected ${SENTINEL}`, code: 'INVALID_INGEST_TOKEN' })],
+    ['401 scope accepted', respond(401, { error: `missing ${SENTINEL}` }, 'accepted')],
+    ['401 pre-upgrade', respond(401, { error: `Authentication required ${SENTINEL}` })],
+    ['403 cross-origin', respond(403, { error: `Cross-origin request rejected ${SENTINEL}` })],
+    ['500', respond(500, { error: SENTINEL })],
+    ['unreachable', UNREACHABLE],
+  ];
+
+  function datalink(op: string, params: unknown, id = `dl-${nextId++}`): string {
+    stdin.emit('data', JSON.stringify({ v: 1, type: 'datalink-request', id, op, params }) + '\n');
+    return id;
+  }
+  function responseFor(id: string) {
+    return messages.find((m) => m.type === 'datalink-response' && m.id === id);
+  }
+  function lastDatalinkState() {
+    const states = messages.filter((m) => m.type === 'datalink-state');
+    return states[states.length - 1];
+  }
+  function flyingWithThread(route: { key: string }): Outcome {
+    if (route.key === 'status') return respond(200, { currentFlightId: 92, plannedLeg: { plannedLegId: 12 } });
+    return respond(200, {
+      flight_id: 92, planned_leg_id: 12,
+      messages: [{
+        id: 1, direction: 'uplink', category: 'dispatch', label: `L ${SENTINEL}`,
+        body: `BODY ${SENTINEL}`, sent_at: '2026-09-16T12:00:00.000Z', correlation_id: null,
+      }],
+    });
+  }
+
+  beforeEach(() => {
+    mocks.getConfig.mockReturnValue(sentinelConfig);
+    reload({ ok: true, config: sentinelConfig, warnings: [] });
+  });
+
+  it('hello advertises the datalink feature and is followed by one idle datalink-state', () => {
+    expect(messages[0]).toMatchObject({ type: 'hello', features: ['datalink'] });
+    expect(messages[1]).toEqual({
+      v: 1, type: 'datalink-state', at: 60000, state: 'dl.idle', watching: false, httpStatus: null,
+      serverCode: null, lastOkAt: null, lastErrorAt: null, nextPollAt: null, scope: null, thread: null,
+    });
+  });
+
+  it('answers a malformed request with a valid id as bad-request, without a log line', async () => {
+    const logsBefore = messages.filter((m) => m.type === 'log').length;
+    datalink('send-canned', { target: { kind: 'flight', id: 92 }, cannedId: 'x', body: 'FREE TEXT' }, 'dl-41');
+    await flush();
+    expect(responseFor('dl-41')).toEqual({
+      v: 1, type: 'datalink-response', at: expect.any(Number), id: 'dl-41', ok: false,
+      error: { code: 'bad-request', httpStatus: null, serverCode: null },
+    });
+    expect(messages.filter((m) => m.type === 'log').length).toBe(logsBefore);
+    expect(mocks.datalinkRequest).not.toHaveBeenCalled();
+  });
+
+  it('runs while the uplink is stopped and never starts it', async () => {
+    mocks.datalinkRequest.mockImplementation(async (route: { key: string }) => flyingWithThread(route));
+    const id = datalink('watch', { on: true });
+    await flush();
+    expect(responseFor(id)).toMatchObject({ ok: true, result: { watching: true, leaseMs: 65000 } });
+    expect(mocks.datalinkRequest).toHaveBeenCalledTimes(2);
+    expect(lastDatalinkState()).toMatchObject({ state: 'dl.ok', scope: { kind: 'flight', flightId: 92, plannedLegId: 12 } });
+    expect(status().app.state).toBe('app.stopped');
+    expect(status().backend.state).toBe('net.idle');
+    expect(mocks.linkStart).not.toHaveBeenCalled();
+    expect(mocks.probe).not.toHaveBeenCalled();
+  });
+
+  it('datalink 401 (three variants), 403, 500 and unreachable leave the backend axis identical', async () => {
+    await start();
+    sendFrame();
+    await flush();
+    const before = status().backend;
+    expect(before.state).toBe('net.ok');
+
+    for (const [name, outcome] of FAULTS) {
+      mocks.datalinkRequest.mockResolvedValue(outcome);
+      // A valid reload clears the invalid-token latch so every case really makes requests.
+      reload({ ok: true, config: sentinelConfig, warnings: [] });
+      datalink('watch', { on: true });
+      datalink('refresh', {});
+      datalink('canned-list', {});
+      await flush();
+      const expected = name === 'unreachable' ? 'dl.unreachable' : undefined;
+      if (expected) expect(lastDatalinkState()).toMatchObject({ state: expected });
+      // The reload above scheduled a status line, written after the datalink faults.
+      expect(status().at).toBeGreaterThan(before.lastOkAt ?? 0);
+      expect(status().backend).toEqual(before);
+    }
+    expect(mocks.datalinkRequest).toHaveBeenCalled();
+    expect(messages.filter((m) => m.type === 'datalink-state').map((m) => m.state)).toEqual(
+      expect.arrayContaining(['dl.token-invalid', 'dl.token-missing', 'dl.unavailable', 'dl.rejected', 'dl.http-error', 'dl.unreachable']),
+    );
+    const backends = messages.filter((m): m is StatusMessage => m.type === 'status').slice(-3).map((m) => m.backend);
+    for (const backend of backends) {
+      expect({ state: backend.state, httpStatus: backend.httpStatus, message: backend.message, lastErrorAt: backend.lastErrorAt })
+        .toEqual({ state: before.state, httpStatus: before.httpStatus, message: before.message, lastErrorAt: before.lastErrorAt });
+    }
+  });
+
+  it('never writes the token to stdout across success, all 401s, 403, 409 and unreachable', async () => {
+    mocks.datalinkRequest.mockImplementation(async (route: { key: string }) => flyingWithThread(route));
+    datalink('watch', { on: true });
+    await flush();
+    const thread = datalink('thread', { epoch: 1, endSeq: 1 });
+    await flush();
+    expect(responseFor(thread)).toMatchObject({ ok: true, result: { messages: [{ body: 'BODY [REDACTED]' }] } });
+
+    mocks.datalinkRequest.mockResolvedValue(respond(409, { error: `NO DISPATCH ${SENTINEL}`, code: 'NO_DISPATCH_DATA' }));
+    const loadsheet = datalink('loadsheet', { plannedLegId: 12 });
+    await flush();
+    expect(responseFor(loadsheet)).toMatchObject({ ok: false, error: { code: 'no-dispatch-data', httpStatus: 409 } });
+
+    for (const [, outcome] of FAULTS) {
+      mocks.datalinkRequest.mockResolvedValue(outcome);
+      reload({ ok: true, config: sentinelConfig, warnings: [] });
+      datalink('refresh', {});
+      datalink('canned-list', {});
+      datalink('wx', { target: { kind: 'flight', id: 92 }, icao: 'EGLL' });
+      await flush();
+    }
+    control('shutdown');
+    await flush();
+
+    const logs = messages.filter((m) => m.type === 'log').map((m) => m.message);
+    expect(logs.some((line) => /^Datalink dl\.\S+ \(HTTP (\d{3}|---)(, code [A-Z_]+)?\)( on (GET|POST) \/api\/\S+)?$/.test(line))).toBe(true);
+    expect(messages.some((m) => m.type === 'datalink-response')).toBe(true);
+    const everything = JSON.stringify(messages);
+    expect(everything).not.toContain(SENTINEL);
+    expect(everything).not.toContain('SENTINEL-DATALINK');
   });
 });

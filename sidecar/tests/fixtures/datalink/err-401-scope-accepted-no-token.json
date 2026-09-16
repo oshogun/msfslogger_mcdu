@@ -1,0 +1,21 @@
+{
+  "_sample": "401 + header X-Ingest-Token-Scope: accepted, no code: route in scope but no token reached the server (header stripped in transit). Body text assumed.",
+  "request": {
+    "method": "GET",
+    "path": "/api/acars/canned-messages",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "Invalid or missing ingest token"
+    }
+  }
+}

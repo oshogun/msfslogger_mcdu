@@ -1,0 +1,21 @@
+{
+  "_sample": "404 FLIGHT_NOT_FOUND.",
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/999/acars-messages",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Flight 999 not found",
+      "code": "FLIGHT_NOT_FOUND"
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "_sample": "GET /api/ground-sessions/current with an open session: raw stored row, snake_case planned_leg_id. A different type from /api/status groundSession.",
+  "request": {
+    "method": "GET",
+    "path": "/api/ground-sessions/current",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "session": {
+        "id": 4,
+        "source": "auto",
+        "airport_icao": "EGLL",
+        "airport_name": "London Heathrow Airport",
+        "lat": 51.4775,
+        "lon": -0.4614,
+        "parking_position": null,
+        "parking_position_source": null,
+        "planned_leg_id": 12,
+        "planned_leg_link_source": "auto",
+        "aircraft": "A320",
+        "started_at": "2026-09-16T12:15:55.843Z",
+        "ended_at": null
+      }
+    }
+  }
+}

@@ -21,7 +21,7 @@ import { defaultStatus } from './status.js';
 
 const MAX_SCRATCHPAD_CHARS = 4096;
 /** Pages that live in the lazily-imported bundle. */
-const LAZY_PAGE_IDS = new Set(['NETWORK', 'SIM', 'TRAFFIC']);
+const LAZY_PAGE_IDS = new Set(['NETWORK', 'SIM', 'TRAFFIC', 'DL-INDEX']);
 
 const dom = {
   screen: document.getElementById('fmc-screen'),
@@ -43,6 +43,7 @@ const state = {
   message: null,
   pagesLoaded: false,
   pagesLoading: null,
+  datalink: null,
 };
 
 // ── Scratchpad ───────────────────────────────────────────────────────────────
@@ -229,6 +230,7 @@ const MENU_ITEMS = [
   { lsk: 'L2', label: '<NETWORK', page: 'NETWORK' },
   { lsk: 'L3', label: '<SIM', page: 'SIM' },
   { lsk: 'L4', label: '<TRAFFIC', page: 'TRAFFIC' },
+  { lsk: 'L5', label: '<DATALINK', page: 'DL-INDEX' },
 ];
 
 registerPage({
@@ -276,6 +278,28 @@ async function runCommand(fn) {
   }
 }
 
+/**
+ * Datalink calls answer with an `{ok, result|error}` envelope. Anything else,
+ * including a rejected call, becomes the host-error envelope, so a datalink
+ * page always has a code to show and never sees a throw. The scratchpad is
+ * left to the page, which knows whether the failure is worth showing.
+ */
+function runDatalink(fn) {
+  const hostError = { ok: false, error: { code: 'host-error', httpStatus: null, serverCode: null } };
+  return Promise.resolve()
+    .then(fn)
+    .then(
+      (result) => (result && typeof result === 'object' && typeof result.ok === 'boolean' ? result : hostError),
+      () => hostError,
+    );
+}
+
+/** The same `n/m` rule `showPage` applies, for pages that page themselves. */
+function setPageNumber(n, m) {
+  if (!dom.number) return;
+  dom.number.textContent = m > 1 ? `${n}/${m}` : '';
+}
+
 // ── Status painting ──────────────────────────────────────────────────────────
 
 function paintStatus() {
@@ -306,6 +330,20 @@ function applyStatus(status) {
   paintStatus();
 }
 
+/** Datalink availability is its own channel; it never touches `state.status`. */
+function applyDatalink(value) {
+  if (!value || typeof value !== 'object' || value.type !== 'datalink-state') return;
+  state.datalink = value;
+  const page = state.pageId ? pages.get(state.pageId) : null;
+  if (page && typeof page.onDatalink === 'function') {
+    try {
+      page.onDatalink(value);
+    } catch {
+      /* a page that mishandles a datalink state must not stop the next one */
+    }
+  }
+}
+
 function setMessageLine(text, level = 'info') {
   if (!dom.msgLine) return;
   dom.msgLine.textContent = text || '';
@@ -334,6 +372,21 @@ function handleKey(key) {
   if (typeof key === 'string' && key.length === 1) {
     appendScratchpad(key);
     return;
+  }
+  if (key === 'PREV' || key === 'NEXT') {
+    // A page with pages of its own (a message thread, a long uplink) steps
+    // through them first; the group stepping below is for the rest.
+    const page = state.pageId ? pages.get(state.pageId) : null;
+    if (page && typeof page.onPageKey === 'function') {
+      let handled = false;
+      try {
+        handled = page.onPageKey(key === 'NEXT' ? 1 : -1, pageContext()) === true;
+      } catch {
+        setScratchpad('COMMAND FAILED', 'error');
+        return;
+      }
+      if (handled) return;
+    }
   }
   switch (key) {
     case 'SP':
@@ -490,6 +543,15 @@ function boot() {
     startUplink: () => runCommand(() => bridge.startUplink()),
     stopUplink: () => runCommand(() => bridge.stopUplink()),
     restartSidecar: () => runCommand(() => bridge.restartSidecar()),
+    getDatalinkState: () => state.datalink,
+    watchDatalink: (on) => runDatalink(() => bridge.watchDatalink(on === true)),
+    refreshDatalink: () => runDatalink(() => bridge.refreshDatalink()),
+    getDatalinkThread: (req) => runDatalink(() => bridge.getDatalinkThread(req)),
+    getCannedMessages: () => runDatalink(() => bridge.getCannedMessages()),
+    sendCannedMessage: (req) => runDatalink(() => bridge.sendCannedMessage(req)),
+    requestWeather: (req) => runDatalink(() => bridge.requestWeather(req)),
+    requestLoadsheet: (req) => runDatalink(() => bridge.requestLoadsheet(req)),
+    setPageNumber,
   };
   window.FMC = fmc;
 
@@ -501,12 +563,17 @@ function boot() {
   bridge.onStatus(applyStatus);
   bridge.onLog(applyLog);
   bridge.onExit(applyExit);
+  bridge.onDatalink(applyDatalink);
 
   // Paint from the last known status immediately rather than waiting up to
   // five seconds for the next heartbeat.
   Promise.resolve()
     .then(() => bridge.getStatus())
     .then((status) => applyStatus(status))
+    .catch(() => {});
+  Promise.resolve()
+    .then(() => bridge.getDatalinkState())
+    .then(applyDatalink)
     .catch(() => {});
 
   loadConfig();

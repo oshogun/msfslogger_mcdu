@@ -3,8 +3,10 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-const COMMANDS = ['config_get', 'config_set', 'config_path', 'uplink_start', 'uplink_stop', 'sidecar_restart', 'status_get'];
-const EVENTS = ['sidecar:status', 'sidecar:log', 'sidecar:exit'];
+const COMMANDS = ['config_get', 'config_set', 'config_path', 'uplink_start', 'uplink_stop', 'sidecar_restart', 'status_get',
+  'datalink_state', 'datalink_watch', 'datalink_refresh', 'datalink_thread', 'datalink_canned', 'datalink_send_canned',
+  'datalink_wx', 'datalink_loadsheet'];
+const EVENTS = ['sidecar:status', 'sidecar:log', 'sidecar:exit', 'sidecar:datalink'];
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 async function files(dir) {
   const entries = await readdir(dir, { withFileTypes: true });

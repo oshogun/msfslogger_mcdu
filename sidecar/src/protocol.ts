@@ -10,9 +10,10 @@
 // developer cannot reach is the worst outcome in this system, so the failure
 // mode everywhere is "drop the line, keep the last good state".
 //
-// Pure: no I/O, no sockets. The only import is a type, erased at compile time.
+// Pure: no I/O, no sockets. The only imports are types, erased at compile time.
 
 import type { RedactedConfig } from './config';
+import type { DatalinkErrorCode, DatalinkStateId } from './datalink-classify';
 import type { AppStateId, BackendStateId, PauseStateId, SimStateId } from './status';
 
 /** Bumped only on a breaking change: a removed field, a changed type or meaning. */
@@ -32,6 +33,12 @@ export interface HelloMessage {
   sidecarVersion: string;
   nodeVersion: string;
   configPath: string;
+  /**
+   * Optional capabilities. A shell must not send a datalink-request to a
+   * sidecar whose hello lacks 'datalink': an older sidecar would ignore it and
+   * leave the request hanging.
+   */
+  features?: string[];
 }
 
 /** The whole observable state. Always complete — never a partial patch. */
@@ -133,13 +140,148 @@ export interface TrafficMessage {
   }[];
 }
 
+// ── datalink ──────────────────────────────────────────────────────────────────
+//
+// All additive under protocol version 1: an older shell drops these as unknown
+// types, and an older sidecar never advertises the feature, so neither side
+// has to renegotiate anything.
+
+export const DATALINK_FEATURE = 'datalink';
+
+export const DATALINK_REQUEST_ID_PATTERN = /^dl-[0-9]{1,20}$/;
+export const CANNED_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const ICAO_PATTERN = /^[A-Z][A-Z0-9]{3}$/;
+
+export type DatalinkScope =
+  | { kind: 'flight'; flightId: number; plannedLegId: number | null }
+  | { kind: 'leg'; plannedLegId: number; source: 'status' | 'ground-session' }
+  | { kind: 'none' };
+
+export interface DatalinkThreadSummary {
+  epoch: number;
+  total: number;
+  /** Lowest seq still cached: total minus the number of cached messages. */
+  firstSeq: number;
+  newestId: number | null;
+  /** Rows that failed shape validation in the last fetch. */
+  droppedRows: number;
+}
+
+export interface DatalinkMessage {
+  /** 0-based position among the valid rows, oldest first. */
+  seq: number;
+  id: number;
+  direction: 'uplink' | 'downlink';
+  category: string;
+  label: string | null;
+  body: string;
+  sentAt: string;
+  correlationId: number | null;
+}
+
+export interface CannedMessageEntry {
+  id: string;
+  label: string;
+}
+
+export interface LoadsheetSheet {
+  units: string | null;
+  blockFuel: number | null;
+  taxiFuel: number | null;
+  takeoffFuel: number | null;
+  tripFuel: number | null;
+  payload: number | null;
+  payloadSource: string | null;
+  zeroFuelWeight: number | null;
+  zfwSource: string | null;
+  maxZeroFuelWeight: number | null;
+  dryOperatingWeight: number | null;
+  takeoffWeight: number | null;
+}
+
+/** Codes only: no server `error` text ever crosses a process boundary. */
+export interface DatalinkError {
+  code: DatalinkErrorCode;
+  httpStatus: number | null;
+  serverCode: string | null;
+}
+
+export type DatalinkOp = 'watch' | 'refresh' | 'thread' | 'canned-list' | 'send-canned' | 'wx' | 'loadsheet';
+
+export interface WriteTarget {
+  kind: 'flight' | 'leg';
+  id: number;
+}
+
+export interface DatalinkParams {
+  watch: { on: boolean };
+  refresh: Record<string, never>;
+  thread: { epoch: number; endSeq: number };
+  'canned-list': Record<string, never>;
+  'send-canned': { target: WriteTarget; cannedId: string };
+  wx: { target: WriteTarget; icao: string };
+  loadsheet: { plannedLegId: number };
+}
+
+export interface DatalinkResults {
+  watch: { watching: boolean; leaseMs: number };
+  refresh: { accepted: true; coalesced: boolean };
+  thread: {
+    epoch: number;
+    total: number;
+    firstSeq: number;
+    startSeq: number;
+    endSeq: number;
+    messages: DatalinkMessage[];
+  };
+  'canned-list': { messages: CannedMessageEntry[]; truncated: boolean };
+  'send-canned': { sent: true; httpStatus: number };
+  wx: { icao: string; available: boolean; metar: string | null; taf: string | null; fetchedAt: string | null };
+  loadsheet: { plannedLegId: number; created: boolean; httpStatus: number; sheet: LoadsheetSheet };
+}
+
+/** An op's answer before it is wrapped in a response line. */
+export type DatalinkOutcome<K extends DatalinkOp = DatalinkOp> =
+  | { ok: true; result: DatalinkResults[K] }
+  | { ok: false; error: DatalinkError };
+
+/** shell -> sidecar. */
+export type DatalinkRequestMessage = {
+  [K in DatalinkOp]: { v: 1; type: 'datalink-request'; id: string; op: K; params: DatalinkParams[K] };
+}[DatalinkOp];
+
+/** sidecar -> shell, exactly one per decoded request id. */
+export type DatalinkResponseMessage =
+  | { v: 1; type: 'datalink-response'; at: number; id: string; ok: true; result: DatalinkResults[DatalinkOp] }
+  | { v: 1; type: 'datalink-response'; at: number; id: string; ok: false; error: DatalinkError };
+
+/** sidecar -> shell, unsolicited. Always complete, never a patch. */
+export interface DatalinkStateMessage {
+  v: 1;
+  type: 'datalink-state';
+  at: number;
+  state: DatalinkStateId;
+  watching: boolean;
+  httpStatus: number | null;
+  serverCode: string | null;
+  lastOkAt: number | null;
+  lastErrorAt: number | null;
+  nextPollAt: number | null;
+  /** null until a poll cycle has resolved a scope. */
+  scope: DatalinkScope | null;
+  /** null when there is no cached thread for the scope. */
+  thread: DatalinkThreadSummary | null;
+}
+
 export type SidecarMessage =
   | HelloMessage
   | StatusMessage
   | LogMessage
   | PongMessage
   | FrameMessage
-  | TrafficMessage;
+  | TrafficMessage
+  | DatalinkResponseMessage
+  | DatalinkStateMessage;
 
 export type SidecarMessageType = SidecarMessage['type'];
 
@@ -173,7 +315,8 @@ export type ControlMessage =
   | ControlStop
   | ControlConfig
   | ControlShutdown
-  | ControlPing;
+  | ControlPing
+  | DatalinkRequestMessage;
 
 export type ControlMessageType = ControlMessage['type'];
 
@@ -185,7 +328,14 @@ export type DecodeError =
   | { ok: false; error: 'not-object' }
   | { ok: false; error: 'bad-version'; v: unknown }
   | { ok: false; error: 'unknown-type'; messageType: string }
-  | { ok: false; error: 'bad-shape'; messageType: string; detail: string };
+  | {
+      ok: false;
+      error: 'bad-shape';
+      messageType: string;
+      detail: string;
+      /** Set for a malformed datalink-request whose id was valid, so it can still be answered. */
+      requestId?: string;
+    };
 
 export type DecodeResult<T> = { ok: true; message: T } | DecodeError;
 
@@ -196,6 +346,8 @@ const SIDECAR_TYPES: readonly SidecarMessageType[] = [
   'pong',
   'frame',
   'traffic',
+  'datalink-response',
+  'datalink-state',
 ];
 
 const CONTROL_TYPES: readonly ControlMessageType[] = [
@@ -204,6 +356,17 @@ const CONTROL_TYPES: readonly ControlMessageType[] = [
   'config',
   'shutdown',
   'ping',
+  'datalink-request',
+];
+
+const DATALINK_OPS: readonly DatalinkOp[] = [
+  'watch',
+  'refresh',
+  'thread',
+  'canned-list',
+  'send-canned',
+  'wx',
+  'loadsheet',
 ];
 
 const LOG_LEVELS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
@@ -241,6 +404,86 @@ function badShape(messageType: string, detail: string): DecodeError {
   return { ok: false, error: 'bad-shape', messageType, detail };
 }
 
+function isSafeInt(value: unknown, min: number): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= min;
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const own = Object.keys(value);
+  return own.length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function isWriteTarget(value: unknown): value is WriteTarget {
+  return (
+    isPlainObject(value) &&
+    hasExactKeys(value, ['kind', 'id']) &&
+    (value.kind === 'flight' || value.kind === 'leg') &&
+    isSafeInt(value.id, 1)
+  );
+}
+
+/**
+ * Params must carry exactly the op's keys. An extra key such as `body` or
+ * `text` next to a canned id is precisely how free text would be smuggled into
+ * a downlink, so it is a shape error rather than something to ignore. Details
+ * are fixed text: a rejected value is never echoed into a log.
+ */
+function datalinkParamsProblem(op: DatalinkOp, params: Record<string, unknown>): string | null {
+  switch (op) {
+    case 'watch':
+      return hasExactKeys(params, ['on']) && typeof params.on === 'boolean'
+        ? null
+        : 'watch params must be exactly { on }';
+    case 'refresh':
+    case 'canned-list':
+      return hasExactKeys(params, []) ? null : `${op} params must be empty`;
+    case 'thread':
+      return hasExactKeys(params, ['epoch', 'endSeq']) && isSafeInt(params.epoch, 1) && isSafeInt(params.endSeq, 0)
+        ? null
+        : 'thread params must be exactly { epoch, endSeq }';
+    case 'send-canned':
+      return hasExactKeys(params, ['target', 'cannedId']) &&
+        isWriteTarget(params.target) &&
+        isString(params.cannedId) &&
+        CANNED_ID_PATTERN.test(params.cannedId)
+        ? null
+        : 'send-canned params must be exactly { target, cannedId }';
+    case 'wx':
+      return hasExactKeys(params, ['target', 'icao']) &&
+        isWriteTarget(params.target) &&
+        isString(params.icao) &&
+        ICAO_PATTERN.test(params.icao)
+        ? null
+        : 'wx params must be exactly { target, icao }';
+    case 'loadsheet':
+      return hasExactKeys(params, ['plannedLegId']) && isSafeInt(params.plannedLegId, 1)
+        ? null
+        : 'loadsheet params must be exactly { plannedLegId }';
+  }
+}
+
+function decodeDatalinkRequest(obj: Record<string, unknown>): DecodeResult<ControlMessage> {
+  const messageType = 'datalink-request';
+  if (!isString(obj.id) || !DATALINK_REQUEST_ID_PATTERN.test(obj.id)) {
+    return badShape(messageType, 'id must be dl-<digits>');
+  }
+  const requestId = obj.id;
+  const reject = (detail: string): DecodeError => ({
+    ok: false,
+    error: 'bad-shape',
+    messageType,
+    detail,
+    requestId,
+  });
+  if (!isString(obj.op) || !(DATALINK_OPS as readonly string[]).includes(obj.op)) {
+    return reject('op is not a datalink operation');
+  }
+  if (!isPlainObject(obj.params)) return reject('params must be an object');
+  const problem = datalinkParamsProblem(obj.op as DatalinkOp, obj.params);
+  if (problem !== null) return reject(problem);
+  return { ok: true, message: obj as unknown as DatalinkRequestMessage };
+}
+
 /** Empty and whitespace-only lines are skipped before decoding; not errors. */
 export function isBlankLine(line: string): boolean {
   return line.trim() === '';
@@ -263,6 +506,9 @@ export function decodeSidecarMessage(line: string): DecodeResult<SidecarMessage>
       if (!isString(obj.sidecarVersion)) return badShape(messageType, 'sidecarVersion must be a string');
       if (!isString(obj.nodeVersion)) return badShape(messageType, 'nodeVersion must be a string');
       if (!isString(obj.configPath)) return badShape(messageType, 'configPath must be a string');
+      if (obj.features !== undefined && !(Array.isArray(obj.features) && obj.features.every(isString))) {
+        return badShape(messageType, 'features must be an array of strings when present');
+      }
       return { ok: true, message: obj as unknown as HelloMessage };
     }
     case 'status': {
@@ -298,6 +544,26 @@ export function decodeSidecarMessage(line: string): DecodeResult<SidecarMessage>
       if (!Array.isArray(obj.objects)) return badShape(messageType, 'objects must be an array');
       return { ok: true, message: obj as unknown as TrafficMessage };
     }
+    case 'datalink-response': {
+      if (!isString(obj.id)) return badShape(messageType, 'id must be a string');
+      if (typeof obj.ok !== 'boolean') return badShape(messageType, 'ok must be a boolean');
+      if (obj.ok && !isPlainObject(obj.result)) return badShape(messageType, 'result must be an object');
+      if (!obj.ok && !(isPlainObject(obj.error) && isString(obj.error.code))) {
+        return badShape(messageType, 'error must be an object with a string code');
+      }
+      return { ok: true, message: obj as unknown as DatalinkResponseMessage };
+    }
+    case 'datalink-state': {
+      if (!isString(obj.state)) return badShape(messageType, 'state must be a string');
+      if (typeof obj.watching !== 'boolean') return badShape(messageType, 'watching must be a boolean');
+      if (obj.scope !== null && !isPlainObject(obj.scope)) {
+        return badShape(messageType, 'scope must be an object or null');
+      }
+      if (obj.thread !== null && !isPlainObject(obj.thread)) {
+        return badShape(messageType, 'thread must be an object or null');
+      }
+      return { ok: true, message: obj as unknown as DatalinkStateMessage };
+    }
   }
 }
 
@@ -322,6 +588,8 @@ export function decodeControlMessage(line: string): DecodeResult<ControlMessage>
       if (!isString(obj.id)) return badShape(messageType, 'id must be a string');
       return { ok: true, message: obj as unknown as ControlPing };
     }
+    case 'datalink-request':
+      return decodeDatalinkRequest(obj);
     default:
       return { ok: true, message: obj as unknown as ControlMessage };
   }
@@ -334,6 +602,25 @@ export function encodeSidecarMessage(message: SidecarMessage): string {
 
 export function encodeControlMessage(message: ControlMessage): string {
   return `${JSON.stringify(message)}\n`;
+}
+
+/**
+ * Every datalink-response is written through this. A result that would not fit
+ * on one line becomes a `too-large` error for the same request id, so no
+ * oversize line is ever written and the shell still gets exactly one answer.
+ */
+export function encodeDatalinkResponse(message: DatalinkResponseMessage): string {
+  const line = `${JSON.stringify(message)}\n`;
+  if (Buffer.byteLength(line, 'utf8') <= MAX_LINE_BYTES) return line;
+  const fallback: DatalinkResponseMessage = {
+    v: message.v,
+    type: message.type,
+    at: message.at,
+    id: message.id,
+    ok: false,
+    error: { code: 'too-large', httpStatus: null, serverCode: null },
+  };
+  return `${JSON.stringify(fallback)}\n`;
 }
 
 /** One-line, already-redacted description of a decode failure, for the log. */

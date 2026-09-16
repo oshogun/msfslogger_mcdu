@@ -1,0 +1,60 @@
+{
+  "_sample": "POST /api/planned-legs/12/acars-messages/wx. Always 201.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/wx",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "body": {
+      "icao": "LFPG"
+    }
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "flight_id": null,
+      "icao": "LFPG",
+      "available": true,
+      "request": {
+        "id": 15,
+        "flight_id": null,
+        "planned_leg_id": 12,
+        "direction": "downlink",
+        "category": "wx",
+        "label": "WX REQUEST LFPG",
+        "body": "WX REQUEST LFPG",
+        "payload_json": null,
+        "correlation_id": null,
+        "dedup_key": null,
+        "sent_at": "2026-09-16T12:50:00.000Z",
+        "read_at": null
+      },
+      "reply": {
+        "id": 16,
+        "flight_id": null,
+        "planned_leg_id": 12,
+        "direction": "uplink",
+        "category": "wx",
+        "label": "METAR/TAF LFPG",
+        "body": "METAR LFPG 161230Z 22008KT CAVOK 21/09 Q1015 NOSIG\nTAF LFPG 161100Z 1612/1718 22010KT CAVOK",
+        "payload_json": null,
+        "correlation_id": 15,
+        "dedup_key": null,
+        "sent_at": "2026-09-16T12:50:00.400Z",
+        "read_at": null
+      },
+      "weather": {
+        "icao": "LFPG",
+        "metar": "METAR LFPG 161230Z 22008KT CAVOK 21/09 Q1015 NOSIG",
+        "taf": "TAF LFPG 161100Z 1612/1718 22010KT CAVOK",
+        "fetched_at": "2026-09-16T12:50:00.400Z"
+      }
+    }
+  }
+}

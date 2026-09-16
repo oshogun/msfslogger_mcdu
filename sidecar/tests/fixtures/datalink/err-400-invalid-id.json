@@ -1,0 +1,21 @@
+{
+  "_sample": "400 INVALID_ID (non-numeric id). The client builds paths from validated integers only, so this is a bug signal.",
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/abc/acars-messages",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Invalid id",
+      "code": "INVALID_ID"
+    }
+  }
+}

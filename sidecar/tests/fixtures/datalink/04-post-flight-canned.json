@@ -1,0 +1,37 @@
+{
+  "_sample": "POST /api/flights/92/acars-messages. ASSUMED success body: the client treats any 2xx as sent and does not read the body.",
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/92/acars-messages",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "body": {
+      "canned_id": "gate-request"
+    }
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "message": {
+        "id": 17,
+        "flight_id": 92,
+        "planned_leg_id": null,
+        "direction": "downlink",
+        "category": "freetext",
+        "label": "GATE REQUEST",
+        "body": "GATE REQUEST",
+        "payload_json": null,
+        "correlation_id": null,
+        "dedup_key": null,
+        "sent_at": "2026-09-16T14:32:07.113Z",
+        "read_at": null
+      }
+    }
+  }
+}

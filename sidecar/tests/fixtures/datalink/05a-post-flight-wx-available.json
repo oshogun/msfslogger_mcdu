@@ -1,0 +1,60 @@
+{
+  "_sample": "POST /api/flights/92/acars-messages/wx. Always 201.",
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/92/acars-messages/wx",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "body": {
+      "icao": "EGLL"
+    }
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "flight_id": 92,
+      "icao": "EGLL",
+      "available": true,
+      "request": {
+        "id": 19,
+        "flight_id": 92,
+        "planned_leg_id": null,
+        "direction": "downlink",
+        "category": "wx",
+        "label": "WX REQUEST EGLL",
+        "body": "WX REQUEST EGLL",
+        "payload_json": null,
+        "correlation_id": null,
+        "dedup_key": null,
+        "sent_at": "2026-09-16T14:40:00.000Z",
+        "read_at": null
+      },
+      "reply": {
+        "id": 20,
+        "flight_id": 92,
+        "planned_leg_id": null,
+        "direction": "uplink",
+        "category": "wx",
+        "label": "METAR/TAF EGLL",
+        "body": "METAR EGLL 161250Z 24012KT 9999 FEW030 18/10 Q1012 NOSIG\nTAF EGLL 161058Z 1612/1718 24012KT 9999 FEW030 BKN045\n  TEMPO 1612/1616 25018G30KT 7000 -SHRA SCT020CB\n  BECMG 1616/1619 27010KT\n  PROB30 TEMPO 1619/1702 4000 RA BR BKN008 OVC015\n  BECMG 1702/1705 VRB03KT 3000 BR FEW004 BKN010\n  TEMPO 1705/1709 0800 FG VV002\n  BECMG 1709/1712 22008KT 9999 NSW SCT025\n  TEMPO 1712/1718 24015G25KT 6000 -RA BKN014",
+        "payload_json": null,
+        "correlation_id": 19,
+        "dedup_key": null,
+        "sent_at": "2026-09-16T14:40:00.800Z",
+        "read_at": null
+      },
+      "weather": {
+        "icao": "EGLL",
+        "metar": "METAR EGLL 161250Z 24012KT 9999 FEW030 18/10 Q1012 NOSIG",
+        "taf": "TAF EGLL 161058Z 1612/1718 24012KT 9999 FEW030 BKN045\n  TEMPO 1612/1616 25018G30KT 7000 -SHRA SCT020CB\n  BECMG 1616/1619 27010KT\n  PROB30 TEMPO 1619/1702 4000 RA BR BKN008 OVC015\n  BECMG 1702/1705 VRB03KT 3000 BR FEW004 BKN010\n  TEMPO 1705/1709 0800 FG VV002\n  BECMG 1709/1712 22008KT 9999 NSW SCT025\n  TEMPO 1712/1718 24015G25KT 6000 -RA BKN014",
+        "fetched_at": "2026-09-16T14:40:00.800Z"
+      }
+    }
+  }
+}

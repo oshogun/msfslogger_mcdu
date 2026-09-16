@@ -1,0 +1,21 @@
+{
+  "_sample": "401 + JSON code INVALID_INGEST_TOKEN: wrong token. Stop retrying, config error. Classified by body code BEFORE looking at the scope header.",
+  "request": {
+    "method": "GET",
+    "path": "/api/status",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Invalid ingest token",
+      "code": "INVALID_INGEST_TOKEN"
+    }
+  }
+}

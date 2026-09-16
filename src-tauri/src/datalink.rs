@@ -1,0 +1,436 @@
+use crate::{config::lock, protocol};
+use serde_json::{json, Map, Value};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+        Mutex,
+    },
+    time::Duration,
+};
+
+pub const FEATURE: &str = "datalink";
+// Longer than the sidecar's own 8 s HTTP timeout, so a slow server is reported
+// by the sidecar with its real cause before the shell gives up on the answer.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_millis(12_000);
+// The CDU needs at most three requests at once; a runaway caller is refused
+// rather than queued without limit.
+pub const PENDING_MAX: usize = 8;
+pub const STATE_OUTDATED: &str = "dl.sidecar-outdated";
+pub const STATE_UNAVAILABLE: &str = "dl.sidecar-unavailable";
+const SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
+const REQUEST_LINE_MAX: usize = 4096;
+const OPS: [&str; 7] = [
+    "watch",
+    "refresh",
+    "thread",
+    "canned-list",
+    "send-canned",
+    "wx",
+    "loadsheet",
+];
+
+pub fn error_envelope(code: &str) -> Value {
+    json!({"ok":false, "error":{"code":code, "httpStatus":null, "serverCode":null}})
+}
+
+pub fn synthetic_state(state: &str) -> Value {
+    json!({
+        "v":1, "type":"datalink-state", "at":protocol::now(), "state":state, "watching":false,
+        "httpStatus":null, "serverCode":null, "lastOkAt":null, "lastErrorAt":null,
+        "nextPollAt":null, "scope":null, "thread":null
+    })
+}
+
+/// A sidecar that predates the datalink silently ignores its requests, so the
+/// shell only talks to one that announced the feature in its hello.
+pub fn supports_datalink(hello: &Value) -> bool {
+    hello["features"]
+        .as_array()
+        .is_some_and(|features| features.iter().any(|feature| feature == FEATURE))
+}
+
+fn has_exact_keys(value: &Value, keys: &[&str]) -> Option<Map<String, Value>> {
+    let object = value.as_object()?;
+    (object.len() == keys.len() && keys.iter().all(|key| object.contains_key(*key)))
+        .then(|| object.clone())
+}
+
+fn safe_integer(value: &Value, min: u64) -> bool {
+    value
+        .as_u64()
+        .is_some_and(|n| (min..=SAFE_INTEGER_MAX).contains(&n))
+}
+
+fn valid_target(value: &Value) -> bool {
+    has_exact_keys(value, &["kind", "id"]).is_some_and(|target| {
+        matches!(target["kind"].as_str(), Some("flight" | "leg")) && safe_integer(&target["id"], 1)
+    })
+}
+
+fn valid_canned_id(value: &Value) -> bool {
+    value.as_str().is_some_and(|id| {
+        let bytes = id.as_bytes();
+        (1..=64).contains(&bytes.len())
+            && bytes[0].is_ascii_alphanumeric()
+            && bytes[1..]
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    })
+}
+
+fn valid_icao(value: &Value) -> bool {
+    value.as_str().is_some_and(|icao| {
+        let bytes = icao.as_bytes();
+        bytes.len() == 4
+            && bytes[0].is_ascii_uppercase()
+            && bytes[1..]
+                .iter()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    })
+}
+
+/// The same rules the sidecar applies. Extra keys are refused, because an extra
+/// key next to a canned id is exactly how free text would be smuggled through.
+pub fn valid_params(op: &str, params: &Value) -> bool {
+    match op {
+        "watch" => has_exact_keys(params, &["on"]).is_some_and(|p| p["on"].is_boolean()),
+        "refresh" | "canned-list" => has_exact_keys(params, &[]).is_some(),
+        "thread" => has_exact_keys(params, &["epoch", "endSeq"])
+            .is_some_and(|p| safe_integer(&p["epoch"], 1) && safe_integer(&p["endSeq"], 0)),
+        "send-canned" => has_exact_keys(params, &["target", "cannedId"])
+            .is_some_and(|p| valid_target(&p["target"]) && valid_canned_id(&p["cannedId"])),
+        "wx" => has_exact_keys(params, &["target", "icao"])
+            .is_some_and(|p| valid_target(&p["target"]) && valid_icao(&p["icao"])),
+        "loadsheet" => has_exact_keys(params, &["plannedLegId"])
+            .is_some_and(|p| safe_integer(&p["plannedLegId"], 1)),
+        _ => false,
+    }
+}
+
+/// Builds the request line without its newline, or None when the op is unknown
+/// or the line would exceed the size the sidecar is promised.
+pub fn request_line(id: &str, op: &str, params: &Value) -> Option<String> {
+    if !OPS.contains(&op) {
+        return None;
+    }
+    let line =
+        json!({"v":1, "type":"datalink-request", "id":id, "op":op, "params":params}).to_string();
+    (line.len() <= REQUEST_LINE_MAX).then_some(line)
+}
+
+/// Strips a decoded datalink-response down to the envelope the webview sees.
+pub fn response_envelope(response: &Value) -> Value {
+    if response["ok"] == Value::Bool(true) {
+        return json!({"ok":true, "result":response["result"].clone()});
+    }
+    let error = &response["error"];
+    let code = error["code"]
+        .as_str()
+        .filter(|code| (1..=64).contains(&code.len()))
+        .unwrap_or("bad-response");
+    let http_status = Some(&error["httpStatus"])
+        .filter(|status| status.is_number())
+        .cloned()
+        .unwrap_or(Value::Null);
+    let server_code = Some(&error["serverCode"])
+        .filter(|code| code.is_string())
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({"ok":false, "error":{"code":code, "httpStatus":http_status, "serverCode":server_code}})
+}
+
+struct Pending {
+    // None until the worker has handed the line to a particular sidecar.
+    generation: Option<u64>,
+    reply: SyncSender<Value>,
+}
+
+/// Correlates datalink requests with their responses. Each entry is resolved
+/// at most once: whoever removes it from the map is the one that answers.
+pub struct DatalinkRelay {
+    next: AtomicU64,
+    pending: Mutex<HashMap<String, Pending>>,
+}
+
+impl Default for DatalinkRelay {
+    fn default() -> Self {
+        Self {
+            next: AtomicU64::new(1),
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl DatalinkRelay {
+    pub fn register(&self) -> Result<(String, Receiver<Value>), Value> {
+        let mut pending = lock(&self.pending);
+        if pending.len() >= PENDING_MAX {
+            return Err(error_envelope("busy"));
+        }
+        let id = format!("dl-{}", self.next.fetch_add(1, Ordering::Relaxed));
+        let (reply, receiver) = mpsc::sync_channel(1);
+        pending.insert(
+            id.clone(),
+            Pending {
+                generation: None,
+                reply,
+            },
+        );
+        Ok((id, receiver))
+    }
+
+    pub fn bind_generation(&self, id: &str, generation: u64) {
+        if let Some(entry) = lock(&self.pending).get_mut(id) {
+            entry.generation = Some(generation);
+        }
+    }
+
+    pub fn complete(&self, id: &str, generation: u64, envelope: Value) -> bool {
+        let mut pending = lock(&self.pending);
+        if pending.get(id).and_then(|entry| entry.generation) != Some(generation) {
+            return false;
+        }
+        if let Some(entry) = pending.remove(id) {
+            let _ = entry.reply.try_send(envelope);
+        }
+        true
+    }
+
+    pub fn fail_unbound(&self, id: &str, code: &str) {
+        let mut pending = lock(&self.pending);
+        if pending
+            .get(id)
+            .is_some_and(|entry| entry.generation.is_none())
+        {
+            if let Some(entry) = pending.remove(id) {
+                let _ = entry.reply.try_send(error_envelope(code));
+            }
+        }
+    }
+
+    pub fn fail_generation(&self, generation: u64) {
+        let mut pending = lock(&self.pending);
+        let exited: Vec<String> = pending
+            .iter()
+            .filter(|(_, entry)| entry.generation == Some(generation))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in exited {
+            if let Some(entry) = pending.remove(&id) {
+                let _ = entry.reply.try_send(error_envelope("sidecar-exited"));
+            }
+        }
+    }
+
+    pub fn abandon(&self, id: &str) {
+        lock(&self.pending).remove(id);
+    }
+
+    #[cfg(test)]
+    pub fn pending(&self) -> usize {
+        lock(&self.pending).len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolved(receiver: &Receiver<Value>) -> Option<Value> {
+        receiver.try_recv().ok()
+    }
+
+    #[test]
+    fn ids_are_sequential_from_one() {
+        let relay = DatalinkRelay::default();
+        let (first, _a) = relay.register().unwrap();
+        let (second, _b) = relay.register().unwrap();
+        assert_eq!((first.as_str(), second.as_str()), ("dl-1", "dl-2"));
+    }
+
+    #[test]
+    fn requests_beyond_the_pending_bound_are_refused() {
+        let relay = DatalinkRelay::default();
+        let held: Vec<_> = (0..PENDING_MAX)
+            .map(|_| relay.register().unwrap())
+            .collect();
+        assert_eq!(relay.register().unwrap_err(), error_envelope("busy"));
+        relay.abandon(&held[0].0);
+        assert!(relay.register().is_ok());
+    }
+
+    #[test]
+    fn complete_needs_a_known_id_and_the_bound_generation() {
+        let relay = DatalinkRelay::default();
+        let (id, receiver) = relay.register().unwrap();
+        let envelope = json!({"ok":true, "result":{}});
+        // Unbound: the line never reached a sidecar, so no sidecar can answer it.
+        assert!(!relay.complete(&id, 1, envelope.clone()));
+        relay.bind_generation(&id, 3);
+        assert!(!relay.complete(&id, 2, envelope.clone()));
+        assert!(!relay.complete("dl-999", 3, envelope.clone()));
+        assert!(relay.complete(&id, 3, envelope.clone()));
+        assert_eq!(resolved(&receiver), Some(envelope.clone()));
+        assert!(!relay.complete(&id, 3, envelope));
+        assert_eq!(relay.pending(), 0);
+    }
+
+    #[test]
+    fn fail_generation_resolves_only_entries_bound_to_that_generation() {
+        let relay = DatalinkRelay::default();
+        let (old, old_rx) = relay.register().unwrap();
+        let (newer, newer_rx) = relay.register().unwrap();
+        let (unbound, unbound_rx) = relay.register().unwrap();
+        relay.bind_generation(&old, 4);
+        relay.bind_generation(&newer, 5);
+        relay.fail_generation(4);
+        assert_eq!(resolved(&old_rx), Some(error_envelope("sidecar-exited")));
+        assert_eq!(resolved(&newer_rx), None);
+        assert_eq!(resolved(&unbound_rx), None);
+        relay.fail_unbound(&newer, "busy");
+        assert_eq!(resolved(&newer_rx), None);
+        relay.fail_unbound(&unbound, "sidecar-unavailable");
+        assert_eq!(
+            resolved(&unbound_rx),
+            Some(error_envelope("sidecar-unavailable"))
+        );
+        assert_eq!(relay.pending(), 1);
+    }
+
+    #[test]
+    fn a_late_response_after_abandon_is_unknown() {
+        let relay = DatalinkRelay::default();
+        let (id, receiver) = relay.register().unwrap();
+        relay.bind_generation(&id, 1);
+        relay.abandon(&id);
+        assert!(!relay.complete(&id, 1, json!({"ok":true, "result":{}})));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn params_follow_the_request_rules() {
+        let target = json!({"kind":"flight", "id":92});
+        for (op, params) in [
+            ("watch", json!({"on":true})),
+            ("refresh", json!({})),
+            ("thread", json!({"epoch":1, "endSeq":0})),
+            ("canned-list", json!({})),
+            (
+                "send-canned",
+                json!({"target":target, "cannedId":"gate-request"}),
+            ),
+            (
+                "wx",
+                json!({"target":{"kind":"leg", "id":SAFE_INTEGER_MAX}, "icao":"LFPG"}),
+            ),
+            ("loadsheet", json!({"plannedLegId":12})),
+        ] {
+            assert!(valid_params(op, &params), "{op} {params}");
+            let line = request_line("dl-7", op, &params).unwrap();
+            let decoded: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                decoded,
+                json!({"v":1, "type":"datalink-request", "id":"dl-7", "op":op, "params":params})
+            );
+        }
+        for (op, params) in [
+            ("watch", json!({"on":"yes"})),
+            ("watch", json!({})),
+            ("refresh", json!({"force":true})),
+            ("refresh", json!(null)),
+            ("thread", json!({"epoch":0, "endSeq":0})),
+            ("thread", json!({"epoch":1, "endSeq":-1})),
+            ("thread", json!({"epoch":1, "endSeq":SAFE_INTEGER_MAX + 1})),
+            ("thread", json!({"epoch":1.5, "endSeq":1})),
+            (
+                "send-canned",
+                json!({"target":target, "cannedId":"gate-request", "body":"HELLO DISPATCH"}),
+            ),
+            (
+                "send-canned",
+                json!({"target":target, "text":"ANY FREE TEXT"}),
+            ),
+            ("send-canned", json!({"target":target, "cannedId":"-gate"})),
+            (
+                "send-canned",
+                json!({"target":target, "cannedId":"a".repeat(65)}),
+            ),
+            (
+                "send-canned",
+                json!({"target":target, "cannedId":"gate request"}),
+            ),
+            (
+                "send-canned",
+                json!({"target":{"kind":"flight", "id":0}, "cannedId":"x"}),
+            ),
+            (
+                "send-canned",
+                json!({"target":{"kind":"airport", "id":1}, "cannedId":"x"}),
+            ),
+            (
+                "send-canned",
+                json!({"target":{"kind":"flight", "id":1, "extra":1}, "cannedId":"x"}),
+            ),
+            ("wx", json!({"target":target, "icao":"lfpg"})),
+            ("wx", json!({"target":target, "icao":"1FPG"})),
+            ("wx", json!({"target":target, "icao":"LFPGX"})),
+            ("loadsheet", json!({"plannedLegId":0})),
+            ("loadsheet", json!({"plannedLegId":"12"})),
+            ("delete", json!({})),
+        ] {
+            assert!(!valid_params(op, &params), "{op} {params}");
+        }
+        assert_eq!(request_line("dl-1", "delete", &json!({})), None);
+        assert_eq!(
+            request_line("dl-1", "watch", &json!({"on":"x".repeat(REQUEST_LINE_MAX)})),
+            None
+        );
+    }
+
+    #[test]
+    fn envelopes_and_synthetic_states_have_the_frozen_shape() {
+        assert_eq!(
+            error_envelope("shell-timeout"),
+            json!({"ok":false, "error":{"code":"shell-timeout", "httpStatus":null, "serverCode":null}})
+        );
+        let mut state = synthetic_state(STATE_OUTDATED);
+        assert!(state["at"].is_u64());
+        state["at"] = json!(1);
+        assert_eq!(
+            state,
+            json!({"v":1, "type":"datalink-state", "at":1, "state":"dl.sidecar-outdated",
+                "watching":false, "httpStatus":null, "serverCode":null, "lastOkAt":null,
+                "lastErrorAt":null, "nextPollAt":null, "scope":null, "thread":null})
+        );
+        assert!(protocol::decode(&state.to_string()).is_ok());
+        assert!(supports_datalink(&json!({"features":["x", "datalink"]})));
+        assert!(!supports_datalink(&json!({"features":"datalink"})));
+        assert!(!supports_datalink(&json!({})));
+    }
+
+    #[test]
+    fn response_envelopes_keep_only_the_forwarded_members() {
+        assert_eq!(
+            response_envelope(
+                &json!({"v":1, "type":"datalink-response", "at":1, "id":"dl-1", "ok":true, "result":{"sent":true}})
+            ),
+            json!({"ok":true, "result":{"sent":true}})
+        );
+        assert_eq!(
+            response_envelope(&json!({"ok":false, "error":{"code":"no-dispatch-data",
+                "httpStatus":409, "serverCode":"NO_DISPATCH_DATA", "error":"server text"}})),
+            json!({"ok":false, "error":{"code":"no-dispatch-data", "httpStatus":409, "serverCode":"NO_DISPATCH_DATA"}})
+        );
+        assert_eq!(
+            response_envelope(
+                &json!({"ok":false, "error":{"code":"x".repeat(65), "httpStatus":"409", "serverCode":7}})
+            ),
+            json!({"ok":false, "error":{"code":"bad-response", "httpStatus":null, "serverCode":null}})
+        );
+    }
+}

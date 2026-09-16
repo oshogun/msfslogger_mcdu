@@ -19,3 +19,16 @@
 .config-prompts {
   grid-row: 12;
 }
+
+/* DATALINK text is already cut to 48 columns by the pager; an ellipsis here
+   would hide a character the pager promised to keep. */
+.dl-page .cell-l,
+.dl-page .cell-r {
+  text-overflow: clip;
+}
+.dl-text {
+  color: var(--fmc-green);
+}
+.dl-sheet .cell-l {
+  color: var(--fmc-white);
+}

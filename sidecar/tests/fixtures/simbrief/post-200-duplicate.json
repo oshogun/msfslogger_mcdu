@@ -1,0 +1,43 @@
+{
+  "_sample": "post-200-duplicate",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "imported": [],
+      "result": {
+        "status": "duplicate",
+        "planned_leg_id": 123,
+        "label": "KJFK → EGLL (BAW178)",
+        "warnings": [],
+        "error": "This SimBrief plan is already imported without a trip as leg 4. Generate a new OFP on simbrief.com, or re-import to add it again."
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "status": "duplicate",
+      "plannedLegId": 123,
+      "label": "KJFK → EGLL (BAW178)",
+      "warningCount": 0,
+      "httpStatus": 200
+    },
+    "override": "set 123",
+    "datalinkState": "emitted with prefiledLeg; availability unchanged",
+    "cdu": "ALREADY FILED",
+    "advisory": "PLAN ALREADY FILED"
+  }
+}

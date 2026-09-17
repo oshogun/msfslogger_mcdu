@@ -1,0 +1,30 @@
+{
+  "_sample": "get-settings-not-configured",
+  "request": {
+    "method": "GET",
+    "path": "/api/settings/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "simbrief_user_id": null
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "configured": false
+    },
+    "cdu": "NOT SET",
+    "hint": "SET PILOT ID ON SERVER"
+  }
+}

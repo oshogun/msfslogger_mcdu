@@ -1,9 +1,11 @@
 // ── Datalink HTTP client ──────────────────────────────────────────────────────
 //
-// The only datalink code that talks to the network. It can build exactly ten
+// The only datalink code that talks to the network. It can build exactly twelve
 // requests, one per server route in the table below, and nothing else: paths
 // are assembled from validated integer ids, so no user text, query string or
-// trailing slash can reach a URL.
+// trailing slash can reach a URL. The two SimBrief routes take no parameter at
+// all: the prefile POST has no body, so it can never ask the server to import
+// a duplicate plan.
 //
 // What the server's token check expects shapes the rest:
 //
@@ -26,8 +28,14 @@ import { isValidId } from './datalink-scope';
 import { CANNED_ID_PATTERN, ICAO_PATTERN } from './protocol';
 
 export const DATALINK_HTTP_TIMEOUT_MS = 8000;
+// The server gives SimBrief 20 s before answering 504 itself. The extra
+// seconds cover the port forward and queueing, so a slow SimBrief comes back
+// as the server's own answer rather than as an unknown outcome here.
+export const SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS = 25000;
 export const DATALINK_THREAD_BODY_MAX_BYTES = 16 * 1024 * 1024;
 export const DATALINK_OTHER_BODY_MAX_BYTES = 1024 * 1024;
+/** A successful prefile answers with the whole planned-leg row. */
+export const SIMBRIEF_PREFILE_BODY_MAX_BYTES = 16 * 1024 * 1024;
 
 export type DatalinkRoute =
   | { key: 'status' }
@@ -39,7 +47,9 @@ export type DatalinkRoute =
   | { key: 'leg-send'; id: number; cannedId: string }
   | { key: 'flight-wx'; id: number; icao: string }
   | { key: 'leg-wx'; id: number; icao: string }
-  | { key: 'leg-loadsheet'; id: number };
+  | { key: 'leg-loadsheet'; id: number }
+  | { key: 'simbrief-settings' }
+  | { key: 'simbrief-prefile' };
 
 export type DatalinkRouteKey = DatalinkRoute['key'];
 
@@ -59,9 +69,21 @@ export interface DatalinkTransport {
 }
 
 export interface DatalinkClientOptions {
+  /** Every route except the SimBrief prefile. */
   timeoutMs?: number;
-  /** Overrides both body caps; tests use it to exercise the cap cheaply. */
+  /** The SimBrief prefile only. */
+  prefileTimeoutMs?: number;
+  /** Overrides every body cap; tests use it to exercise the cap cheaply. */
   maxBodyBytes?: number;
+}
+
+/** The timeout one attempt on `key` uses. Nothing else picks a timeout. */
+export function httpTimeoutMs(
+  key: DatalinkRouteKey,
+  options: Pick<DatalinkClientOptions, 'timeoutMs' | 'prefileTimeoutMs'>,
+): number {
+  if (key === 'simbrief-prefile') return options.prefileTimeoutMs ?? SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS;
+  return options.timeoutMs ?? DATALINK_HTTP_TIMEOUT_MS;
 }
 
 const ROUTE_TABLE: Readonly<Record<DatalinkRouteKey, { method: 'GET' | 'POST'; template: string }>> = {
@@ -75,6 +97,8 @@ const ROUTE_TABLE: Readonly<Record<DatalinkRouteKey, { method: 'GET' | 'POST'; t
   'leg-wx': { method: 'POST', template: '/api/planned-legs/:id/acars-messages/wx' },
   'leg-loadsheet': { method: 'POST', template: '/api/planned-legs/:id/acars-messages/loadsheet' },
   'ground-session-current': { method: 'GET', template: '/api/ground-sessions/current' },
+  'simbrief-settings': { method: 'GET', template: '/api/settings/simbrief' },
+  'simbrief-prefile': { method: 'POST', template: '/api/planned-legs/simbrief' },
 };
 
 export function routeTemplate(key: DatalinkRouteKey): string {
@@ -105,13 +129,9 @@ export function buildRequest(route: DatalinkRoute): BuiltRequest | null {
   }
 
   const threadRoute = route.key === 'flight-thread' || route.key === 'leg-thread';
-  return {
-    method,
-    path,
-    template,
-    body,
-    maxBodyBytes: threadRoute ? DATALINK_THREAD_BODY_MAX_BYTES : DATALINK_OTHER_BODY_MAX_BYTES,
-  };
+  let maxBodyBytes = threadRoute ? DATALINK_THREAD_BODY_MAX_BYTES : DATALINK_OTHER_BODY_MAX_BYTES;
+  if (route.key === 'simbrief-prefile') maxBodyBytes = SIMBRIEF_PREFILE_BODY_MAX_BYTES;
+  return { method, path, template, body, maxBodyBytes };
 }
 
 /** Node nests the useful code a few `cause` levels down; a timeout's code is numeric and skipped. */
@@ -155,12 +175,12 @@ async function readCapped(
 
 export class DatalinkClient {
   private readonly transport: () => DatalinkTransport | null;
-  private readonly timeoutMs: number;
+  private readonly options: DatalinkClientOptions;
   private readonly maxBodyBytes: number | null;
 
   constructor(transport: () => DatalinkTransport | null, options: DatalinkClientOptions = {}) {
     this.transport = transport;
-    this.timeoutMs = options.timeoutMs ?? DATALINK_HTTP_TIMEOUT_MS;
+    this.options = { ...options };
     this.maxBodyBytes = options.maxBodyBytes ?? null;
   }
 
@@ -183,7 +203,7 @@ export class DatalinkClient {
     };
     if (built.body !== null) headers['content-type'] = 'application/json';
 
-    const timeout = AbortSignal.timeout(this.timeoutMs);
+    const timeout = AbortSignal.timeout(httpTimeoutMs(route.key, this.options));
     const signal = abort ? AbortSignal.any([timeout, abort]) : timeout;
     const init: Record<string, unknown> = {
       method: built.method,

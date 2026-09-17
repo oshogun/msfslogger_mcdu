@@ -1,0 +1,35 @@
+{
+  "_sample": "post-401-no-scope-header",
+  "_why": "A server that has the datalink routes (9a52d2d) but not 92fa6f6: the route is not in token scope. Must not touch the shared datalink state.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Unauthorized"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-unavailable",
+    "httpStatus": 401,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "SIMBRIEF UNAVAILABLE",
+    "hint": "SERVER UPDATE NEEDED"
+  }
+}

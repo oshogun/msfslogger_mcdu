@@ -1,0 +1,36 @@
+{
+  "_sample": "post-400-code-status-mismatch",
+  "_why": "A known code on the wrong status is not trusted as that code.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "x",
+      "code": "NO_PLAN"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 400,
+    "serverCode": "NO_PLAN",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "unknown",
+    "cdu": "SERVER FAULT 400",
+    "hint": "SAFE TO PREFILE AGAIN"
+  }
+}

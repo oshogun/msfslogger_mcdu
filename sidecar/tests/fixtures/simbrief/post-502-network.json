@@ -1,0 +1,35 @@
+{
+  "_sample": "post-502-network",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 502,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Could not reach SimBrief. Check your internet connection and try again.",
+      "code": "NETWORK"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-network",
+    "httpStatus": 502,
+    "serverCode": "NETWORK",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "SIMBRIEF NO COMM",
+    "hint": "TRY AGAIN SHORTLY"
+  }
+}

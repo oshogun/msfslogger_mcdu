@@ -1,0 +1,35 @@
+{
+  "_sample": "post-502-bad-status",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 502,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SimBrief returned an error: HTTP 500. Try again in a moment.",
+      "code": "BAD_STATUS"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-bad-status",
+    "httpStatus": 502,
+    "serverCode": "BAD_STATUS",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "SIMBRIEF ERROR",
+    "hint": "TRY AGAIN SHORTLY"
+  }
+}

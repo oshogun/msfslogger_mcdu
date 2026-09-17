@@ -14,6 +14,7 @@
 
 import { createDatalinkSession } from './datalink-session.js';
 import { paginateText } from './datalink-text.js';
+import { ADVISORY, TEXT as PREFILE_TEXT, errorText as prefileErrorText, heldPrefiledLeg } from './fpln-vocab.js';
 import {
   NO_FLIGHT_PLAN,
   cutText,
@@ -34,6 +35,7 @@ let session = null;
 /** The DATALINK page on screen and its view element, or null. */
 let current = null;
 let refreshing = false;
+let clearing = false;
 let textPage = 1;
 
 // ── Rows ─────────────────────────────────────────────────────────────────────
@@ -92,17 +94,24 @@ function paintIndex(view) {
   const state = session.getState();
   const described = describeDatalinkState(state);
   const lastOkAt = state && typeof state.lastOkAt === 'number' ? state.lastOkAt : null;
+  const scope = state && state.scope;
+  // A held prefiled leg puts CLR PREFILE> beside the scope, so the scope line
+  // says only PREFILE and the leg id gets a row of its own: any id then fits
+  // the 24-column line.
+  const held = heldPrefiledLeg(state);
   fill(view, [
     label('SCOPE', lastOkAt === null ? '' : `UPD ${formatTime(lastOkAt)}Z`),
-    value(formatScope(state && state.scope)),
+    held
+      ? value(isPrefileScope(scope) ? PREFILE_TEXT.prefileScope : formatScope(scope), prompt(PREFILE_TEXT.clearPrefile))
+      : value(formatScope(scope)),
     label('DATALINK'),
     value(availabilityCell(state)),
     label(''),
     value(prompt('<MESSAGES'), prompt('WX REQUEST>')),
     label(''),
     value(prompt('<DOWNLINK'), prompt('LOADSHEET>')),
-    label(''),
-    value(''),
+    label(held ? PREFILE_TEXT.prefiledLeg : ''),
+    value(held ? String(held.plannedLegId) : ''),
     label(described.hint),
     value(prompt('<INDEX'), prompt('REFRESH>')),
   ]);
@@ -116,10 +125,14 @@ function paintThread(view) {
   while (rows.length < ROWS - 2) rows.push(rows.length % 2 === 0 ? label('') : value(''));
   fill(view, [
     ...rows,
-    label(''),
+    label(isPrefileScope(state && state.scope) ? formatScope(state.scope) : ''),
     value(prompt('<RETURN'), prompt('REFRESH>')),
   ]);
   fmc.setPageNumber(thread.n, thread.m);
+}
+
+function isPrefileScope(scope) {
+  return Boolean(scope && scope.kind === 'leg' && scope.source === 'prefile');
 }
 
 function threadRows(state) {
@@ -209,6 +222,27 @@ async function refresh() {
   }
 }
 
+/**
+ * CLR PREFILE: one call at a time. The scope line changes when the datalink
+ * state that follows the clear arrives, not here.
+ */
+async function clearPrefile() {
+  if (clearing) return;
+  clearing = true;
+  try {
+    const response = await fmc.clearPrefiledLeg();
+    if (response && response.ok === true) {
+      if (response.result && response.result.cleared === true) fmc.setScratchpad(ADVISORY.cleared, 'advisory');
+    } else {
+      fmc.setScratchpad(prefileErrorText(response && response.error, 'clear'), 'error');
+    }
+  } catch {
+    fmc.setScratchpad(prefileErrorText({ code: 'host-error' }, 'clear'), 'error');
+  } finally {
+    clearing = false;
+  }
+}
+
 function afterThreadChange() {
   if (current && current.id === 'DL-THREAD') void session.loadVisibleThread();
   if (current && current.id === 'DL-MSG') {
@@ -281,6 +315,11 @@ export function register(api) {
   fmc.registerPage(dlPage('DL-INDEX', 'ACARS DATALINK', {
     paint: paintIndex,
     onLsk(lsk) {
+      if (lsk === 'R1') {
+        if (!heldPrefiledLeg(session.getState())) return false;
+        void clearPrefile();
+        return true;
+      }
       if (lsk === 'L3') {
         const state = session.getState();
         if (state && state.scope && state.scope.kind === 'none') {

@@ -241,6 +241,7 @@ describe('a token shaped like a server code never comes back as serverCode', () 
       'GET /api/status http=403 class=rejected state=dl.rejected',
       'GET /api/ground-sessions/current http=401 class=unavailable state=dl.unavailable',
       'GET /api/acars/canned-messages http=409 class=http-error state=dl.http-error',
+      'GET /api/settings/simbrief http=599 class=http-error configured=-',
     ]);
     expect(server.requests.every((r) => r.method === 'GET')).toBe(true);
     for (const line of lines) expect(line).not.toContain(CODE_TOKEN);

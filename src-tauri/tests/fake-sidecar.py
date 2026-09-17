@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 
 config_path = Path(sys.argv[-1])
@@ -10,16 +11,24 @@ config = json.loads(config_path.read_text()) if config_path.exists() else {}
 with config_path.with_name('starts').open('a') as log:
     log.write(str(os.getpid()) + '\n')
 
+emit_lock = threading.Lock()
+
 def emit(value):
-    print(json.dumps(value), flush=True)
+    with emit_lock:
+        print(json.dumps(value), flush=True)
 
 # datalinkMode: answer (default), answer-error, ignore, no-features (a sidecar
-# that predates the datalink), echo-token, exit-on-request or wrong-id.
+# that predates the datalink), no-simbrief (a sidecar with the datalink but
+# without SimBrief; otherwise answer), slow-prefile (answers simbrief-prefile
+# after prefileDelayMs, every other op at once), echo-token, exit-on-request
+# or wrong-id.
 datalink_mode = config.get('datalinkMode', 'answer')
 hello = dict(v=1, type='hello', at=1, pid=os.getpid(), sidecarVersion='fixture',
              nodeVersion='fixture', configPath=str(config_path))
-if datalink_mode != 'no-features':
+if datalink_mode == 'no-simbrief':
     hello['features'] = ['datalink']
+elif datalink_mode != 'no-features':
+    hello['features'] = ['datalink', 'simbrief-prefile']
 emit(hello)
 
 def datalink_state(state, **members):
@@ -68,6 +77,9 @@ for line in sys.stdin:
     if control['type'] == 'shutdown':
         break
     if control['type'] == 'datalink-request':
+        # One line per request the shell wrote, so a re-sent line is visible.
+        with config_path.with_name('datalink-ops').open('a') as log:
+            log.write(control['op'] + '\n')
         if datalink_mode == 'exit-on-request':
             sys.exit(3)
         response = dict(v=1, type='datalink-response', at=1, id=control['id'], ok=True,
@@ -83,7 +95,14 @@ for line in sys.stdin:
             state['scope'] = dict(kind='flight', flightId=1, note=token)
         elif datalink_mode == 'wrong-id':
             response['id'] = 'dl-999999'
-        if datalink_mode not in ('ignore', 'no-features'):
+        if datalink_mode == 'slow-prefile' and control['op'] == 'simbrief-prefile':
+            def answer_late(response=response, state=state):
+                emit(response)
+                emit(state)
+            timer = threading.Timer(config.get('prefileDelayMs', 1500) / 1000, answer_late)
+            timer.daemon = True
+            timer.start()
+        elif datalink_mode not in ('ignore', 'no-features'):
             emit(response)
             emit(state)
         continue

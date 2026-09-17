@@ -1,4 +1,5 @@
-// The three CFG pages, plus the DATALINK pages that load in the same bundle.
+// The three CFG pages, plus the DATALINK and FPLN pages that load in the same
+// bundle.
 // A shared draft keeps CFG edits across them. Existing credentials stay in the
 // shell: an untouched token is omitted from the patch so the writer preserves it.
 //
@@ -10,6 +11,7 @@
 // unchanged on a host this build has never seen.
 import { register as registerDatalinkPages } from './datalink-pages.js';
 import { register as registerDatalinkWritePages } from './datalink-write-pages.js';
+import { register as registerFplnPages } from './fpln-pages.js';
 
 let fmc = null;
 const DEFAULTS = { version: 1, serverUrl: '', certPath: null, sim: '2020',
@@ -218,4 +220,5 @@ export function register(api) {
     });
   }
   registerDatalinkWritePages(api, registerDatalinkPages(api));
+  registerFplnPages(api);
 }

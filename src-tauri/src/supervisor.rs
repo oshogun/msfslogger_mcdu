@@ -61,7 +61,29 @@ pub struct Supervisor {
     stopping: Arc<AtomicBool>,
     sink: EventSink,
     relay: Arc<DatalinkRelay>,
+    relay_timeouts: datalink::RelayTimeouts,
+    // Set while a SimBrief prefile is outstanding, so a second press is refused
+    // here rather than creating a second planned leg.
+    prefile_in_flight: Arc<AtomicBool>,
     worker: Arc<WorkerHandle>,
+}
+
+/// Holds the prefile flag for one relayed prefile and releases it on every
+/// way out: an answer, a timeout, an exited sidecar or a refused queue.
+struct PrefileGuard(Arc<AtomicBool>);
+
+impl PrefileGuard {
+    fn acquire(flag: &Arc<AtomicBool>) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(flag.clone()))
+    }
+}
+
+impl Drop for PrefileGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl Supervisor {
@@ -125,6 +147,8 @@ impl Supervisor {
             stopping: stopping.clone(),
             sink,
             relay,
+            relay_timeouts: datalink::RelayTimeouts::PRODUCTION,
+            prefile_in_flight: Arc::new(AtomicBool::new(false)),
             worker: Arc::new(WorkerHandle {
                 stopping,
                 thread: Mutex::new(Some(thread)),
@@ -145,6 +169,12 @@ impl Supervisor {
         self.worker.shutdown();
     }
 
+    #[cfg(test)]
+    pub fn with_relay_timeouts(mut self, timeouts: datalink::RelayTimeouts) -> Self {
+        self.relay_timeouts = timeouts;
+        self
+    }
+
     /// Relays one datalink op to the sidecar and waits for its answer. Always
     /// returns an envelope, and never waits longer than the relay deadline.
     pub fn datalink(&self, op: &str, params: Value) -> Value {
@@ -157,8 +187,12 @@ impl Supervisor {
         if self.stopping.load(Ordering::Acquire) {
             return datalink::error_envelope("sidecar-unavailable");
         }
-        let refused = {
+        let (refused, simbrief) = {
             let mut snapshot = lock(&self.snapshot);
+            let simbrief = snapshot
+                .hello
+                .as_ref()
+                .is_some_and(datalink::supports_simbrief);
             let state = match snapshot.hello.as_ref() {
                 None => Some(datalink::STATE_UNAVAILABLE),
                 Some(hello) if !datalink::supports_datalink(hello) => {
@@ -166,7 +200,7 @@ impl Supervisor {
                 }
                 Some(_) => None,
             };
-            state.map(|state| {
+            let refused = state.map(|state| {
                 let current = snapshot
                     .datalink
                     .as_ref()
@@ -176,7 +210,8 @@ impl Supervisor {
                     snapshot.datalink = synthetic.clone();
                 }
                 (state, synthetic)
-            })
+            });
+            (refused, simbrief)
         };
         if let Some((state, synthetic)) = refused {
             if let Some(value) = synthetic {
@@ -188,9 +223,22 @@ impl Supervisor {
                 "sidecar-unavailable"
             });
         }
+        // A sidecar that has the datalink but not SimBrief keeps its datalink
+        // state untouched: only these ops are out of date.
+        if datalink::SIMBRIEF_OPS.contains(&op) && !simbrief {
+            return datalink::error_envelope("sidecar-outdated");
+        }
         if !datalink::valid_params(op, &params) {
             return datalink::error_envelope("bad-request");
         }
+        let _prefile = if op == "simbrief-prefile" {
+            match PrefileGuard::acquire(&self.prefile_in_flight) {
+                Some(guard) => Some(guard),
+                None => return datalink::error_envelope("prefile-in-progress"),
+            }
+        } else {
+            None
+        };
         let (id, reply) = match self.relay.register() {
             Ok(registered) => registered,
             Err(busy) => return busy,
@@ -207,7 +255,7 @@ impl Supervisor {
             self.relay.abandon(&id);
             return datalink::error_envelope("busy");
         }
-        match reply.recv_timeout(datalink::REQUEST_TIMEOUT) {
+        match reply.recv_timeout(self.relay_timeouts.for_op(op)) {
             Ok(envelope) => envelope,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.relay.abandon(&id);
@@ -1395,5 +1443,342 @@ mod datalink_process_tests {
         }
         // The fixture also echoes the token in a log line and on stderr.
         assert!(fixture.has_log("redact [REDACTED]"));
+    }
+}
+
+// The SimBrief ops through the relay, against the Python fixture, with relay
+// deadlines scaled down so nothing waits the production 12 s or 30 s.
+#[cfg(test)]
+mod simbrief_process_tests {
+    use super::*;
+    use std::{fs, sync::atomic::AtomicUsize};
+
+    const SENTINEL: &str = "SENTINEL-SIMBRIEF-TOKEN-0000";
+    const SCALED: datalink::RelayTimeouts = datalink::RelayTimeouts {
+        default: Duration::from_millis(1_000),
+        prefile: Duration::from_millis(2_500),
+    };
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn python_path() -> &'static str {
+        if cfg!(windows) {
+            "python"
+        } else {
+            "/usr/bin/python3"
+        }
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        supervisor: Supervisor,
+        events: Arc<Mutex<Vec<(&'static str, Value)>>>,
+    }
+
+    impl Fixture {
+        fn new(mode: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "msfslogger-simbrief-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::SeqCst)
+            ));
+            fs::create_dir_all(root.join("dist")).unwrap();
+            let entry = root.join("dist").join("index.js");
+            fs::write(&entry, include_str!("../tests/fake-sidecar.py")).unwrap();
+            let config = ConfigStore::new(root.join("config.json"));
+            config
+                .save(
+                    json!({"nodePath":python_path(), "autoUplink":false, "datalinkMode":mode,
+                    "prefileDelayMs":1500, "serverUrl":"http://127.0.0.1:1", "ingestToken":SENTINEL}),
+                )
+                .unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let sink = Arc::new(move |event| {
+                let recorded = match event {
+                    Event::Status(v) => ("status", v),
+                    Event::Log(v) => ("log", v),
+                    Event::Exit(v) => ("exit", v),
+                    Event::Datalink(v) => ("datalink", v),
+                };
+                lock(&captured).push(recorded);
+            });
+            let supervisor = Supervisor::new(config, Some(entry), sink)
+                .unwrap()
+                .with_relay_timeouts(SCALED);
+            let fixture = Self {
+                root,
+                supervisor,
+                events,
+            };
+            fixture.wait(|| fixture.app_state() == "app.stopped", 10);
+            fixture.wait(|| fixture.count("datalink") >= 1, 5);
+            fixture
+        }
+
+        fn wait(&self, predicate: impl Fn() -> bool, seconds: u64) {
+            let deadline = Instant::now() + Duration::from_secs(seconds);
+            while !predicate() {
+                assert!(
+                    Instant::now() < deadline,
+                    "Timed out waiting for fixture state"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn app_state(&self) -> String {
+            lock(&self.supervisor.snapshot).status.as_ref().unwrap()["app"]["state"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+
+        fn backend(&self) -> Value {
+            lock(&self.supervisor.snapshot).status.as_ref().unwrap()["backend"].clone()
+        }
+
+        fn count(&self, kind: &str) -> usize {
+            lock(&self.events)
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .count()
+        }
+
+        fn starts(&self) -> usize {
+            fs::read_to_string(self.root.join("starts"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        }
+
+        /// Every op the fixture received, one per request line, in order.
+        fn ops(&self) -> Vec<String> {
+            fs::read_to_string(self.root.join("datalink-ops"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        fn prefile_lines(&self) -> usize {
+            self.ops()
+                .iter()
+                .filter(|op| *op == "simbrief-prefile")
+                .count()
+        }
+
+        fn timed(&self, op: &str, params: Value) -> (Value, Duration) {
+            let started = Instant::now();
+            let envelope = self.supervisor.datalink(op, params);
+            (envelope, started.elapsed())
+        }
+
+        fn spawn_prefile(&self) -> thread::JoinHandle<(Value, Duration)> {
+            let supervisor = self.supervisor.clone();
+            thread::spawn(move || {
+                let started = Instant::now();
+                (
+                    supervisor.datalink("simbrief-prefile", json!({})),
+                    started.elapsed(),
+                )
+            })
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.supervisor.shutdown();
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn code(envelope: &Value) -> &str {
+        envelope["error"]["code"].as_str().unwrap_or_default()
+    }
+
+    /// The server's duplicate override, spelled so its key never appears in
+    /// client source, even in a test.
+    fn duplicate_override() -> Value {
+        let mut params = serde_json::Map::new();
+        params.insert(format!("allow{}duplicates", '_'), json!(true));
+        Value::Object(params)
+    }
+
+    #[test]
+    fn production_relay_timeouts_are_the_frozen_pair() {
+        assert_eq!(
+            datalink::RelayTimeouts::PRODUCTION,
+            datalink::RelayTimeouts {
+                default: datalink::REQUEST_TIMEOUT,
+                prefile: datalink::PREFILE_REQUEST_TIMEOUT,
+            }
+        );
+        assert!(SCALED.prefile > SCALED.default);
+    }
+
+    #[test]
+    fn a_prefile_answered_after_the_default_timeout_still_resolves_with_that_answer() {
+        let fixture = Fixture::new("slow-prefile");
+        let backend = fixture.backend();
+        let statuses = fixture.count("status");
+        let (envelope, elapsed) = fixture.timed("watch", json!({"on":true}));
+        assert_eq!(envelope, json!({"ok":true, "result":{"echo":"watch"}}));
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+
+        let (envelope, elapsed) = fixture.timed("simbrief-prefile", json!({}));
+        assert_eq!(
+            envelope,
+            json!({"ok":true, "result":{"echo":"simbrief-prefile"}})
+        );
+        assert!(elapsed >= Duration::from_millis(1_500), "{elapsed:?}");
+        assert!(elapsed > SCALED.default, "{elapsed:?}");
+        assert!(elapsed < SCALED.prefile, "{elapsed:?}");
+        assert_eq!(fixture.ops(), ["watch", "simbrief-prefile"]);
+
+        // Settings and clear are answered at once and wait only the default.
+        for op in ["simbrief-settings", "prefile-clear"] {
+            let (envelope, elapsed) = fixture.timed(op, json!({}));
+            assert_eq!(envelope, json!({"ok":true, "result":{"echo":op}}));
+            assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        }
+        // Extra keys never reach the sidecar.
+        for (op, params) in [
+            ("simbrief-prefile", duplicate_override()),
+            ("simbrief-prefile", json!({"tripId":1})),
+            ("simbrief-settings", json!({"pilotId":"1"})),
+            ("prefile-clear", json!({"plannedLegId":123})),
+            ("simbrief-prefile", json!(null)),
+        ] {
+            let (envelope, elapsed) = fixture.timed(op, params);
+            assert_eq!(code(&envelope), "bad-request");
+            assert!(elapsed < Duration::from_secs(1));
+        }
+        assert_eq!(
+            fixture.ops(),
+            [
+                "watch",
+                "simbrief-prefile",
+                "simbrief-settings",
+                "prefile-clear"
+            ]
+        );
+        assert!(!fixture.supervisor.prefile_in_flight.load(Ordering::Acquire));
+        assert_eq!(fixture.backend(), backend);
+        assert_eq!(fixture.count("status"), statuses);
+    }
+
+    #[test]
+    fn an_unanswered_prefile_times_out_at_its_own_deadline_and_is_single_flight() {
+        let fixture = Fixture::new("ignore");
+        let backend = fixture.backend();
+        let statuses = fixture.count("status");
+        let first = fixture.spawn_prefile();
+        fixture.wait(|| fixture.prefile_lines() == 1, 5);
+
+        let (envelope, elapsed) = fixture.timed("simbrief-prefile", json!({}));
+        assert_eq!(code(&envelope), "prefile-in-progress");
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        assert_eq!(fixture.prefile_lines(), 1);
+
+        // Every other op still waits only the default deadline.
+        let (envelope, elapsed) = fixture.timed("watch", json!({"on":true}));
+        assert_eq!(code(&envelope), "shell-timeout");
+        assert!(elapsed >= SCALED.default, "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+
+        let (envelope, elapsed) = first.join().unwrap();
+        assert_eq!(code(&envelope), "shell-timeout");
+        assert!(elapsed >= SCALED.prefile, "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(3_500), "{elapsed:?}");
+        assert!(!fixture.supervisor.prefile_in_flight.load(Ordering::Acquire));
+        assert_eq!(fixture.supervisor.relay.pending(), 0);
+
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(fixture.prefile_lines(), 1);
+        assert_eq!(fixture.backend(), backend);
+        assert_eq!(fixture.count("status"), statuses);
+    }
+
+    #[test]
+    fn a_prefile_is_never_resent_after_the_sidecar_exits() {
+        let fixture = Fixture::new("exit-on-request");
+        let (envelope, elapsed) = fixture.timed("simbrief-prefile", json!({}));
+        assert_eq!(code(&envelope), "sidecar-exited");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        assert!(!fixture.supervisor.prefile_in_flight.load(Ordering::Acquire));
+        fixture.wait(|| fixture.starts() == 2, 10);
+        fixture.wait(|| lock(&fixture.supervisor.snapshot).hello.is_some(), 5);
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(fixture.ops(), ["simbrief-prefile"]);
+    }
+
+    #[test]
+    fn a_prefile_is_never_resent_after_a_restart() {
+        let fixture = Fixture::new("ignore");
+        let waiter = fixture.spawn_prefile();
+        fixture.wait(|| fixture.prefile_lines() == 1, 5);
+        fixture.supervisor.request(Operation::Restart).unwrap();
+        let (envelope, elapsed) = waiter.join().unwrap();
+        assert_eq!(code(&envelope), "sidecar-exited");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        fixture.wait(|| fixture.starts() == 2, 10);
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(fixture.ops(), ["simbrief-prefile"]);
+        assert!(!fixture.supervisor.prefile_in_flight.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_sidecar_without_simbrief_is_refused_at_once_and_keeps_its_datalink() {
+        let fixture = Fixture::new("no-simbrief");
+        let backend = fixture.backend();
+        let statuses = fixture.count("status");
+        let events = fixture.count("datalink");
+        let state = fixture.supervisor.current_datalink_state();
+        for op in ["simbrief-settings", "simbrief-prefile", "prefile-clear"] {
+            let (envelope, elapsed) = fixture.timed(op, json!({}));
+            assert_eq!(
+                envelope,
+                json!({"ok":false, "error":{"code":"sidecar-outdated", "httpStatus":null, "serverCode":null}})
+            );
+            assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        }
+        // Gated before params: even a malformed request is simply outdated.
+        let (envelope, _) = fixture.timed("simbrief-prefile", duplicate_override());
+        assert_eq!(code(&envelope), "sidecar-outdated");
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(fixture.ops(), Vec::<String>::new());
+        assert_eq!(fixture.count("datalink"), events);
+        assert_eq!(fixture.supervisor.current_datalink_state(), state);
+        assert!(!fixture.supervisor.prefile_in_flight.load(Ordering::Acquire));
+
+        let (envelope, _) = fixture.timed("watch", json!({"on":true}));
+        assert_eq!(envelope, json!({"ok":true, "result":{"echo":"watch"}}));
+        assert_eq!(fixture.ops(), ["watch"]);
+        assert_eq!(fixture.backend(), backend);
+        assert_eq!(fixture.count("status"), statuses);
+    }
+
+    #[test]
+    fn the_ingest_token_never_leaves_the_shell_on_the_simbrief_ops() {
+        let fixture = Fixture::new("echo-token");
+        let backend = fixture.backend();
+        let mut envelopes = Vec::new();
+        for op in ["simbrief-settings", "simbrief-prefile", "prefile-clear"] {
+            let (envelope, _) = fixture.timed(op, json!({}));
+            assert_eq!(envelope["ok"], true, "{op}");
+            assert_eq!(envelope["result"]["note"], "token [REDACTED]");
+            envelopes.push(envelope.to_string());
+        }
+        fixture.wait(|| fixture.count("datalink") >= 4, 5);
+        let state = fixture.supervisor.current_datalink_state();
+        let events = serde_json::to_string(&*lock(&fixture.events)).unwrap();
+        let logs = serde_json::to_string(&lock(&fixture.supervisor.snapshot).logs).unwrap();
+        for output in envelopes
+            .into_iter()
+            .chain([state.to_string(), events, logs])
+        {
+            assert!(!output.contains(SENTINEL));
+        }
+        assert_eq!(fixture.backend(), backend);
     }
 }

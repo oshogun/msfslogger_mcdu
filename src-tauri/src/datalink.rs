@@ -11,9 +11,26 @@ use std::{
 };
 
 pub const FEATURE: &str = "datalink";
+/// The SimBrief ops; a sidecar without it would leave them unanswered.
+pub const SIMBRIEF_FEATURE: &str = "simbrief-prefile";
 // Longer than the sidecar's own 8 s HTTP timeout, so a slow server is reported
 // by the sidecar with its real cause before the shell gives up on the answer.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_millis(12_000);
+/// The sidecar's HTTP timeout for the SimBrief prefile POST, mirrored here so
+/// the relay can be checked against it; tools/contract-check.mjs keeps the two
+/// equal.
+pub const SIDECAR_PREFILE_HTTP_TIMEOUT: Duration = Duration::from_millis(25_000);
+/// How much longer than the sidecar's HTTP timeout the relay waits, at least:
+/// the margin the 8 s / 12 s pair has always kept.
+pub const RELAY_SLACK_MIN: Duration = Duration::from_millis(4_000);
+// The server spends up to 20 s on SimBrief before it answers. The relay
+// outwaits the sidecar's 25 s prefile timeout, so an unknown outcome is
+// reported by the sidecar with its real cause rather than as a shell timeout.
+pub const PREFILE_REQUEST_TIMEOUT: Duration = Duration::from_millis(30_000);
+const _: () = assert!(
+    PREFILE_REQUEST_TIMEOUT.as_millis()
+        >= SIDECAR_PREFILE_HTTP_TIMEOUT.as_millis() + RELAY_SLACK_MIN.as_millis()
+);
 // The CDU needs at most three requests at once; a runaway caller is refused
 // rather than queued without limit.
 pub const PENDING_MAX: usize = 8;
@@ -21,7 +38,7 @@ pub const STATE_OUTDATED: &str = "dl.sidecar-outdated";
 pub const STATE_UNAVAILABLE: &str = "dl.sidecar-unavailable";
 const SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
 const REQUEST_LINE_MAX: usize = 4096;
-const OPS: [&str; 7] = [
+pub const OPS: [&str; 10] = [
     "watch",
     "refresh",
     "thread",
@@ -29,7 +46,34 @@ const OPS: [&str; 7] = [
     "send-canned",
     "wx",
     "loadsheet",
+    "simbrief-settings",
+    "simbrief-prefile",
+    "prefile-clear",
 ];
+pub const SIMBRIEF_OPS: [&str; 3] = ["simbrief-settings", "simbrief-prefile", "prefile-clear"];
+
+/// How long the relay waits for an answer. Only the prefile, which can take
+/// the server 20 s, waits longer than every other op.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelayTimeouts {
+    pub default: Duration,
+    pub prefile: Duration,
+}
+
+impl RelayTimeouts {
+    pub const PRODUCTION: RelayTimeouts = RelayTimeouts {
+        default: REQUEST_TIMEOUT,
+        prefile: PREFILE_REQUEST_TIMEOUT,
+    };
+
+    pub fn for_op(&self, op: &str) -> Duration {
+        if op == "simbrief-prefile" {
+            self.prefile
+        } else {
+            self.default
+        }
+    }
+}
 
 pub fn error_envelope(code: &str) -> Value {
     json!({"ok":false, "error":{"code":code, "httpStatus":null, "serverCode":null}})
@@ -49,6 +93,14 @@ pub fn supports_datalink(hello: &Value) -> bool {
     hello["features"]
         .as_array()
         .is_some_and(|features| features.iter().any(|feature| feature == FEATURE))
+}
+
+/// A sidecar that has the datalink but predates SimBrief would leave these ops
+/// unanswered too, so they are only sent to one that announced this feature.
+pub fn supports_simbrief(hello: &Value) -> bool {
+    hello["features"]
+        .as_array()
+        .is_some_and(|features| features.iter().any(|feature| feature == SIMBRIEF_FEATURE))
 }
 
 fn has_exact_keys(value: &Value, keys: &[&str]) -> Option<Map<String, Value>> {
@@ -96,7 +148,11 @@ fn valid_icao(value: &Value) -> bool {
 pub fn valid_params(op: &str, params: &Value) -> bool {
     match op {
         "watch" => has_exact_keys(params, &["on"]).is_some_and(|p| p["on"].is_boolean()),
-        "refresh" | "canned-list" => has_exact_keys(params, &[]).is_some(),
+        // No SimBrief op takes a parameter: nothing can ask for a duplicate
+        // import, a trip or a Pilot ID.
+        "refresh" | "canned-list" | "simbrief-settings" | "simbrief-prefile" | "prefile-clear" => {
+            has_exact_keys(params, &[]).is_some()
+        }
         "thread" => has_exact_keys(params, &["epoch", "endSeq"])
             .is_some_and(|p| safe_integer(&p["epoch"], 1) && safe_integer(&p["endSeq"], 0)),
         "send-canned" => has_exact_keys(params, &["target", "cannedId"])
@@ -390,6 +446,87 @@ mod tests {
             request_line("dl-1", "watch", &json!({"on":"x".repeat(REQUEST_LINE_MAX)})),
             None
         );
+    }
+
+    /// `{"<duplicate override>": value}`, spelled so the server's key never
+    /// appears in client source, even in a test.
+    fn duplicate_override(value: bool) -> Value {
+        let mut params = Map::new();
+        params.insert(format!("allow{}duplicates", '_'), json!(value));
+        Value::Object(params)
+    }
+
+    #[test]
+    fn simbrief_ops_take_exactly_empty_params() {
+        assert_eq!(
+            OPS,
+            [
+                "watch",
+                "refresh",
+                "thread",
+                "canned-list",
+                "send-canned",
+                "wx",
+                "loadsheet",
+                "simbrief-settings",
+                "simbrief-prefile",
+                "prefile-clear"
+            ]
+        );
+        for op in SIMBRIEF_OPS {
+            assert!(OPS.contains(&op));
+            assert!(valid_params(op, &json!({})), "{op}");
+            let line = request_line("dl-9", op, &json!({})).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap(),
+                json!({"v":1, "type":"datalink-request", "id":"dl-9", "op":op, "params":{}})
+            );
+            for params in [
+                duplicate_override(true),
+                duplicate_override(false),
+                json!({"pilotId":"1"}),
+                json!({"tripId":1}),
+                json!({"plannedLegId":123}),
+                json!(null),
+                json!([]),
+                json!("x"),
+            ] {
+                assert!(!valid_params(op, &params), "{op} {params}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_prefile_waits_longer_than_the_request_timeout() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_millis(12_000));
+        assert_eq!(PREFILE_REQUEST_TIMEOUT, Duration::from_millis(30_000));
+        assert_eq!(SIDECAR_PREFILE_HTTP_TIMEOUT, Duration::from_millis(25_000));
+        assert_eq!(PENDING_MAX, 8);
+        assert!(PREFILE_REQUEST_TIMEOUT >= SIDECAR_PREFILE_HTTP_TIMEOUT + RELAY_SLACK_MIN);
+        assert!(PREFILE_REQUEST_TIMEOUT > SIDECAR_PREFILE_HTTP_TIMEOUT);
+        assert!(REQUEST_TIMEOUT >= Duration::from_millis(8_000) + RELAY_SLACK_MIN);
+        for op in OPS {
+            let expected = if op == "simbrief-prefile" {
+                PREFILE_REQUEST_TIMEOUT
+            } else {
+                REQUEST_TIMEOUT
+            };
+            assert_eq!(RelayTimeouts::PRODUCTION.for_op(op), expected, "{op}");
+        }
+        assert_eq!(RelayTimeouts::PRODUCTION.for_op("unknown"), REQUEST_TIMEOUT);
+    }
+
+    #[test]
+    fn simbrief_support_needs_its_own_feature() {
+        assert!(supports_simbrief(
+            &json!({"features":["datalink", "simbrief-prefile"]})
+        ));
+        assert!(!supports_simbrief(&json!({"features":["datalink"]})));
+        assert!(!supports_simbrief(&json!({"features":"simbrief-prefile"})));
+        assert!(!supports_simbrief(&json!({})));
+        assert!(supports_datalink(
+            &json!({"features":["datalink", "simbrief-prefile"]})
+        ));
     }
 
     #[test]

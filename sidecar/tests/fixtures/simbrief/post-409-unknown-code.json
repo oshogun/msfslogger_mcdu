@@ -1,0 +1,35 @@
+{
+  "_sample": "post-409-unknown-code",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Something new",
+      "code": "SOMETHING_NEW"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 409,
+    "serverCode": "SOMETHING_NEW",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "unknown",
+    "cdu": "SERVER FAULT 409",
+    "hint": "SAFE TO PREFILE AGAIN"
+  }
+}

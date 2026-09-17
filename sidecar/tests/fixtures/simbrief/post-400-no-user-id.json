@@ -1,0 +1,35 @@
+{
+  "_sample": "post-400-no-user-id",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "No SimBrief User ID is saved. Enter your SimBrief Pilot ID above and save it, then try again.",
+      "code": "NO_USER_ID"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-no-user-id",
+    "httpStatus": 400,
+    "serverCode": "NO_USER_ID",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "NO SIMBRIEF PILOT ID",
+    "hint": "SET PILOT ID ON SERVER"
+  }
+}

@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HttpOutcome } from '../src/datalink-classify';
-import { DatalinkClient, type DatalinkRoute } from '../src/datalink-client';
+import { buildRequest, DatalinkClient, type DatalinkRoute } from '../src/datalink-client';
 import {
   DatalinkService,
   nextPollDelayMs,
@@ -21,6 +21,10 @@ import {
   reply,
   scratchConfig,
   SENTINEL_TOKEN,
+  SIMBRIEF_SENTINEL_TOKEN,
+  simbriefFixture,
+  simbriefFixtureNames,
+  simbriefReply,
   startScratchServer,
 } from './helpers/datalink-scratch-server';
 
@@ -86,6 +90,7 @@ function makeService(client: DatalinkRequester, token: string = SENTINEL_TOKEN):
     client,
     hasConfig: () => hasConfig,
     token: () => token,
+    serverUrl: () => 'http://scratch.invalid',
     emitState: (message) => states.push(message),
     log: (level, message) => logs.push(`${level} ${message}`),
   });
@@ -599,5 +604,771 @@ describe('shutdown', () => {
     expect(states.length).toBe(emitted);
     expect(await service.handle(req('refresh', {}))).toMatchObject({ ok: false, error: { code: 'sidecar-unavailable' } });
     expect(await service.handle(req('watch', { on: true }))).toMatchObject({ ok: false, error: { code: 'sidecar-unavailable' } });
+  });
+});
+
+// ── SimBrief ops and the prefiled-leg scope ─────────────────────────────────
+
+function fromSimbrief(name: string): HttpOutcome {
+  const { response } = simbriefFixture(name);
+  const scope = Object.entries(response.headers).find(([k]) => k.toLowerCase() === 'x-ingest-token-scope');
+  return {
+    kind: 'response',
+    status: response.status,
+    scopeHeader: scope ? scope[1] : null,
+    bodyText: typeof response.body === 'string' ? response.body : JSON.stringify(response.body),
+    bodyTooLarge: false,
+  };
+}
+const TIMED_OUT: HttpOutcome = { kind: 'transport', errorName: 'TimeoutError', errorCode: null };
+const RESET: HttpOutcome = { kind: 'transport', errorName: 'TypeError', errorCode: 'ECONNRESET' };
+
+function legThread(id: number) {
+  return ok({ planned_leg_id: id, messages: threadBody([1]).messages });
+}
+
+/** A mutable config the prefiled-leg tests change under the service. */
+let config: { token: string; serverUrl: string };
+
+function makePrefileService(client: DatalinkRequester): DatalinkService {
+  return new DatalinkService({
+    client,
+    hasConfig: () => hasConfig,
+    token: () => config.token,
+    serverUrl: () => config.serverUrl,
+    emitState: (message) => states.push(message),
+    log: (level, message) => logs.push(`${level} ${message}`),
+  });
+}
+
+/**
+ * On the ground with no leg in status and no ground session, unless `status`
+ * says otherwise. SimBrief routes answer with `prefile` / `settings`.
+ */
+function groundServer(opts: {
+  status?: () => HttpOutcome;
+  prefile?: () => HttpOutcome | Promise<HttpOutcome>;
+  settings?: () => HttpOutcome;
+  legThread?: (id: number) => HttpOutcome;
+} = {}): Responder {
+  return (route) => {
+    switch (route.key) {
+      case 'status':
+        return opts.status ? opts.status() : fromFixture('01c-get-status-ground-no-leg');
+      case 'ground-session-current':
+        return fromFixture('10b-get-ground-session-none');
+      case 'leg-thread':
+        return opts.legThread ? opts.legThread(route.id) : legThread(route.id);
+      case 'flight-thread':
+        return ok(threadBody([1]));
+      case 'simbrief-prefile':
+        return opts.prefile ? opts.prefile() : fromSimbrief('post-201-imported');
+      case 'simbrief-settings':
+        return opts.settings ? opts.settings() : fromSimbrief('get-settings-configured');
+      default:
+        return ok({}, 599);
+    }
+  };
+}
+
+function paths(client: ScriptedClient, from = 0): string[] {
+  return client.routes.slice(from).map((route) => {
+    const built = buildRequest(route);
+    return built ? `${built.method} ${built.path}` : route.key;
+  });
+}
+
+/** Keeps the lease alive the way a showing DATALINK page does, across `ms`. */
+async function watchFor(service: DatalinkService, ms: number): Promise<void> {
+  for (let left = ms; left > 0; left -= 20000) {
+    await service.handle(req('watch', { on: true }));
+    await vi.advanceTimersByTimeAsync(Math.min(20000, left));
+  }
+}
+
+function withoutAt(message: DatalinkStateMessage) {
+  const { at: _at, ...rest } = message;
+  return rest;
+}
+
+describe('SimBrief prefile sets the prefiled leg', () => {
+  beforeEach(() => {
+    config = { token: SIMBRIEF_SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  it.each([
+    ['post-201-imported', 'imported', 201],
+    ['post-200-duplicate', 'duplicate', 200],
+  ])('%s: answers the projection, holds leg 123, and the next cycle polls that leg with no ground-session GET', async (sample, status, httpStatus) => {
+    const client = new ScriptedClient(groundServer({ prefile: () => fromSimbrief(sample) }));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    expect(paths(client)).toEqual(['GET /api/status', 'GET /api/ground-sessions/current']);
+    expect(last()).toMatchObject({ state: 'dl.ok', scope: { kind: 'none' } });
+    expect(last()).not.toHaveProperty('prefiledLeg');
+
+    const made = client.routes.length;
+    expect(await service.handle(req('simbrief-prefile', {}))).toEqual({
+      ok: true,
+      result: { status, plannedLegId: 123, label: 'KJFK → EGLL (BAW178)', warningCount: 0, httpStatus },
+    });
+    await flush();
+    expect(paths(client, made)).toEqual([
+      'POST /api/planned-legs/simbrief',
+      'GET /api/status',
+      'GET /api/planned-legs/123/acars-messages',
+    ]);
+    expect(last()).toMatchObject({
+      state: 'dl.ok',
+      scope: { kind: 'leg', plannedLegId: 123, source: 'prefile' },
+      prefiledLeg: { plannedLegId: 123, label: 'KJFK → EGLL (BAW178)' },
+    });
+    expect(states.some((s) => s.prefiledLeg && s.scope?.kind === 'none')).toBe(true);
+
+    const polled = client.routes.length;
+    await watchFor(service, 20000);
+    expect(paths(client, polled)).toEqual(['GET /api/status', 'GET /api/planned-legs/123/acars-messages']);
+    expect(logs).toContain(`info SimBrief prefile ${status} (HTTP ${httpStatus})`);
+    for (const line of logs) {
+      expect(line).not.toContain('123');
+      expect(line).not.toContain('KJFK');
+    }
+  });
+
+  it('(c) outranks a different leg from status; (d) the same leg keeps one scope key and its epoch', async () => {
+    let prefileId = 123;
+    const client = new ScriptedClient(groundServer({
+      status: () => fromFixture('01b-get-status-ground-leg'),
+      prefile: () => ok({ result: { status: 'imported', planned_leg_id: prefileId, label: 'L', warnings: [] } }, 201),
+    }));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    expect(last()).toMatchObject({ scope: { kind: 'leg', plannedLegId: 12, source: 'status' }, thread: { epoch: 1 } });
+
+    const made = client.routes.length;
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    expect(paths(client, made)).toEqual([
+      'POST /api/planned-legs/simbrief', 'GET /api/status', 'GET /api/planned-legs/123/acars-messages',
+    ]);
+    expect(last()).toMatchObject({ scope: { kind: 'leg', plannedLegId: 123, source: 'prefile' }, thread: { epoch: 2 } });
+
+    // The prefiled leg is the ground-session leg itself: same key, same epoch.
+    await service.handle(req('prefile-clear', {}));
+    await flush();
+    expect(last()).toMatchObject({ scope: { kind: 'leg', plannedLegId: 12, source: 'status' }, thread: { epoch: 3 } });
+    prefileId = 12;
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    expect(last()).toMatchObject({ scope: { kind: 'leg', plannedLegId: 12, source: 'prefile' }, thread: { epoch: 3 } });
+  });
+
+  it('wx, canned and load sheet ops aimed at the prefiled leg hit the leg-scoped routes', async () => {
+    const client = new ScriptedClient((route) => {
+      if (route.key === 'leg-wx') return fromFixture('08-post-leg-wx');
+      if (route.key === 'leg-loadsheet') return fromFixture('09a-post-leg-loadsheet-created');
+      if (route.key === 'leg-send') return { kind: 'response', status: 201, scopeHeader: null, bodyText: '', bodyTooLarge: false };
+      return groundServer()(route);
+    });
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    const scope = last().scope;
+    expect(scope).toEqual({ kind: 'leg', plannedLegId: 123, source: 'prefile' });
+    const id = scope && scope.kind === 'leg' ? scope.plannedLegId : 0;
+
+    const made = client.routes.length;
+    await service.handle(req('wx', { target: { kind: 'leg', id }, icao: 'LFPG' }));
+    await service.handle(req('loadsheet', { plannedLegId: id }));
+    await service.handle(req('send-canned', { target: { kind: 'leg', id }, cannedId: 'gate-request' }));
+    await flush();
+    const ops = paths(client, made).filter((p) => p.startsWith('POST '));
+    expect(ops).toEqual([
+      'POST /api/planned-legs/123/acars-messages/wx',
+      'POST /api/planned-legs/123/acars-messages/loadsheet',
+      'POST /api/planned-legs/123/acars-messages',
+    ]);
+    expect(last()).toMatchObject({ prefiledLeg: { plannedLegId: 123 } });
+  });
+});
+
+describe('every event that clears the prefiled leg', () => {
+  beforeEach(() => {
+    config = { token: SIMBRIEF_SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  /** Watching, one cycle with no scope, then a prefile of leg 123 and its cycle. */
+  async function prefiled(client: ScriptedClient) {
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    const before = withoutAt(last());
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    expect(last()).toMatchObject({ prefiledLeg: { plannedLegId: 123 }, scope: { source: 'prefile' } });
+    return { service, before };
+  }
+
+  async function expectSelectsAsBefore(client: ScriptedClient, service: DatalinkService) {
+    const made = client.routes.length;
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(paths(client, made)).toEqual(['GET /api/status', 'GET /api/ground-sessions/current']);
+    expect(last()).toMatchObject({ state: 'dl.ok', scope: { kind: 'none' }, thread: null });
+    expect(last()).not.toHaveProperty('prefiledLeg');
+  }
+
+  it('C1 prefile-clear: cleared:true once, then cleared:false with no emit', async () => {
+    const client = new ScriptedClient(groundServer());
+    const { service } = await prefiled(client);
+    const emitted = states.length;
+    expect(await service.handle(req('prefile-clear', {}))).toEqual({ ok: true, result: { cleared: true } });
+    expect(states.length).toBeGreaterThan(emitted);
+    expect(states[emitted]).not.toHaveProperty('prefiledLeg');
+    await flush();
+    const settled = states.length;
+    expect(await service.handle(req('prefile-clear', {}))).toEqual({ ok: true, result: { cleared: false } });
+    expect(states.length).toBe(settled);
+    await expectSelectsAsBefore(client, service);
+  });
+
+  it('C1 works with no config and while latched, and makes no request', async () => {
+    const client = new ScriptedClient(groundServer());
+    const { service } = await prefiled(client);
+    hasConfig = false;
+    const made = client.routes.length;
+    expect(await service.handle(req('prefile-clear', {}))).toEqual({ ok: true, result: { cleared: true } });
+    expect(await service.handle(req('prefile-clear', {}))).toEqual({ ok: true, result: { cleared: false } });
+    hasConfig = true;
+    client.respond = () => fromFixture('err-401-invalid-token');
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(last()).toMatchObject({ state: 'dl.token-invalid' });
+    expect(await service.handle(req('prefile-clear', {}))).toEqual({ ok: true, result: { cleared: false } });
+    expect(client.routes.length).toBe(made + 1);
+  });
+
+  it.each([
+    ['serverUrl', () => { config.serverUrl = 'http://other.invalid'; }],
+    ['token', () => { config.token = 'SENTINEL-SIMBRIEF-TOKEN-1111'; }],
+  ])('C2 a valid reload that changes the %s clears it; an invalid reload or an unchanged one does not', async (_name, change) => {
+    const client = new ScriptedClient(groundServer());
+    const { service } = await prefiled(client);
+    service.onConfigApplied(true);
+    await flush();
+    expect(last()).toMatchObject({ prefiledLeg: { plannedLegId: 123 } });
+    change();
+    service.onConfigApplied(false);
+    await flush();
+    expect(last()).toMatchObject({ prefiledLeg: { plannedLegId: 123 } });
+    service.onConfigApplied(true);
+    expect(last()).not.toHaveProperty('prefiledLeg');
+    await flush();
+    expect(last()).toMatchObject({ state: 'dl.ok', scope: { kind: 'none' } });
+    await expectSelectsAsBefore(client, service);
+  });
+
+  it.each([
+    ['a poll', (service: DatalinkService) => service.handle(req('refresh', {})), 'status'],
+    ['a datalink op', (service: DatalinkService) => service.handle(req('canned-list', {})), 'canned-list'],
+    ['the SimBrief settings op', (service: DatalinkService) => service.handle(req('simbrief-settings', {})), 'simbrief-settings'],
+    ['the SimBrief prefile op itself', (service: DatalinkService) => service.handle(req('simbrief-prefile', {})), 'simbrief-prefile'],
+  ])('C3 the token latch set by %s clears it', async (_name, act, key) => {
+    let refuse = false;
+    const good = groundServer();
+    const client = new ScriptedClient((route) =>
+      refuse && route.key === key ? fromFixture('err-401-invalid-token') : good(route));
+    const { service } = await prefiled(client);
+    refuse = true;
+    await act(service);
+    await flush();
+    expect(last()).toMatchObject({ state: 'dl.token-invalid', httpStatus: 401, serverCode: 'INVALID_INGEST_TOKEN', nextPollAt: null });
+    expect(last()).not.toHaveProperty('prefiledLeg');
+    const made = client.routes.length;
+    await watchFor(service, 120000);
+    expect(client.routes.length).toBe(made);
+    refuse = false;
+    service.onConfigApplied(true);
+    await flush();
+    expect(paths(client, made)).toEqual(['GET /api/status', 'GET /api/ground-sessions/current']);
+    await expectSelectsAsBefore(client, service);
+  });
+
+  it('C5 a cycle that sees a flight clears it; after the flight, scope is selected as before the prefile', async () => {
+    let flying = false;
+    const client = new ScriptedClient(groundServer({
+      status: () => fromFixture(flying ? '01a-get-status-flying' : '01c-get-status-ground-no-leg'),
+    }));
+    const { service } = await prefiled(client);
+    flying = true;
+    const made = client.routes.length;
+    await watchFor(service, 20000);
+    expect(paths(client, made)).toEqual(['GET /api/status', 'GET /api/flights/92/acars-messages']);
+    expect(last()).toMatchObject({ scope: { kind: 'flight', flightId: 92, plannedLegId: 12 } });
+    expect(last()).not.toHaveProperty('prefiledLeg');
+    flying = false;
+    await expectSelectsAsBefore(client, service);
+  });
+
+  it('C6(i) the poll 404s the prefiled leg: scope null at once, no backoff, and an immediate rerun without it', async () => {
+    let gone = false;
+    const client = new ScriptedClient(groundServer({
+      legThread: (id) => (gone && id === 123 ? fromFixture('err-404-leg-not-found') : legThread(id)),
+    }));
+    const { service } = await prefiled(client);
+    gone = true;
+    const made = client.routes.length;
+    const emitted = states.length;
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(paths(client, made)).toEqual([
+      'GET /api/status',
+      'GET /api/planned-legs/123/acars-messages',
+      'GET /api/status',
+      'GET /api/ground-sessions/current',
+    ]);
+    const failed = states.slice(emitted).find((s) => s.state === 'dl.http-error');
+    expect(failed).toMatchObject({ scope: null, thread: null, httpStatus: 404, serverCode: 'PLANNED_LEG_NOT_FOUND' });
+    expect(failed).not.toHaveProperty('prefiledLeg');
+    // The failure did not count towards backoff: the schedule is still 20 s.
+    expect(failed!.nextPollAt).toBe(Date.now() + 20000);
+    expect(last()).toMatchObject({ state: 'dl.ok', scope: { kind: 'none' }, nextPollAt: Date.now() + 20000 });
+    await expectSelectsAsBefore(client, service);
+  });
+
+  it.each([
+    ['wx', { target: { kind: 'leg', id: 123 }, icao: 'LFPG' }],
+    ['loadsheet', { plannedLegId: 123 }],
+    ['send-canned', { target: { kind: 'leg', id: 123 }, cannedId: 'gate-request' }],
+  ] as const)('C6(ii) %s aimed at the prefiled leg answering 404 clears it; one aimed elsewhere does not', async (op, params) => {
+    const good = groundServer();
+    const client = new ScriptedClient((route) =>
+      route.key === 'leg-wx' || route.key === 'leg-loadsheet' || route.key === 'leg-send'
+        ? fromFixture('err-404-leg-not-found')
+        : good(route));
+    const { service } = await prefiled(client);
+    const elsewhere = JSON.parse(JSON.stringify(params).replace('123', '77'));
+    expect(await service.handle(req(op, elsewhere))).toMatchObject({ ok: false, error: { code: 'leg-not-found' } });
+    await flush();
+    expect(last()).toMatchObject({ prefiledLeg: { plannedLegId: 123 } });
+    expect(await service.handle(req(op, params as never))).toMatchObject({ ok: false, error: { code: 'leg-not-found' } });
+    expect(last()).not.toHaveProperty('prefiledLeg');
+    await flush();
+    await expectSelectsAsBefore(client, service);
+  });
+
+  it('C7 a newer successful prefile replaces it; a failed or unknown one leaves it', async () => {
+    let next: HttpOutcome = fromSimbrief('post-201-imported');
+    const client = new ScriptedClient(groundServer({ prefile: () => next }));
+    const { service } = await prefiled(client);
+    for (const outcome of [fromSimbrief('post-504-timeout'), fromSimbrief('post-409-unknown-code'), fromSimbrief('post-201-malformed-body'), TIMED_OUT, RESET, fromSimbrief('post-401-no-scope-header')]) {
+      next = outcome;
+      expect(await service.handle(req('simbrief-prefile', {}))).toMatchObject({ ok: false });
+      expect(service.buildState()).toMatchObject({ prefiledLeg: { plannedLegId: 123 } });
+    }
+    next = fromSimbrief('post-201-label-contains-token');
+    expect(await service.handle(req('simbrief-prefile', {}))).toMatchObject({ ok: true, result: { plannedLegId: 124 } });
+    await flush();
+    expect(last()).toMatchObject({
+      prefiledLeg: { plannedLegId: 124, label: 'KJFK → EGLL ([REDACTED])' },
+      scope: { kind: 'leg', plannedLegId: 124, source: 'prefile' },
+    });
+  });
+
+  it('C7 a prefile that succeeds after the token latched while it was in flight still sets the leg', async () => {
+    let release: ((outcome: HttpOutcome) => void) | null = null;
+    const good = groundServer();
+    const client = new ScriptedClient((route) => {
+      if (route.key === 'simbrief-prefile') return new Promise<HttpOutcome>((resolve) => { release = resolve; });
+      if (route.key === 'canned-list') return fromFixture('err-401-invalid-token');
+      return good(route);
+    });
+    const service = makePrefileService(client);
+    const pending = service.handle(req('simbrief-prefile', {}));
+    await flush();
+    await service.handle(req('canned-list', {}));
+    expect(last()).toMatchObject({ state: 'dl.token-invalid' });
+    release!(fromSimbrief('post-201-imported'));
+    expect(await pending).toMatchObject({ ok: true, result: { plannedLegId: 123 } });
+    expect(last()).toMatchObject({ state: 'dl.token-invalid', prefiledLeg: { plannedLegId: 123 } });
+  });
+
+  it('C4 a new service (a new sidecar process) holds none, and its state has no prefiledLeg key', () => {
+    const service = makePrefileService(new ScriptedClient(groundServer()));
+    expect(service.buildState()).not.toHaveProperty('prefiledLeg');
+  });
+});
+
+describe('SimBrief failures and the datalink state', () => {
+  beforeEach(() => {
+    config = { token: SIMBRIEF_SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  const NON_LATCHING: [string, HttpOutcome][] = [
+    ...simbriefFixtureNames()
+      .filter((name) => !simbriefFixture(name).expect.ok && simbriefFixture(name).expect.code !== 'token-invalid')
+      .map((name): [string, HttpOutcome] => [name, fromSimbrief(name)]),
+    ['timeout', TIMED_OUT],
+    ['reset', RESET],
+    ['unreachable', UNREACHABLE],
+    ['tls', { kind: 'transport', errorName: 'TypeError', errorCode: 'SELF_SIGNED_CERT_IN_CHAIN' }],
+  ];
+
+  it.each(NON_LATCHING)('%s leaves every availability member, the schedule and the held leg identical, with no emit', async (_name, outcome) => {
+    let failing = false;
+    const good = groundServer();
+    const client = new ScriptedClient((route) =>
+      failing && (route.key === 'simbrief-prefile' || route.key === 'simbrief-settings') ? outcome : good(route));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    await vi.advanceTimersByTimeAsync(5000);
+    const before = withoutAt(service.buildState());
+    const emitted = states.length;
+    failing = true;
+    expect(await service.handle(req('simbrief-prefile', {}))).toMatchObject({ ok: false });
+    expect(await service.handle(req('simbrief-settings', {}))).toMatchObject({ ok: false });
+    expect(withoutAt(service.buildState())).toEqual(before);
+    expect(states.length).toBe(emitted);
+    expect(logs.filter((line) => line.startsWith('warn SimBrief '))).toHaveLength(2);
+    for (const line of logs) expect(line).toMatch(/^(info|warn) (Datalink dl\.\S+ \(HTTP [^)]*\)( on .*)?|SimBrief (prefile|settings) [a-z-]+ \(HTTP (\d{3}|---)\))$/);
+  });
+
+  it('A1 401 INVALID_INGEST_TOKEN on the prefile latches: no request of any kind until a valid reload', async () => {
+    let refuse = true;
+    const good = groundServer();
+    const client = new ScriptedClient((route) =>
+      refuse && route.key === 'simbrief-prefile' ? fromSimbrief('post-401-invalid-token') : good(route));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    expect(await service.handle(req('simbrief-prefile', {}))).toEqual({
+      ok: false, error: { code: 'token-invalid', httpStatus: 401, serverCode: 'INVALID_INGEST_TOKEN' },
+    });
+    expect(last()).toMatchObject({ state: 'dl.token-invalid', nextPollAt: null });
+    const made = client.routes.length;
+    const refused = { ok: false, error: { code: 'token-invalid', httpStatus: 401, serverCode: 'INVALID_INGEST_TOKEN' } };
+    await watchFor(service, 300000);
+    expect(await service.handle(req('simbrief-prefile', {}))).toEqual(refused);
+    expect(await service.handle(req('simbrief-settings', {}))).toEqual(refused);
+    expect(await service.handle(req('refresh', {}))).toEqual(refused);
+    service.onConfigApplied(false);
+    await watchFor(service, 60000);
+    expect(client.routes.length).toBe(made);
+    refuse = false;
+    service.onConfigApplied(true);
+    await flush();
+    expect(paths(client, made)).toEqual(['GET /api/status', 'GET /api/ground-sessions/current']);
+  });
+
+  it('settings: configured and not configured; no config and latched are refused locally', async () => {
+    let name = 'get-settings-configured';
+    const client = new ScriptedClient(groundServer({ settings: () => fromSimbrief(name) }));
+    const service = makePrefileService(client);
+    expect(await service.handle(req('simbrief-settings', {}))).toEqual({ ok: true, result: { configured: true } });
+    name = 'get-settings-blank';
+    expect(await service.handle(req('simbrief-settings', {}))).toEqual({ ok: true, result: { configured: false } });
+    name = 'get-settings-malformed';
+    expect(await service.handle(req('simbrief-settings', {}))).toEqual({
+      ok: false, error: { code: 'bad-response', httpStatus: 200, serverCode: null },
+    });
+    expect(logs).toEqual([
+      'info SimBrief settings ok (HTTP 200)',
+      'info SimBrief settings ok (HTTP 200)',
+      'warn SimBrief settings bad-response (HTTP 200)',
+    ]);
+    expect(states).toEqual([]);
+    hasConfig = false;
+    const made = client.routes.length;
+    expect(await service.handle(req('simbrief-settings', {}))).toEqual({ ok: false, error: { code: 'no-config', httpStatus: null, serverCode: null } });
+    expect(await service.handle(req('simbrief-prefile', {}))).toEqual({ ok: false, error: { code: 'no-config', httpStatus: null, serverCode: null } });
+    expect(client.routes.length).toBe(made);
+    // The in-flight flag was released by the refusal.
+    hasConfig = true;
+    expect(await service.handle(req('simbrief-prefile', {}))).toMatchObject({ ok: true });
+  });
+});
+
+describe('a cleared prefiled leg leaves no scope or thread behind, even when the next cycle fails', () => {
+  beforeEach(() => {
+    config = { token: SIMBRIEF_SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  /**
+   * Watching, prefiled leg 123 shown with its thread. `down` makes every
+   * status GET unreachable; `refuse` makes the named route answer
+   * INVALID_INGEST_TOKEN; `flying` puts a flight in status.
+   */
+  async function shownPrefile() {
+    const net = { down: false, flying: false, refuse: null as DatalinkRoute['key'] | null, threadDown: false };
+    const good = groundServer({
+      status: () => fromFixture(net.flying ? '01a-get-status-flying' : '01c-get-status-ground-no-leg'),
+    });
+    const client = new ScriptedClient((route) => {
+      if (net.refuse === route.key) return fromFixture('err-401-invalid-token');
+      if (net.down && route.key === 'status') return UNREACHABLE;
+      if (net.threadDown && (route.key === 'flight-thread' || route.key === 'leg-thread')) return UNREACHABLE;
+      if (route.key === 'leg-wx' || route.key === 'leg-loadsheet' || route.key === 'leg-send') {
+        return fromFixture('err-404-leg-not-found');
+      }
+      return good(route);
+    });
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    expect(last()).toMatchObject({
+      state: 'dl.ok',
+      scope: { kind: 'leg', plannedLegId: 123, source: 'prefile' },
+      prefiledLeg: { plannedLegId: 123 },
+    });
+    const epoch = last().thread!.epoch;
+    expect(await service.handle(req('thread', { epoch, endSeq: 1 }))).toMatchObject({ ok: true });
+    return { client, service, net, epoch };
+  }
+
+  /** Nothing published still points at leg 123, and no write can be aimed at it from the state. */
+  async function expectNoPrefileLeft(service: DatalinkService, epoch: number) {
+    for (const state of [last(), service.buildState()]) {
+      expect(state).not.toHaveProperty('prefiledLeg');
+      expect(state.thread).toBeNull();
+      expect(JSON.stringify(state.scope ?? null)).not.toContain('prefile');
+    }
+    expect(await service.handle(req('thread', { epoch, endSeq: 1 }))).toMatchObject({
+      ok: false, error: { code: 'no-thread' },
+    });
+  }
+
+  /** Fails the next cycle's status GET and checks the scope stays empty. */
+  async function failNextCycle(client: ScriptedClient, service: DatalinkService, net: { down: boolean }) {
+    net.down = true;
+    const made = client.routes.length;
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(paths(client, made)).toEqual(['GET /api/status']);
+    expect(last()).toMatchObject({ state: 'dl.unreachable', scope: null, thread: null });
+  }
+
+  /** Once the server is back, the scope resolves as before the prefile and a new thread gets a new epoch. */
+  async function recovers(client: ScriptedClient, service: DatalinkService, net: { down: boolean }, epoch: number) {
+    net.down = false;
+    const made = client.routes.length;
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(paths(client, made)).toEqual(['GET /api/status', 'GET /api/ground-sessions/current']);
+    expect(last()).toMatchObject({ state: 'dl.ok', scope: { kind: 'none' }, thread: null });
+    expect(await service.handle(req('prefile-clear', {}))).toEqual({ ok: true, result: { cleared: false } });
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    expect(last().thread!.epoch).toBeGreaterThan(epoch);
+  }
+
+  it('C1 prefile-clear', async () => {
+    const { client, service, net, epoch } = await shownPrefile();
+    net.down = true;
+    expect(await service.handle(req('prefile-clear', {}))).toEqual({ ok: true, result: { cleared: true } });
+    expect(last()).toMatchObject({ scope: null, thread: null });
+    await flush();
+    await expectNoPrefileLeft(service, epoch);
+    await failNextCycle(client, service, net);
+    await expectNoPrefileLeft(service, epoch);
+    await recovers(client, service, net, epoch);
+  });
+
+  it.each([
+    ['serverUrl', () => { config.serverUrl = 'http://other.invalid'; }],
+    ['token', () => { config.token = 'SENTINEL-SIMBRIEF-TOKEN-2222'; }],
+  ])('C2 a reload that changes the %s', async (_name, change) => {
+    const { client, service, net, epoch } = await shownPrefile();
+    net.down = true;
+    change();
+    service.onConfigApplied(true);
+    expect(last()).toMatchObject({ scope: null, thread: null });
+    await flush();
+    await expectNoPrefileLeft(service, epoch);
+    await failNextCycle(client, service, net);
+    await expectNoPrefileLeft(service, epoch);
+    await recovers(client, service, net, epoch);
+  });
+
+  it.each([
+    ['a poll', 'status', (service: DatalinkService) => service.handle(req('refresh', {}))],
+    ['a datalink op', 'canned-list', (service: DatalinkService) => service.handle(req('canned-list', {}))],
+    ['the SimBrief settings op', 'simbrief-settings', (service: DatalinkService) => service.handle(req('simbrief-settings', {}))],
+  ] as const)('C3 the token latch set by %s: nothing is polled, and the scope is already empty', async (_name, key, act) => {
+    const { client, service, net, epoch } = await shownPrefile();
+    net.refuse = key;
+    await act(service);
+    await flush();
+    expect(last()).toMatchObject({ state: 'dl.token-invalid', scope: null, thread: null });
+    await expectNoPrefileLeft(service, epoch);
+    const made = client.routes.length;
+    await watchFor(service, 60000);
+    expect(client.routes.length).toBe(made);
+    await expectNoPrefileLeft(service, epoch);
+    net.refuse = null;
+    service.onConfigApplied(true);
+    await flush();
+    await recovers(client, service, net, epoch);
+  });
+
+  it('C5 a flight: the scope becomes the flight even when its thread GET fails, and a failed status after keeps it', async () => {
+    const { client, service, net, epoch } = await shownPrefile();
+    net.flying = true;
+    net.threadDown = true;
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(last()).toMatchObject({ state: 'dl.unreachable', scope: { kind: 'flight', flightId: 92 }, thread: null });
+    await expectNoPrefileLeft(service, epoch);
+    net.down = true;
+    const made = client.routes.length;
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(paths(client, made)).toEqual(['GET /api/status']);
+    expect(last()).toMatchObject({ state: 'dl.unreachable', scope: { kind: 'flight', flightId: 92 }, thread: null });
+    await expectNoPrefileLeft(service, epoch);
+    net.flying = false;
+    net.threadDown = false;
+    await recovers(client, service, net, epoch);
+    // A prefile after the flight ended shows its own leg again.
+    expect(last()).toMatchObject({ scope: { kind: 'leg', plannedLegId: 123, source: 'prefile' } });
+  });
+
+  it.each([
+    ['wx', { target: { kind: 'leg', id: 123 }, icao: 'LFPG' }],
+    ['loadsheet', { plannedLegId: 123 }],
+    ['send-canned', { target: { kind: 'leg', id: 123 }, cannedId: 'gate-request' }],
+  ] as const)('C6(ii) %s answering 404 for the prefiled leg', async (op, params) => {
+    const { client, service, net, epoch } = await shownPrefile();
+    net.down = true;
+    expect(await service.handle(req(op, params as never))).toMatchObject({ ok: false, error: { code: 'leg-not-found' } });
+    await flush();
+    await expectNoPrefileLeft(service, epoch);
+    await failNextCycle(client, service, net);
+    await expectNoPrefileLeft(service, epoch);
+    await recovers(client, service, net, epoch);
+  });
+
+  it('a clear that lands while a cycle is resolving the prefiled leg: that cycle publishes no scope for it', async () => {
+    const { client, service, net, epoch } = await shownPrefile();
+    let releaseThread: (() => void) | null = null;
+    const respond = client.respond;
+    client.respond = async (route) => {
+      if (route.key === 'leg-thread') {
+        await new Promise<void>((resolve) => { releaseThread = resolve; });
+      }
+      return respond(route);
+    };
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(releaseThread).not.toBeNull();
+    net.down = true;
+    expect(await service.handle(req('prefile-clear', {}))).toEqual({ ok: true, result: { cleared: true } });
+    client.respond = respond;
+    releaseThread!();
+    await flush();
+    await expectNoPrefileLeft(service, epoch);
+    expect(last()).toMatchObject({ state: 'dl.unreachable', scope: null });
+    await recovers(client, service, net, epoch);
+  });
+});
+
+describe('the prefile is never retried and never doubled', () => {
+  beforeEach(() => {
+    config = { token: SIMBRIEF_SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  it.each([
+    ['504', fromSimbrief('post-504-timeout'), 'simbrief-timeout'],
+    ['502', fromSimbrief('post-502-network'), 'simbrief-network'],
+    ['500', fromSimbrief('post-500-db-error'), 'simbrief-db-error'],
+    ['500 no code', fromSimbrief('post-500-internal-no-code'), 'http-error'],
+    ['reset', RESET, 'unreachable'],
+    ['client timeout', TIMED_OUT, 'timeout'],
+  ])('%s: one POST, and three poll intervals later still one', async (_name, outcome, code) => {
+    const client = new ScriptedClient(groundServer({ prefile: () => outcome }));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    expect(await service.handle(req('simbrief-prefile', {}))).toMatchObject({ ok: false, error: { code } });
+    await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+    expect(client.count('simbrief-prefile')).toBe(1);
+    expect(client.count('status')).toBeGreaterThanOrEqual(4);
+  });
+
+  it('a second prefile while the first is in flight is prefile-in-progress and sends nothing', async () => {
+    let release: ((outcome: HttpOutcome) => void) | null = null;
+    const client = new ScriptedClient(groundServer({
+      prefile: () => new Promise<HttpOutcome>((resolve) => { release = resolve; }),
+    }));
+    const service = makePrefileService(client);
+    const first = service.handle(req('simbrief-prefile', {}));
+    await flush();
+    expect(client.count('simbrief-prefile')).toBe(1);
+    const inProgress = { ok: false, error: { code: 'prefile-in-progress', httpStatus: null, serverCode: null } };
+    expect(await service.handle(req('simbrief-prefile', {}))).toEqual(inProgress);
+    // Checked before the config, so it answers the same with no config.
+    hasConfig = false;
+    expect(await service.handle(req('simbrief-prefile', {}))).toEqual(inProgress);
+    hasConfig = true;
+    expect(await service.handle(req('prefile-clear', {}))).toEqual({ ok: true, result: { cleared: false } });
+    expect(client.count('simbrief-prefile')).toBe(1);
+    release!(fromSimbrief('post-504-timeout'));
+    expect(await first).toMatchObject({ ok: false, error: { code: 'simbrief-timeout' } });
+    await vi.advanceTimersByTimeAsync(100000);
+    expect(client.count('simbrief-prefile')).toBe(1);
+  });
+});
+
+describe('the prefile against a scratch server through the real client', () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    config = { token: SIMBRIEF_SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  it.each([
+    ['504', () => simbriefReply('post-504-timeout')],
+    ['502', () => simbriefReply('post-502-bad-status')],
+    ['500', () => simbriefReply('post-500-db-error')],
+    ['reset', () => () => ({ destroy: true as const })],
+    ['client timeout', () => () => 'hang' as const],
+  ])('%s: the server records exactly one POST, while a second press is refused and through three poll intervals', async (_name, handler) => {
+    const server = await startScratchServer({ 'POST /api/planned-legs/simbrief': handler() as never });
+    const uplink = new Uplink(scratchConfig(server.baseUrl, { ingestToken: SIMBRIEF_SENTINEL_TOKEN }));
+    const real = new DatalinkClient(() => uplink, { prefileTimeoutMs: 300 });
+    // The SimBrief routes go to the scratch server; the poll GETs are scripted
+    // so fake time can drive the schedule without real sockets under it.
+    const polls = new ScriptedClient(groundServer());
+    const service = makePrefileService({
+      request: (route, abort) => (route.key.startsWith('simbrief-') ? real.request(route, abort) : polls.request(route)),
+    });
+    try {
+      // The second press lands while the first is still waiting on the server.
+      const first = service.handle(req('simbrief-prefile', {}));
+      expect(await service.handle(req('simbrief-prefile', {}))).toMatchObject({ ok: false, error: { code: 'prefile-in-progress' } });
+      expect(await first).toMatchObject({ ok: false });
+      expect(server.requests.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /api/planned-legs/simbrief']);
+      expect(server.requests[0].body).toBe('');
+
+      vi.useFakeTimers();
+      await service.handle(req('watch', { on: true }));
+      await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+      expect(polls.count('status')).toBeGreaterThanOrEqual(4);
+      vi.useRealTimers();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(server.requests).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+      service.shutdown();
+      await uplink.close();
+      await server.close();
+    }
   });
 });

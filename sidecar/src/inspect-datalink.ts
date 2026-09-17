@@ -5,7 +5,7 @@
 // file and prints how each one classifies: HTTP status, the datalink error
 // code, and the availability state the CDU would show. Then it resolves the
 // scope the way a poll cycle does and, when there is one, fetches the thread
-// and prints its size.
+// and prints its size. Last, it asks whether a SimBrief Pilot ID is saved.
 //
 // It exists so the datalink is falsifiable without the app or a simulator:
 // run it against a server before and after an upgrade and the "route not in
@@ -14,14 +14,16 @@
 //   node dist/inspect-datalink.js --config <path>
 //
 // Read-only by construction. It issues GETs only; there is no POST path and no
-// flag that enables one, because every datalink POST writes a real ACARS row.
-// No body, header or token is printed.
+// flag that enables one, because every datalink POST writes a real ACARS row
+// and a SimBrief prefile creates a real planned leg. No body, header, token or
+// Pilot ID is printed.
 
 import { loadConfig, parseConfigArg, resolveConfigPath } from './config';
 import { classifyOutcome, type Classified, type ClassifyContext } from './datalink-classify';
 import { buildRequest, DatalinkClient, type DatalinkRoute } from './datalink-client';
 import { projectThread } from './datalink-model';
 import { selectScope, type ScopeSelection } from './datalink-scope';
+import { classifySimbriefOutcome, projectSimbriefSettings } from './simbrief-model';
 import { Uplink } from './uplink';
 
 function describeScope(selection: ScopeSelection): string {
@@ -53,6 +55,23 @@ async function getAndReport(
   const code = !classified.ok && classified.serverCode !== null ? ` code=${classified.serverCode}` : '';
   console.log(`GET ${path} http=${status} class=${cls} state=${state}${code}`);
   return classified;
+}
+
+/** Prints whether a Pilot ID is saved, never the id; false when the line is a failure. */
+async function reportSimbriefSettings(client: DatalinkClient, token: string): Promise<boolean> {
+  const route: DatalinkRoute = { key: 'simbrief-settings' };
+  const path = buildRequest(route)?.path ?? '(invalid route)';
+  const classified = classifySimbriefOutcome(await client.request(route), token);
+  const status = classified.httpStatus === null ? '---' : String(classified.httpStatus);
+  let cls: string = classified.ok ? 'ok' : classified.code;
+  let configured = '-';
+  if (classified.ok) {
+    const projected = projectSimbriefSettings(classified.json);
+    if (projected.ok) configured = projected.result.configured ? 'yes' : 'no';
+    else cls = 'bad-response';
+  }
+  console.log(`GET ${path} http=${status} class=${cls} configured=${configured}`);
+  return cls === 'ok';
 }
 
 /** Runs the inspection and resolves with the exit code. Exported so tests can drive it. */
@@ -111,6 +130,8 @@ export async function runInspector(argv: string[]): Promise<number> {
       }
     }
   }
+
+  if (!(await reportSimbriefSettings(client, token))) allOk = false;
 
   await uplink.close();
   return allOk ? 0 : 1;

@@ -1,0 +1,43 @@
+{
+  "_sample": "post-201-label-contains-token",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "imported": [],
+      "result": {
+        "status": "imported",
+        "planned_leg_id": 124,
+        "label": "KJFK → EGLL (SENTINEL-SIMBRIEF-TOKEN-0000)",
+        "warnings": [
+          "w1",
+          "w2"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "status": "imported",
+      "plannedLegId": 124,
+      "label": "KJFK → EGLL ([REDACTED])",
+      "warningCount": 2,
+      "httpStatus": 201
+    },
+    "override": "set 124",
+    "cdu": "PREFILED"
+  }
+}

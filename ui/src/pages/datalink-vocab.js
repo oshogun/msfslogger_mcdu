@@ -101,6 +101,9 @@ export function formatScope(scope) {
       ? `FLT ${scope.flightId}`
       : `FLT ${scope.flightId} LEG ${scope.plannedLegId}`;
   }
+  // A leg the user prefiled from SimBrief says so, because it outranks the
+  // ground session's leg until it is cleared or a flight starts.
+  if (scope.kind === 'leg' && scope.source === 'prefile') return `PREFILE ${scope.plannedLegId}`;
   if (scope.kind === 'leg') return `LEG ${scope.plannedLegId}`;
   return '----';
 }

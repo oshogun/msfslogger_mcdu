@@ -32,6 +32,7 @@ import {
   isBlankLine,
   MAX_LINE_BYTES,
   PROTOCOL_VERSION,
+  SIMBRIEF_FEATURE,
   type DatalinkError,
   type DatalinkOutcome,
   type DatalinkRequestMessage,
@@ -133,6 +134,7 @@ class Sidecar {
     client: new DatalinkClient(() => this.uplink),
     hasConfig: () => this.config !== null,
     token: () => this.uplink?.getConfig().ingestToken ?? null,
+    serverUrl: () => this.uplink?.getConfig().serverUrl ?? null,
     emitState: (message) => this.send(message),
     log: (level, message) => this.log(level, message),
   });
@@ -204,7 +206,7 @@ class Sidecar {
       sidecarVersion: SIDECAR_VERSION,
       nodeVersion: process.version,
       configPath: this.configPath,
-      features: [DATALINK_FEATURE],
+      features: [DATALINK_FEATURE, SIMBRIEF_FEATURE],
     });
     this.send(this.datalink.buildState());
 

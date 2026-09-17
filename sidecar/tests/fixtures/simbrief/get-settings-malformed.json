@@ -1,0 +1,33 @@
+{
+  "_sample": "get-settings-malformed",
+  "request": {
+    "method": "GET",
+    "path": "/api/settings/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "simbrief_user_id": 1234567
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "bad-response",
+    "httpStatus": 200,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "n/a",
+    "cdu": "SERVER BAD DATA",
+    "hint": ""
+  }
+}

@@ -59,6 +59,19 @@ export type DatalinkErrorCode =
   | 'invalid-id'
   | 'flight-not-found'
   | 'leg-not-found'
+  // SimBrief routes: the server's own SimBrief answers
+  | 'simbrief-no-user-id'
+  | 'simbrief-unknown-user'
+  | 'simbrief-no-plan'
+  | 'simbrief-timeout'
+  | 'simbrief-network'
+  | 'simbrief-bad-status'
+  | 'simbrief-bad-body'
+  | 'simbrief-db-error'
+  // a 401 with no token scope on a SimBrief route: the server predates them
+  | 'simbrief-unavailable'
+  // sidecar or shell: a prefile is already in flight, nothing was sent
+  | 'prefile-in-progress'
   // sidecar-local
   | 'bad-request'
   | 'stale-epoch'

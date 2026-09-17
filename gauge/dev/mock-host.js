@@ -161,7 +161,9 @@
   // Smaller than the sidecar's window, so the page's fetch loop has to ask more than once.
   var MOCK_WINDOW = 5;
   var datalinkListeners = new Set();
-  var dl = { name: 'flight', epoch: 0, watching: false, scope: null, messages: null, loadsheets: 0 };
+  var dl = { name: 'flight', epoch: 0, watching: false, scope: null, messages: null, loadsheets: 0, ownScope: null, ownMessages: null };
+  // The prefiled leg the sidecar would hold after a successful SimBrief prefile.
+  var simbrief = { name: 'configured', held: null, messages: null, delay: 0, latched: false };
 
   function envelope(result) { return { ok: true, result: result }; }
   function failure(code, httpStatus, serverCode) {
@@ -176,7 +178,7 @@
     var at = Date.now();
     var faultEntry = FAULTS[dl.name];
     var messages = dl.messages;
-    return {
+    var state = {
       v: 1, type: 'datalink-state', at: at,
       state: faultEntry ? faultEntry.state : 'dl.ok',
       watching: dl.name === 'sidecar-outdated' ? false : dl.watching,
@@ -191,8 +193,13 @@
         newestId: messages.length ? messages[messages.length - 1].id : null, droppedRows: 0
       } : null
     };
+    // Present only while a leg is held, exactly as the sidecar publishes it.
+    if (simbrief.held) state.prefiledLeg = clone(simbrief.held);
+    return state;
   }
   function emitDatalink() {
+    // A flight outranks a prefiled leg, and seeing one clears it.
+    if (simbrief.held && dl.ownScope && dl.ownScope.kind === 'flight') holdLeg(null);
     var state = datalinkState();
     datalinkListeners.forEach(function (fn) { fn(clone(state)); });
     return state;
@@ -213,6 +220,24 @@
       dl.messages.push({ seq: 5, id: 19, direction: 'uplink', category: 'wx', label: 'TAF EGLL', body: FIXTURES.metar + '\n' + FIXTURES.longTaf, sentAt: '2026-09-16T14:40:02.000Z', correlationId: null });
     }
     if (name === 'long-route') dl.messages[0].body = FIXTURES.routeDispatchBody;
+    dl.ownScope = dl.scope;
+    dl.ownMessages = dl.messages;
+  }
+  /**
+   * Hold `leg` (or nothing) and publish the scope the sidecar would: a held leg
+   * outranks the scenario's own leg or its lack of one, but never a flight, and
+   * a fault scenario has no scope at all. A scope change is a new thread epoch.
+   */
+  function holdLeg(leg) {
+    var before = simbrief.held;
+    simbrief.held = leg ? { plannedLegId: leg.plannedLegId, label: leg.label } : null;
+    if (leg && (!before || before.plannedLegId !== leg.plannedLegId)) simbrief.messages = clone(FIXTURES.legThread);
+    var applied = !!simbrief.held && !FAULTS[dl.name] && !!dl.ownScope && dl.ownScope.kind !== 'flight';
+    var scope = applied ? { kind: 'leg', plannedLegId: simbrief.held.plannedLegId, source: 'prefile' } : dl.ownScope;
+    var messages = applied ? simbrief.messages : dl.ownMessages;
+    if (messages !== dl.messages || JSON.stringify(scope) !== JSON.stringify(dl.scope)) dl.epoch += 1;
+    dl.scope = scope;
+    dl.messages = messages;
   }
   function appendMessage(direction, category, label, body, correlationId) {
     var id = dl.messages.reduce(function (max, m) { return Math.max(max, m.id); }, 0) + 1;
@@ -301,13 +326,113 @@
     }
   };
 
+  // ── SimBrief ──────────────────────────────────────────────────────────────
+  // What getSimbriefSettings, prefileSimbrief and clearPrefiledLeg answer in
+  // each preview scenario. A clear of 'held' is the normal behaviour: it says
+  // whether a leg was held and drops it. None of the three takes an argument.
+  var SAMPLE_LABEL = 'KJFK \u2192 EGLL (BAW178)';
+  var LONG_LABEL = 'SBGR \u2192 LFPG (TAP084 S\u00e3o Paulo\u2013Paris Ext)';
+  var CONFIGURED = envelope({ configured: true });
+  function prefiled(status, plannedLegId, label, warningCount) {
+    return envelope({ status: status, plannedLegId: plannedLegId, label: label, warningCount: warningCount, httpStatus: status === 'imported' ? 201 : 200 });
+  }
+  function answers(settings, prefile, clear) { return { settings: settings, prefile: prefile, clear: clear || 'held' }; }
+  function refused(code, httpStatus, serverCode) { return answers(failure(code, httpStatus, serverCode), failure(code, httpStatus, serverCode)); }
+  function refusedAll(code) { return answers(failure(code), failure(code), failure(code)); }
+  var SIMBRIEF_SCENARIOS = {
+    'configured': answers(CONFIGURED, prefiled('imported', 4812, SAMPLE_LABEL, 0)),
+    'not-configured': answers(envelope({ configured: false }), failure('simbrief-no-user-id', 400, 'NO_USER_ID')),
+    'duplicate': answers(CONFIGURED, prefiled('duplicate', 4812, SAMPLE_LABEL, 0)),
+    'long-label': answers(CONFIGURED, prefiled('imported', 4813, LONG_LABEL, 2)),
+    'prefiled': answers(CONFIGURED, prefiled('duplicate', 4812, SAMPLE_LABEL, 0)),
+    'no-user-id': answers(CONFIGURED, failure('simbrief-no-user-id', 400, 'NO_USER_ID')),
+    'unknown-user': answers(CONFIGURED, failure('simbrief-unknown-user', 400, 'UNKNOWN_USER')),
+    'no-plan': answers(CONFIGURED, failure('simbrief-no-plan', 404, 'NO_PLAN')),
+    'simbrief-timeout': answers(CONFIGURED, failure('simbrief-timeout', 504, 'TIMEOUT')),
+    'network': answers(CONFIGURED, failure('simbrief-network', 502, 'NETWORK')),
+    'bad-status': answers(CONFIGURED, failure('simbrief-bad-status', 502, 'BAD_STATUS')),
+    'bad-body': answers(CONFIGURED, failure('simbrief-bad-body', 502, 'BAD_BODY')),
+    'db-error': answers(CONFIGURED, failure('simbrief-db-error', 500, 'DB_ERROR')),
+    'unknown-code': answers(CONFIGURED, failure('http-error', 409, 'SOMETHING_NEW')),
+    'invalid-token': refused('token-invalid', 401, 'INVALID_INGEST_TOKEN'),
+    'token-missing': refused('token-missing', 401),
+    'unavailable': refused('simbrief-unavailable', 401),
+    'rejected': refused('rejected', 403),
+    'bad-response': answers(failure('bad-response', 200), failure('bad-response', 201)),
+    'tls-error': refused('tls-error'),
+    'unreachable': refused('unreachable'),
+    'client-timeout': refused('timeout'),
+    'relay-timeout': refused('shell-timeout'),
+    'no-config': refused('no-config'),
+    'in-progress': answers(CONFIGURED, failure('prefile-in-progress')),
+    'busy': refusedAll('busy'),
+    'sidecar-exited': refused('sidecar-exited'),
+    'sidecar-unavailable': refusedAll('sidecar-unavailable'),
+    'sidecar-outdated': refusedAll('sidecar-outdated'),
+    'not-supported': refusedAll('host-unsupported')
+  };
+  SIMBRIEF_SCENARIOS.prefiled.initialPrefiledLeg = { plannedLegId: 4812, label: SAMPLE_LABEL };
+
+  function simbriefAnswers() { return SIMBRIEF_SCENARIOS[simbrief.name]; }
+  // The server's rejected-token answer latches the sidecar, which clears the
+  // prefiled leg and turns the datalink to INGEST TOKEN REJECTED.
+  function latchOnFirstCall() {
+    if (simbrief.name !== 'invalid-token' || simbrief.latched) return;
+    simbrief.latched = true;
+    loadDatalinkScenario('invalid-token');
+    holdLeg(null);
+    emitDatalink();
+  }
+
+  var simbriefHost = {
+    getSimbriefSettings: async function () {
+      recordDatalink('getSimbriefSettings', Array.prototype.slice.call(arguments));
+      latchOnFirstCall();
+      return clone(simbriefAnswers().settings);
+    },
+    prefileSimbrief: function () {
+      recordDatalink('prefileSimbrief', Array.prototype.slice.call(arguments));
+      latchOnFirstCall();
+      var answer = clone(simbriefAnswers().prefile);
+      return new Promise(function (resolve) {
+        setTimeout(function () {
+          if (answer.ok) {
+            holdLeg({ plannedLegId: answer.result.plannedLegId, label: answer.result.label });
+            emitDatalink();
+          }
+          resolve(answer);
+        }, simbrief.delay);
+      });
+    },
+    clearPrefiledLeg: async function () {
+      recordDatalink('clearPrefiledLeg', Array.prototype.slice.call(arguments));
+      var clear = simbriefAnswers().clear;
+      if (clear !== 'held') return clone(clear);
+      var held = simbrief.held !== null;
+      if (held) {
+        holdLeg(null);
+        emitDatalink();
+      }
+      return envelope({ cleared: held });
+    }
+  };
+  // Kept only to notice a changed token, as the sidecar does; never returned or recorded.
+  var ingestToken = null;
+
   var host = {
     hostLabel: 'GAUGE MOCK',
     getConfig: async function () { return { exists: true, path: 'memory://gauge-dev', config: clone(config), raw: clone(config) }; },
     setConfig: async function (patch) {
       record('setConfig');
+      var serverChanged = 'serverUrl' in patch && patch.serverUrl !== config.serverUrl;
+      var tokenChanged = typeof patch.ingestToken === 'string' && patch.ingestToken !== ingestToken;
       Object.keys(config).forEach(function (key) { if (key in patch) config[key] = patch[key]; });
-      if (typeof patch.ingestToken === 'string') config.tokenSet = !!patch.ingestToken.trim();
+      if (typeof patch.ingestToken === 'string') {
+        config.tokenSet = !!patch.ingestToken.trim();
+        ingestToken = patch.ingestToken;
+      }
+      // A different server or token may not know the held prefiled leg.
+      if ((serverChanged || tokenChanged) && simbrief.held) { holdLeg(null); emitDatalink(); }
       // A saved config is what clears the sidecar's rejected-token latch.
       if (dl.name === 'invalid-token') { loadDatalinkScenario('flight'); emitDatalink(); }
       return { ok: true, path: 'memory://gauge-dev' };
@@ -322,10 +447,21 @@
     onExit: function (fn) { return subscribe('exit', fn); }
   };
   Object.keys(datalinkHost).forEach(function (name) { host[name] = datalinkHost[name]; });
+  Object.keys(simbriefHost).forEach(function (name) { host[name] = simbriefHost[name]; });
   window.__FMC_HOST__ = host;
   window.gaugeDev = {
     scenario: scenario, calls: calls,
-    datalinkScenario: function (name) { loadDatalinkScenario(name); return clone(emitDatalink()); },
+    // A new datalink scenario stands in for a sidecar restart, which forgets the prefiled leg.
+    datalinkScenario: function (name) { loadDatalinkScenario(name); holdLeg(null); return clone(emitDatalink()); },
+    simbriefScenario: function (name) {
+      if (!Object.prototype.hasOwnProperty.call(SIMBRIEF_SCENARIOS, name)) throw new Error('Unknown simbrief scenario: ' + name);
+      simbrief.name = name;
+      simbrief.latched = false;
+      holdLeg(SIMBRIEF_SCENARIOS[name].initialPrefiledLeg || null);
+      emitDatalink();
+      return name;
+    },
+    setSimbriefDelay: function (ms) { simbrief.delay = Math.max(0, Number(ms) || 0); return simbrief.delay; },
     emitLog: function (message) { listeners.log.forEach(function (fn) { fn({ level: 'info', message: message }); }); },
     emitExit: function () { scenario('crashed'); listeners.exit.forEach(function (fn) { fn({ code: 1 }); }); }
   };

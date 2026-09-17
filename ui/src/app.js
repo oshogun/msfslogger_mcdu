@@ -21,7 +21,7 @@ import { defaultStatus } from './status.js';
 
 const MAX_SCRATCHPAD_CHARS = 4096;
 /** Pages that live in the lazily-imported bundle. */
-const LAZY_PAGE_IDS = new Set(['NETWORK', 'SIM', 'TRAFFIC', 'DL-INDEX']);
+const LAZY_PAGE_IDS = new Set(['NETWORK', 'SIM', 'TRAFFIC', 'DL-INDEX', 'FPLN']);
 
 const dom = {
   screen: document.getElementById('fmc-screen'),
@@ -231,6 +231,7 @@ const MENU_ITEMS = [
   { lsk: 'L3', label: '<SIM', page: 'SIM' },
   { lsk: 'L4', label: '<TRAFFIC', page: 'TRAFFIC' },
   { lsk: 'L5', label: '<DATALINK', page: 'DL-INDEX' },
+  { lsk: 'L6', label: '<FPLN', page: 'FPLN' },
 ];
 
 registerPage({
@@ -248,7 +249,8 @@ registerPage({
       const line = row('row-value row-prompts', item.label);
       line.firstChild.classList.add('prompt');
       view.appendChild(line);
-      view.appendChild(row('row-label', ''));
+      // Six items fill all twelve rows; the last one gets no spacer below it.
+      if (view.childElementCount < 12) view.appendChild(row('row-label', ''));
     }
     while (view.childElementCount < 12) view.appendChild(row('row-label', ''));
     return view;
@@ -552,6 +554,9 @@ function boot() {
     requestWeather: (req) => runDatalink(() => bridge.requestWeather(req)),
     requestLoadsheet: (req) => runDatalink(() => bridge.requestLoadsheet(req)),
     setPageNumber,
+    getSimbriefSettings: () => runDatalink(() => bridge.getSimbriefSettings()),
+    prefileSimbrief: () => runDatalink(() => bridge.prefileSimbrief()),
+    clearPrefiledLeg: () => runDatalink(() => bridge.clearPrefiledLeg()),
   };
   window.FMC = fmc;
 

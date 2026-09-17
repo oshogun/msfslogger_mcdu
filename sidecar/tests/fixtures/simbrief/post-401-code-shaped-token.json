@@ -1,0 +1,37 @@
+{
+  "_sample": "post-401-code-shaped-token",
+  "_why": "Token scrub: a code-shaped token echoed as code must not be emitted. The config token for this sample only is configToken.",
+  "configToken": "SENTINELSIMBRIEFTOKEN0000",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINELSIMBRIEFTOKEN0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "x",
+      "code": "SENTINELSIMBRIEFTOKEN0000"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-unavailable",
+    "httpStatus": 401,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "SIMBRIEF UNAVAILABLE",
+    "hint": "SERVER UPDATE NEEDED"
+  }
+}

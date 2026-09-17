@@ -2,19 +2,31 @@
 // scratch HTTP server on an ephemeral port with a sentinel token.
 //
 // The server records every request, so the properties asserted are the ones
-// the server's token check depends on: exactly ten (method, path) pairs, the
+// the server's token check depends on: exactly twelve (method, path) pairs, the
 // token in x-ingest-token and nowhere else, no Origin or Cookie, and bodies
 // limited to a canned id or an ICAO.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildRequest, DatalinkClient, type DatalinkRoute } from '../src/datalink-client';
+import {
+  buildRequest,
+  DATALINK_HTTP_TIMEOUT_MS,
+  DatalinkClient,
+  httpTimeoutMs,
+  SIMBRIEF_PREFILE_BODY_MAX_BYTES,
+  SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS,
+  type DatalinkRoute,
+  type DatalinkRouteKey,
+} from '../src/datalink-client';
 import { classifyOutcome } from '../src/datalink-classify';
 import { Uplink } from '../src/uplink';
 import {
   closedPort,
+  fixture,
   reply,
   scratchConfig,
   SENTINEL_TOKEN,
+  simbriefFixture,
+  simbriefReply,
   startScratchServer,
   type ScratchServer,
 } from './helpers/datalink-scratch-server';
@@ -30,6 +42,8 @@ const FROZEN_ROUTES = new Set([
   'POST /api/planned-legs/12/acars-messages/wx',
   'POST /api/planned-legs/12/acars-messages/loadsheet',
   'GET /api/ground-sessions/current',
+  'GET /api/settings/simbrief',
+  'POST /api/planned-legs/simbrief',
 ]);
 
 const ALL_ROUTES: DatalinkRoute[] = [
@@ -43,6 +57,8 @@ const ALL_ROUTES: DatalinkRoute[] = [
   { key: 'leg-wx', id: 12, icao: 'LFPG' },
   { key: 'leg-loadsheet', id: 12 },
   { key: 'ground-session-current' },
+  { key: 'simbrief-settings' },
+  { key: 'simbrief-prefile' },
 ];
 
 describe('DatalinkClient against a scratch server', () => {
@@ -62,6 +78,8 @@ describe('DatalinkClient against a scratch server', () => {
       'POST /api/planned-legs/12/acars-messages/wx': reply('08-post-leg-wx'),
       'POST /api/planned-legs/12/acars-messages/loadsheet': reply('09a-post-leg-loadsheet-created'),
       'GET /api/ground-sessions/current': reply('10a-get-ground-session-open'),
+      'GET /api/settings/simbrief': simbriefReply('get-settings-configured'),
+      'POST /api/planned-legs/simbrief': simbriefReply('post-201-imported'),
       'GET /redirected': () => ({ status: 200, body: { followed: true } }),
     });
     uplink = new Uplink(scratchConfig(server.baseUrl));
@@ -73,7 +91,7 @@ describe('DatalinkClient against a scratch server', () => {
     await server.close();
   });
 
-  it('exercises all ten routes; each request is one of the frozen ten, tokened, with no Origin or Cookie', async () => {
+  it('exercises all twelve routes; each request is one of the frozen twelve, tokened, with no Origin or Cookie', async () => {
     const before = server.requests.length;
     for (const route of ALL_ROUTES) {
       const outcome = await client.request(route);
@@ -81,7 +99,7 @@ describe('DatalinkClient against a scratch server', () => {
       if (outcome.kind === 'response') expect(outcome.status).toBeLessThan(300);
     }
     const made = server.requests.slice(before);
-    expect(made).toHaveLength(10);
+    expect(made).toHaveLength(12);
     expect(new Set(made.map((r) => `${r.method} ${r.path}`))).toEqual(FROZEN_ROUTES);
 
     for (const request of made) {
@@ -207,6 +225,75 @@ describe('DatalinkClient against a scratch server', () => {
     expect(classifyOutcome(outcome, 'poll', SENTINEL_TOKEN)).toMatchObject({ ok: false, code: 'unreachable' });
     expect(JSON.stringify(outcome)).not.toContain(SENTINEL_TOKEN);
     await offline.close();
+  });
+
+  it('sends the SimBrief settings GET and the prefile POST exactly, the POST with no body at all', async () => {
+    const before = server.requests.length;
+    await client.request({ key: 'simbrief-settings' });
+    await client.request({ key: 'simbrief-prefile' });
+    const made = server.requests.slice(before);
+    expect(made.map((r) => `${r.method} ${r.path}`)).toEqual([
+      'GET /api/settings/simbrief',
+      'POST /api/planned-legs/simbrief',
+    ]);
+    for (const request of made) {
+      expect(request.body).toBe('');
+      expect(request.headers['content-type']).toBeUndefined();
+      expect(request.headers['x-ingest-token']).toBe(SENTINEL_TOKEN);
+      expect(request.headers.origin).toBeUndefined();
+      expect(request.headers.cookie).toBeUndefined();
+      expect(request.headers.accept).toBe('application/json');
+    }
+    expect(made[1].headers['content-length']).toBe('0');
+    expect(buildRequest({ key: 'simbrief-prefile' })).toEqual({
+      method: 'POST',
+      path: '/api/planned-legs/simbrief',
+      template: '/api/planned-legs/simbrief',
+      body: null,
+      maxBodyBytes: SIMBRIEF_PREFILE_BODY_MAX_BYTES,
+    });
+    expect(buildRequest({ key: 'simbrief-settings' })).toMatchObject({ body: null, maxBodyBytes: 1024 * 1024 });
+    for (const request of made) expect(JSON.stringify(request.headers)).not.toContain('allow');
+  });
+
+  it('uses the prefile timeout for the prefile POST only, and 8 s for every other route', () => {
+    expect(DATALINK_HTTP_TIMEOUT_MS).toBe(8000);
+    expect(SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS).toBe(25000);
+    expect(SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS).toBeGreaterThan(20000);
+    const keys = ALL_ROUTES.map((route) => route.key);
+    expect(new Set(keys).size).toBe(12);
+    for (const key of keys) {
+      const expected = key === 'simbrief-prefile' ? 25000 : 8000;
+      expect(httpTimeoutMs(key, {}), key).toBe(expected);
+    }
+    for (const key of keys) {
+      const scaled = httpTimeoutMs(key as DatalinkRouteKey, { timeoutMs: 100, prefileTimeoutMs: 400 });
+      expect(scaled, key).toBe(key === 'simbrief-prefile' ? 400 : 100);
+    }
+    expect(httpTimeoutMs('simbrief-prefile', { timeoutMs: 100 })).toBe(25000);
+    expect(httpTimeoutMs('simbrief-settings', { prefileTimeoutMs: 400 })).toBe(8000);
+  });
+
+  it('a prefile answering after the default timeout still succeeds; a thread GET with the same delay times out', async () => {
+    const late = (response: { status: number; headers: Record<string, string>; body: unknown }) => () => ({
+      ...response,
+      delayMs: 200,
+    });
+    server.routes['POST /api/planned-legs/simbrief'] = late(simbriefFixture('post-201-imported').response);
+    server.routes['GET /api/planned-legs/12/acars-messages'] = late(fixture('06-get-leg-thread').response);
+    try {
+      const scaled = new DatalinkClient(() => uplink, { timeoutMs: 100, prefileTimeoutMs: 400 });
+      const [prefile, thread] = await Promise.all([
+        scaled.request({ key: 'simbrief-prefile' }),
+        scaled.request({ key: 'leg-thread', id: 12 }),
+      ]);
+      expect(prefile).toMatchObject({ kind: 'response', status: 201, bodyTooLarge: false });
+      expect(thread).toMatchObject({ kind: 'transport', errorName: 'TimeoutError' });
+      expect(classifyOutcome(thread, 'poll', SENTINEL_TOKEN)).toMatchObject({ ok: false, code: 'timeout' });
+    } finally {
+      server.routes['POST /api/planned-legs/simbrief'] = simbriefReply('post-201-imported');
+      server.routes['GET /api/planned-legs/12/acars-messages'] = reply('06-get-leg-thread');
+    }
   });
 
   it('reports an abort by its owner as a timeout', async () => {

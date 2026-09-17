@@ -1,0 +1,35 @@
+{
+  "_sample": "post-400-unknown-user",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SimBrief does not recognise that Pilot ID. Check the SimBrief User ID in the field above — it is the numeric Pilot ID from your SimBrief account page.",
+      "code": "UNKNOWN_USER"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-unknown-user",
+    "httpStatus": 400,
+    "serverCode": "UNKNOWN_USER",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "SIMBRIEF ID NOT FOUND",
+    "hint": "CHECK PILOT ID ON SERVER"
+  }
+}

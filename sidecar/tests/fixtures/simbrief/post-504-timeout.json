@@ -1,0 +1,35 @@
+{
+  "_sample": "post-504-timeout",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 504,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SimBrief did not respond within 20 seconds. Try again in a moment.",
+      "code": "TIMEOUT"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-timeout",
+    "httpStatus": 504,
+    "serverCode": "TIMEOUT",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "SIMBRIEF TIMEOUT",
+    "hint": "TRY AGAIN SHORTLY"
+  }
+}

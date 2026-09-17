@@ -1,0 +1,47 @@
+{
+  "transport-unreachable": {
+    "_why": "connection refused on a closed ephemeral port, or a reset mid-request",
+    "expect": {
+      "ok": false,
+      "code": "unreachable",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "override": "unchanged",
+      "prefileOutcome": "unknown",
+      "cdu": "SERVER NO COMM",
+      "hint": "SAFE TO PREFILE AGAIN"
+    }
+  },
+  "transport-client-timeout": {
+    "_why": "no complete answer within the sidecar prefile timeout (25 000 ms; test-scaled)",
+    "expect": {
+      "ok": false,
+      "code": "timeout",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "override": "unchanged",
+      "prefileOutcome": "unknown",
+      "cdu": "PREFILE RESULT UNKNOWN",
+      "hint": "SAFE TO PREFILE AGAIN"
+    }
+  },
+  "relay-timeout": {
+    "_why": "no datalink-response within the shell prefile relay timeout (30 000 ms; test-scaled)",
+    "expect": {
+      "ok": false,
+      "code": "shell-timeout",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "override": "unchanged",
+      "prefileOutcome": "unknown",
+      "cdu": "PREFILE RESULT UNKNOWN",
+      "hint": "SAFE TO PREFILE AGAIN"
+    }
+  }
+}

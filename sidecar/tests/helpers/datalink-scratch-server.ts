@@ -5,7 +5,9 @@
 // and records every request it receives: method, path, lower-cased headers
 // and body. Routes are keyed "<METHOD> <path>". Anything unlisted answers 599,
 // so a test can assert that no unexpected request was made at all. A handler
-// may return 'hang' to never answer, for timeout tests.
+// may return 'hang' to never answer, for timeout tests, { destroy: true } to
+// reset the connection without answering, or a reply with `delayMs` to answer
+// late.
 
 import * as fs from 'fs';
 import * as http from 'http';
@@ -27,9 +29,11 @@ export interface ScratchReply {
   headers?: Record<string, string>;
   /** A string is sent as-is; anything else is JSON-encoded. */
   body?: unknown;
+  /** Answer this many milliseconds after the request arrived. */
+  delayMs?: number;
 }
 
-export type ScratchHandler = (req: RecordedRequest) => ScratchReply | 'hang';
+export type ScratchHandler = (req: RecordedRequest) => ScratchReply | 'hang' | { destroy: true };
 
 export interface ScratchServer {
   baseUrl: string;
@@ -60,13 +64,26 @@ export async function startScratchServer(routes: Record<string, ScratchHandler>)
         hanging.push(res);
         return;
       }
-      res.statusCode = reply.status;
-      for (const [name, value] of Object.entries(reply.headers ?? {})) res.setHeader(name, value);
-      if (reply.body === undefined) {
-        res.end();
+      if ('destroy' in reply) {
+        req.socket.destroy();
+        return;
+      }
+      const answer = () => {
+        if (res.destroyed) return;
+        res.statusCode = reply.status;
+        for (const [name, value] of Object.entries(reply.headers ?? {})) res.setHeader(name, value);
+        if (reply.body === undefined) {
+          res.end();
+        } else {
+          if (!res.hasHeader('content-type')) res.setHeader('content-type', 'application/json; charset=utf-8');
+          res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body));
+        }
+      };
+      if (reply.delayMs !== undefined) {
+        hanging.push(res);
+        setTimeout(answer, reply.delayMs);
       } else {
-        if (!res.hasHeader('content-type')) res.setHeader('content-type', 'application/json; charset=utf-8');
-        res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body));
+        answer();
       }
     });
   });
@@ -109,6 +126,46 @@ export interface Fixture {
 export function fixture(name: string): Fixture {
   const file = path.join(__dirname, '..', 'fixtures', 'datalink', `${name}.json`);
   return JSON.parse(fs.readFileSync(file, 'utf8')) as Fixture;
+}
+
+export const SIMBRIEF_SENTINEL_TOKEN = 'SENTINEL-SIMBRIEF-TOKEN-0000';
+/** Upper-case letters and digits only, so it is itself a well-formed server code. */
+export const SIMBRIEF_CODE_TOKEN = 'SENTINELSIMBRIEFTOKEN0000';
+
+/** A SimBrief server sample: what was sent, what came back, and what it must classify as. */
+export interface SimbriefFixture extends Fixture {
+  _sample: string;
+  /** Replaces the sentinel token as the configured token, for this sample only. */
+  configToken?: string;
+  expect: {
+    ok: boolean;
+    code?: string;
+    httpStatus?: number;
+    serverCode?: string | null;
+    latch?: boolean;
+    override?: string;
+    result?: Record<string, unknown>;
+  };
+}
+
+const SIMBRIEF_FIXTURE_DIR = path.join(__dirname, '..', 'fixtures', 'simbrief');
+
+export function simbriefFixture(name: string): SimbriefFixture {
+  return JSON.parse(fs.readFileSync(path.join(SIMBRIEF_FIXTURE_DIR, `${name}.json`), 'utf8')) as SimbriefFixture;
+}
+
+/** Every SimBrief server sample, by name; the local transport outcomes are not among them. */
+export function simbriefFixtureNames(): string[] {
+  return fs
+    .readdirSync(SIMBRIEF_FIXTURE_DIR)
+    .filter((file) => file.endsWith('.json') && file !== 'local-outcomes.json')
+    .map((file) => file.slice(0, -'.json'.length))
+    .sort();
+}
+
+export function simbriefReply(name: string): ScratchHandler {
+  const { response } = simbriefFixture(name);
+  return () => ({ status: response.status, headers: response.headers, body: response.body });
 }
 
 /** The fixture's response, served as recorded. */

@@ -1,0 +1,34 @@
+{
+  "_sample": "post-403-cross-origin",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Cross-origin request rejected"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "rejected",
+    "httpStatus": 403,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "SERVER REJECTED 403",
+    "hint": ""
+  }
+}

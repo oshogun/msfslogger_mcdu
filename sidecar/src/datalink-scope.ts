@@ -12,11 +12,16 @@
 // stored row (`session.planned_leg_id`). They are read separately and never
 // unified, so a camelCase member in the raw row is ignored.
 //
+// A leg the user prefiled from SimBrief sits outside that rule: the server
+// never attaches a trip-less leg to a ground session or a flight, so the client
+// holds its id and slots it in between flight scope and the ground-session leg.
+// With no prefiled leg held, selection is exactly the frozen rule.
+//
 // Pure: no I/O. The caller makes the fallback GET only when this asks for it.
 
 export type ScopeSelection =
   | { kind: 'flight'; flightId: number; plannedLegId: number | null }
-  | { kind: 'leg'; plannedLegId: number; source: 'status' | 'ground-session' }
+  | { kind: 'leg'; plannedLegId: number; source: 'status' | 'ground-session' | 'prefile' }
   | { kind: 'none' }
   | { kind: 'need-ground-session' }
   | { kind: 'bad-response'; detail: string };
@@ -67,4 +72,31 @@ export function selectScope(statusBody: unknown, groundSessionBody?: unknown): S
     return { kind: 'leg', plannedLegId: session.planned_leg_id, source: 'ground-session' };
   }
   return { kind: 'none' };
+}
+
+/**
+ * What a poll cycle does with a prefiled leg: 'unused' when none is held or
+ * the status body is unusable, 'applied' when it is the selected scope, and
+ * 'clear' when a flight has started, which ends the prefile for good.
+ */
+export type PrefileUse = 'unused' | 'applied' | 'clear';
+
+/**
+ * The frozen rule with a prefiled leg slotted in: flight scope first, then the
+ * prefiled leg, then the ground-session leg. The prefiled leg outranks a leg
+ * from status or the ground session because it is the one the user explicitly
+ * asked for, and it never needs the fallback GET.
+ */
+export function selectScopeWithPrefile(
+  statusBody: unknown,
+  prefiledLegId: number | null,
+  groundSessionBody?: unknown,
+): { selection: ScopeSelection; prefile: PrefileUse } {
+  if (prefiledLegId === null) {
+    return { selection: selectScope(statusBody, groundSessionBody), prefile: 'unused' };
+  }
+  const base = selectScope(statusBody);
+  if (base.kind === 'bad-response') return { selection: base, prefile: 'unused' };
+  if (base.kind === 'flight') return { selection: base, prefile: 'clear' };
+  return { selection: { kind: 'leg', plannedLegId: prefiledLegId, source: 'prefile' }, prefile: 'applied' };
 }

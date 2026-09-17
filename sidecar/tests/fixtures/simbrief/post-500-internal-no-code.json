@@ -1,0 +1,35 @@
+{
+  "_sample": "post-500-internal-no-code",
+  "_why": "The handler catch-all for an unexpected throw (seen in ee03501 server.ts): 500 with no code.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "TypeError: unexpected"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 500,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "unknown",
+    "cdu": "SERVER FAULT 500",
+    "hint": "SAFE TO PREFILE AGAIN"
+  }
+}

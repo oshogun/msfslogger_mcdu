@@ -1,0 +1,35 @@
+{
+  "_sample": "post-401-token-missing",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "Missing ingest token"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "token-missing",
+    "httpStatus": 401,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "TOKEN NOT RECEIVED",
+    "hint": "TOKEN LOST IN TRANSIT"
+  }
+}

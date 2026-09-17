@@ -18,6 +18,11 @@
 // - The thread is unbounded on the server, so it is cached here and handed to
 //   the shell in windows. The pushed state carries only a summary, and an epoch
 //   that changes whenever cached seq numbers stop meaning the same rows.
+// - A SimBrief prefile creates a real planned leg, so it is made at most once
+//   per request: never retried, never repeated by a poll, and refused while
+//   another is in flight. The leg it returns is held in memory as a scope of
+//   its own until a flight starts, the user clears it, the server or token
+//   changes, the token is refused, or the leg turns out to be gone.
 //
 // Timers go through setTimeout so a fake clock drives the whole schedule.
 
@@ -38,7 +43,7 @@ import {
   projectWx,
   THREAD_CACHE_MAX_MESSAGES,
 } from './datalink-model';
-import { selectScope, type ScopeSelection } from './datalink-scope';
+import { selectScope, selectScopeWithPrefile, type ScopeSelection } from './datalink-scope';
 import type {
   DatalinkError,
   DatalinkMessage,
@@ -50,6 +55,7 @@ import type {
   DatalinkThreadSummary,
   WriteTarget,
 } from './protocol';
+import { classifySimbriefOutcome, projectSimbriefPrefile, projectSimbriefSettings } from './simbrief-model';
 import type { LogSink } from './uplink';
 
 export const DATALINK_POLL_INTERVAL_MS = 20000;
@@ -73,6 +79,8 @@ export interface DatalinkServiceDeps {
   hasConfig(): boolean;
   /** The token in use, only so it can be scrubbed out of forwarded text. */
   token(): string | null;
+  /** The server in use, only so a prefiled leg is dropped when it changes. */
+  serverUrl(): string | null;
   emitState(message: DatalinkStateMessage): void;
   log: LogSink;
 }
@@ -87,6 +95,25 @@ interface ThreadCache {
 }
 
 type Failure = Extract<Classified, { ok: false }>;
+
+/** A failed cycle; `counts: false` leaves the backoff where it was. */
+interface CycleFailure {
+  failure: Failure;
+  route: string;
+  counts?: boolean;
+}
+
+/**
+ * The server and token are the ones in effect when the prefile started. They
+ * are compared on a config reload and used for nothing else: never emitted,
+ * logged or passed on.
+ */
+interface PrefiledState {
+  plannedLegId: number;
+  label: string;
+  serverUrl: string | null;
+  token: string | null;
+}
 
 const NON_FAULT_STATES: readonly DatalinkStateId[] = ['dl.idle', 'dl.pending', 'dl.ok'];
 
@@ -141,6 +168,9 @@ export class DatalinkService {
   private cache: ThreadCache | null = null;
   private epochCounter = 0;
 
+  private prefiled: PrefiledState | null = null;
+  private prefileInFlight = false;
+
   constructor(deps: DatalinkServiceDeps) {
     this.deps = deps;
   }
@@ -161,6 +191,11 @@ export class DatalinkService {
       nextPollAt: this.nextPollAt,
       scope: this.scope ? { ...this.scope } : null,
       thread: this.threadSummary(),
+      // Omitted rather than null when none is held, so the state is unchanged
+      // for anyone who never prefiles.
+      ...(this.prefiled
+        ? { prefiledLeg: { plannedLegId: this.prefiled.plannedLegId, label: this.prefiled.label } }
+        : {}),
     };
   }
 
@@ -206,10 +241,34 @@ export class DatalinkService {
     if (failure.retry === 'latch') this.setLatch();
   }
 
+  /** A refused token also ends any prefiled leg; the caller emits. */
   private setLatch(): void {
     this.latched = true;
     this.cancelTimer();
     this.nextPollAt = null;
+    this.dropPrefiled();
+  }
+
+  /**
+   * Forgets the prefiled leg, and the scope and thread shown for it. Without
+   * this, a cycle that fails before resolving a new scope would leave the CDU
+   * showing, and writes aimed at, a leg nobody holds any more. The caller emits.
+   */
+  private dropPrefiled(): void {
+    this.prefiled = null;
+    if (this.scope?.kind === 'leg' && this.scope.source === 'prefile') {
+      this.scope = null;
+      this.cache = null;
+    }
+  }
+
+  /** A cycle resolved a prefile scope, but the leg was dropped while it ran. */
+  private isStalePrefile(selection: ScopeSelection): boolean {
+    return (
+      selection.kind === 'leg' &&
+      selection.source === 'prefile' &&
+      this.prefiled?.plannedLegId !== selection.plannedLegId
+    );
   }
 
   // ── lease and schedule ────────────────────────────────────────────────────
@@ -302,8 +361,11 @@ export class DatalinkService {
 
   private async runCycle(): Promise<void> {
     this.cycleInFlight = true;
-    let failure: { failure: Failure; route: string } | null = null;
+    let failure: CycleFailure | null = null;
     let lastRoute = routeTemplate('status');
+    // A prefiled leg set or cleared meanwhile is picked up by the next cycle;
+    // this one finishes with what it resolved.
+    const cyclePrefiled = this.prefiled?.plannedLegId ?? null;
 
     try {
       const status = await this.get({ key: 'status' });
@@ -314,7 +376,11 @@ export class DatalinkService {
         return;
       }
 
-      let selection: ScopeSelection = selectScope(statusResult.json);
+      const resolved = selectScopeWithPrefile(statusResult.json, cyclePrefiled);
+      let selection: ScopeSelection = resolved.selection;
+      // A flight has started: the prefile has done its job and ends here.
+      if (resolved.prefile === 'clear' && this.prefiled?.plannedLegId === cyclePrefiled) this.dropPrefiled();
+      // Only asked for when this cycle has no prefiled leg.
       if (selection.kind === 'need-ground-session') {
         const ground = await this.get({ key: 'ground-session-current' });
         if (this.shuttingDown) return;
@@ -358,6 +424,38 @@ export class DatalinkService {
         ? projectThread(threadResult.json, selection.kind, this.deps.token())
         : null;
 
+      if (
+        !threadResult.ok &&
+        threadResult.code === 'leg-not-found' &&
+        selection.kind === 'leg' &&
+        selection.source === 'prefile' &&
+        this.prefiled?.plannedLegId === selection.plannedLegId
+      ) {
+        // The prefiled leg was deleted on the server. That is not the server
+        // failing, so it does not back off: the scope is re-resolved at once
+        // without it.
+        this.prefiled = null;
+        this.scope = null;
+        this.cache = null;
+        this.rerunAfterCycle = true;
+        failure = { failure: threadResult, route: thread.template, counts: false };
+        return;
+      }
+
+      if (this.isStalePrefile(selection)) {
+        // Cleared while this cycle ran: publish no scope rather than the old
+        // leg; the rerun the clear asked for resolves the real one.
+        this.scope = null;
+        this.cache = null;
+        if (!threadResult.ok || !projection || !projection.ok) {
+          failure = {
+            failure: threadResult.ok ? badResponse(threadResult.httpStatus) : threadResult,
+            route: thread.template,
+          };
+        }
+        return;
+      }
+
       if (!threadResult.ok || !projection || !projection.ok) {
         this.scope =
           selection.kind === 'flight'
@@ -385,7 +483,7 @@ export class DatalinkService {
     }
   }
 
-  private finishCycle(failure: { failure: Failure; route: string } | null, lastRoute: string): void {
+  private finishCycle(failure: CycleFailure | null, lastRoute: string): void {
     if (failure) {
       // A token refused by an op while this cycle was in flight outranks
       // whatever else the cycle ran into: polling stays stopped until a config
@@ -393,7 +491,7 @@ export class DatalinkService {
       if (!this.latched || failure.failure.retry === 'latch') {
         this.applyFailure(failure.failure, failure.route);
       }
-      if (failure.failure.retry !== 'latch') this.consecutiveFailures++;
+      if (failure.failure.retry !== 'latch' && failure.counts !== false) this.consecutiveFailures++;
     } else if (!this.latched) {
       this.httpStatus = null;
       this.serverCode = null;
@@ -454,6 +552,12 @@ export class DatalinkService {
         return this.wx(request.params);
       case 'loadsheet':
         return this.loadsheet(request.params);
+      case 'simbrief-settings':
+        return this.simbriefSettings();
+      case 'simbrief-prefile':
+        return this.simbriefPrefile();
+      case 'prefile-clear':
+        return this.prefileClear();
     }
   }
 
@@ -532,6 +636,10 @@ export class DatalinkService {
       this.applyFailure(classified, routeTemplate(route.key));
       if (changesAxis) this.emit();
       if (classified.code === 'flight-not-found' || classified.code === 'leg-not-found') {
+        if (classified.code === 'leg-not-found' && this.isPrefiledLegRoute(route)) {
+          this.dropPrefiled();
+          this.emit();
+        }
         // The flight or leg this op was aimed at has gone; re-resolve the scope now.
         this.cycleSoon();
       }
@@ -618,6 +726,91 @@ export class DatalinkService {
     return { ok: true, result: projected.result };
   }
 
+  // ── SimBrief ──────────────────────────────────────────────────────────────
+
+  private isPrefiledLegRoute(route: DatalinkRoute): boolean {
+    const legRoute = route.key === 'leg-send' || route.key === 'leg-wx' || route.key === 'leg-loadsheet';
+    return legRoute && this.prefiled !== null && this.prefiled.plannedLegId === route.id;
+  }
+
+  /**
+   * One SimBrief request. It is never retried and never followed by a cycle.
+   * The only thing it can change on the datalink is a refused token, which is
+   * applied and emitted here. Logs one line naming the op, the result status
+   * or error code, and the HTTP status: nothing the server wrote.
+   */
+  private async simbrief<T>(
+    key: 'simbrief-settings' | 'simbrief-prefile',
+    project: (json: unknown, httpStatus: number) => { ok: true; result: T } | { ok: false; detail: string },
+    describe: (result: T) => string,
+  ): Promise<{ ok: true; result: T } | { ok: false; error: DatalinkError } | null> {
+    const outcome = await this.deps.client.request({ key }, this.abort.signal);
+    if (this.shuttingDown) return null;
+    const classified = classifySimbriefOutcome(outcome, this.deps.token());
+    const op = key === 'simbrief-settings' ? 'settings' : 'prefile';
+
+    if (!classified.ok) {
+      if (classified.availability !== null || classified.retry === 'latch') {
+        this.applyFailure(classified, routeTemplate(key));
+        this.emit();
+      }
+      const status = classified.httpStatus === null ? '---' : String(classified.httpStatus);
+      this.deps.log('warn', `SimBrief ${op} ${classified.code} (HTTP ${status})`);
+      return failureOutcome(classified);
+    }
+
+    const projected = project(classified.json, classified.httpStatus);
+    if (!projected.ok) {
+      this.deps.log('warn', `SimBrief ${op} bad-response (HTTP ${classified.httpStatus})`);
+      return error('bad-response', classified.httpStatus);
+    }
+    this.deps.log('info', `SimBrief ${op} ${describe(projected.result)} (HTTP ${classified.httpStatus})`);
+    return { ok: true, result: projected.result };
+  }
+
+  private async simbriefSettings(): Promise<DatalinkOutcome<'simbrief-settings'>> {
+    if (!this.deps.hasConfig() || this.latched) return this.localRefusal();
+    const outcome = await this.simbrief('simbrief-settings', (json) => projectSimbriefSettings(json), () => 'ok');
+    return outcome ?? error('sidecar-unavailable');
+  }
+
+  private async simbriefPrefile(): Promise<DatalinkOutcome<'simbrief-prefile'>> {
+    // Checked before anything else, so a second press can never reach the
+    // server while the first one's fate is still open.
+    if (this.prefileInFlight) return error('prefile-in-progress');
+    this.prefileInFlight = true;
+    try {
+      if (!this.deps.hasConfig() || this.latched) return this.localRefusal();
+      const serverUrl = this.deps.serverUrl();
+      const token = this.deps.token();
+      const outcome = await this.simbrief(
+        'simbrief-prefile',
+        (json, httpStatus) => projectSimbriefPrefile(json, httpStatus, this.deps.token()),
+        (result) => result.status,
+      );
+      if (!outcome) return error('sidecar-unavailable');
+      if (outcome.ok) {
+        // A duplicate is the same leg, already filed: it is held exactly like
+        // a fresh import, and replaces any leg held before.
+        this.prefiled = { plannedLegId: outcome.result.plannedLegId, label: outcome.result.label, serverUrl, token };
+        this.emit();
+        this.cycleSoon();
+      }
+      return outcome;
+    } finally {
+      this.prefileInFlight = false;
+    }
+  }
+
+  /** Needs no config and works while latched: it only forgets something. */
+  private prefileClear(): DatalinkOutcome<'prefile-clear'> {
+    if (!this.prefiled) return { ok: true, result: { cleared: false } };
+    this.dropPrefiled();
+    this.emit();
+    this.cycleSoon();
+    return { ok: true, result: { cleared: true } };
+  }
+
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
   /**
@@ -628,6 +821,12 @@ export class DatalinkService {
   onConfigApplied(ok: boolean): void {
     if (this.shuttingDown) return;
     if (ok) {
+      // A leg prefiled on another server, or under another token, is not one
+      // this configuration can see.
+      const prefiled = this.prefiled;
+      if (prefiled && (this.deps.serverUrl() !== prefiled.serverUrl || this.deps.token() !== prefiled.token)) {
+        this.dropPrefiled();
+      }
       this.latched = false;
       this.consecutiveFailures = 0;
       if (this.state === 'dl.token-invalid' || this.state === 'dl.no-config') {

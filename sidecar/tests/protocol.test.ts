@@ -18,6 +18,8 @@ import {
   isBlankLine,
   MAX_LINE_BYTES,
   PROTOCOL_VERSION,
+  DATALINK_OPS,
+  SIMBRIEF_FEATURE,
   type ControlMessage,
   type SidecarMessage,
 } from '../src/protocol';
@@ -422,5 +424,66 @@ describe('datalink messages', () => {
 
   it('keeps the protocol version at 1', () => {
     expect(PROTOCOL_VERSION).toBe(1);
+  });
+});
+
+describe('SimBrief datalink ops', () => {
+  it('decodes the three ops with empty params and round-trips them', () => {
+    const lines = [
+      '{"v":1,"type":"datalink-request","id":"dl-41","op":"simbrief-settings","params":{}}',
+      '{"v":1,"type":"datalink-request","id":"dl-42","op":"simbrief-prefile","params":{}}',
+      '{"v":1,"type":"datalink-request","id":"dl-43","op":"prefile-clear","params":{}}',
+    ];
+    for (const line of lines) {
+      const result = decodeControlMessage(line);
+      expect(result).toEqual({ ok: true, message: JSON.parse(line) });
+      if (result.ok) expect(encodeControlMessage(result.message)).toBe(`${line}
+`);
+    }
+  });
+
+  it('rejects any param key, and non-object params, as bad-shape with the request id echoed', () => {
+    const rejected = [
+      '{"v":1,"type":"datalink-request","id":"dl-50","op":"simbrief-prefile","params":{"allow_duplicates":true}}',
+      '{"v":1,"type":"datalink-request","id":"dl-51","op":"simbrief-prefile","params":{"tripId":7}}',
+      '{"v":1,"type":"datalink-request","id":"dl-52","op":"simbrief-settings","params":{"pilotId":"1234567"}}',
+      '{"v":1,"type":"datalink-request","id":"dl-53","op":"prefile-clear","params":{"plannedLegId":123}}',
+      '{"v":1,"type":"datalink-request","id":"dl-54","op":"simbrief-prefile","params":null}',
+      '{"v":1,"type":"datalink-request","id":"dl-55","op":"simbrief-settings","params":[]}',
+      '{"v":1,"type":"datalink-request","id":"dl-56","op":"prefile-clear"}',
+      '{"v":1,"type":"datalink-request","id":"dl-57","op":"simbrief-prefile","params":{"plannedLegId":123}}',
+      '{"v":1,"type":"datalink-request","id":"dl-58","op":"simbrief-settings","params":{"allow_duplicates":false}}',
+      '{"v":1,"type":"datalink-request","id":"dl-59","op":"prefile-clear","params":{"pilotId":"1","tripId":1}}',
+    ];
+    for (const line of rejected) {
+      const result = decodeControlMessage(line);
+      expect(result).toMatchObject({
+        ok: false, error: 'bad-shape', messageType: 'datalink-request', requestId: JSON.parse(line).id,
+      });
+      if (!result.ok) expect(describeDecodeError(result)).not.toContain('1234567');
+    }
+  });
+
+  it('lists the ops in their frozen order, and names the feature', () => {
+    expect(DATALINK_OPS).toEqual([
+      'watch', 'refresh', 'thread', 'canned-list', 'send-canned', 'wx', 'loadsheet',
+      'simbrief-settings', 'simbrief-prefile', 'prefile-clear',
+    ]);
+    expect(SIMBRIEF_FEATURE).toBe('simbrief-prefile');
+    expect(PROTOCOL_VERSION).toBe(1);
+  });
+
+  it('decodes the SimBrief responses and a datalink-state carrying prefiledLeg', () => {
+    const lines = [
+      '{"v":1,"type":"hello","at":1789600000000,"pid":4242,"sidecarVersion":"0.1.0","nodeVersion":"v20.20.2","configPath":"/x","features":["datalink","simbrief-prefile"]}',
+      '{"v":1,"type":"datalink-response","at":1789600000000,"id":"dl-41","ok":true,"result":{"configured":true}}',
+      '{"v":1,"type":"datalink-response","at":1789600000000,"id":"dl-42","ok":true,"result":{"status":"imported","plannedLegId":123,"label":"KJFK → EGLL (BAW178)","warningCount":0,"httpStatus":201}}',
+      '{"v":1,"type":"datalink-response","at":1789600000000,"id":"dl-47","ok":false,"error":{"code":"prefile-in-progress","httpStatus":null,"serverCode":null}}',
+      '{"v":1,"type":"datalink-response","at":1789600000000,"id":"dl-43","ok":true,"result":{"cleared":true}}',
+      '{"v":1,"type":"datalink-state","at":1789600000000,"watching":true,"httpStatus":null,"serverCode":null,"lastOkAt":1789600000000,"lastErrorAt":null,"nextPollAt":1789600020000,"state":"dl.ok","scope":{"kind":"leg","plannedLegId":123,"source":"prefile"},"thread":{"epoch":4,"total":1,"firstSeq":0,"newestId":31,"droppedRows":0},"prefiledLeg":{"plannedLegId":123,"label":"KJFK → EGLL (BAW178)"}}',
+    ];
+    for (const line of lines) {
+      expect(decodeSidecarMessage(line)).toEqual({ ok: true, message: JSON.parse(line) });
+    }
   });
 });

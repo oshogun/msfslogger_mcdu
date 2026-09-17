@@ -1,0 +1,53 @@
+{
+  "_sample": "post-201-imported",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "imported": [
+        {
+          "id": 123,
+          "trip_id": null,
+          "seq": 4,
+          "status": "planned",
+          "departure_ident": "KJFK",
+          "destination_ident": "EGLL",
+          "source_filename": "simbrief-1234567.json",
+          "_note": "illustrative subset of a planned_legs row; the sidecar never reads imported[]"
+        }
+      ],
+      "result": {
+        "status": "imported",
+        "planned_leg_id": 123,
+        "label": "KJFK → EGLL (BAW178)",
+        "warnings": []
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "status": "imported",
+      "plannedLegId": 123,
+      "label": "KJFK → EGLL (BAW178)",
+      "warningCount": 0,
+      "httpStatus": 201
+    },
+    "override": "set 123",
+    "datalinkState": "emitted with prefiledLeg; availability unchanged",
+    "cdu": "PREFILED",
+    "advisory": "SIMBRIEF PLAN PREFILED"
+  }
+}

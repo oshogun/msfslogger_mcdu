@@ -296,7 +296,7 @@ describe('datalink wiring', () => {
   });
 
   it('hello advertises the datalink feature and is followed by one idle datalink-state', () => {
-    expect(messages[0]).toMatchObject({ type: 'hello', features: ['datalink'] });
+    expect(messages[0]).toMatchObject({ type: 'hello', features: ['datalink', 'simbrief-prefile'] });
     expect(messages[1]).toEqual({
       v: 1, type: 'datalink-state', at: 60000, state: 'dl.idle', watching: false, httpStatus: null,
       serverCode: null, lastOkAt: null, lastErrorAt: null, nextPollAt: null, scope: null, thread: null,
@@ -358,6 +358,91 @@ describe('datalink wiring', () => {
       expect({ state: backend.state, httpStatus: backend.httpStatus, message: backend.message, lastErrorAt: backend.lastErrorAt })
         .toEqual({ state: before.state, httpStatus: before.httpStatus, message: before.message, lastErrorAt: before.lastErrorAt });
     }
+  });
+
+  it('SimBrief settings and prefile through 401 (three variants), 403, 500, 504 and unreachable leave the backend axis identical', async () => {
+    await start();
+    sendFrame();
+    await flush();
+    const before = status().backend;
+    expect(before.state).toBe('net.ok');
+
+    const simbriefFaults: [string, Outcome][] = [
+      ...FAULTS,
+      ['504 TIMEOUT', respond(504, { error: `SimBrief timeout ${SENTINEL}`, code: 'TIMEOUT' })],
+    ];
+    for (const [, outcome] of simbriefFaults) {
+      mocks.datalinkRequest.mockResolvedValue(outcome);
+      reload({ ok: true, config: sentinelConfig, warnings: [] });
+      const settings = datalink('simbrief-settings', {});
+      const prefile = datalink('simbrief-prefile', {});
+      await flush();
+      expect(responseFor(settings)).toMatchObject({ ok: false });
+      expect(responseFor(prefile)).toMatchObject({ ok: false });
+      expect(status().backend).toEqual(before);
+    }
+    const routes = mocks.datalinkRequest.mock.calls.map(([route]) => (route as { key: string }).key);
+    expect(new Set(routes)).toEqual(new Set(['simbrief-settings', 'simbrief-prefile']));
+    expect(routes.filter((key) => key === 'simbrief-prefile')).toHaveLength(simbriefFaults.length);
+    const codes = messages
+      .filter((m) => m.type === 'datalink-response' && !m.ok)
+      .map((m) => (m.type === 'datalink-response' && !m.ok ? m.error.code : ''));
+    expect(new Set(codes)).toEqual(
+      new Set(['token-invalid', 'token-missing', 'simbrief-unavailable', 'rejected', 'http-error', 'unreachable', 'simbrief-timeout']),
+    );
+    const backends = messages.filter((m): m is StatusMessage => m.type === 'status').slice(-3).map((m) => m.backend);
+    for (const backend of backends) {
+      expect({ state: backend.state, httpStatus: backend.httpStatus, message: backend.message, lastErrorAt: backend.lastErrorAt })
+        .toEqual({ state: before.state, httpStatus: before.httpStatus, message: before.message, lastErrorAt: before.lastErrorAt });
+    }
+  });
+
+  it('a prefile publishes prefiledLeg and its scope, and nothing it writes to stdout carries the token', async () => {
+    mocks.datalinkRequest.mockImplementation(async (route: { key: string; id?: number }) => {
+      if (route.key === 'simbrief-prefile') {
+        return respond(201, {
+          imported: [{ id: 123, note: SENTINEL }],
+          result: { status: 'imported', planned_leg_id: 123, label: `KJFK EGLL ${SENTINEL}`, warnings: [SENTINEL] },
+        });
+      }
+      if (route.key === 'simbrief-settings') return respond(200, { simbrief_user_id: '1234567' });
+      if (route.key === 'status') return respond(200, { currentFlightId: null });
+      if (route.key === 'ground-session-current') return respond(200, { session: null });
+      return respond(200, { planned_leg_id: route.id, messages: [] });
+    });
+    datalink('watch', { on: true });
+    await flush();
+    const settings = datalink('simbrief-settings', {});
+    const prefile = datalink('simbrief-prefile', {});
+    await flush();
+    expect(responseFor(settings)).toMatchObject({ ok: true, result: { configured: true } });
+    expect(responseFor(prefile)).toMatchObject({
+      ok: true, result: { status: 'imported', plannedLegId: 123, label: 'KJFK EGLL [REDACTED]', warningCount: 1, httpStatus: 201 },
+    });
+    expect(lastDatalinkState()).toMatchObject({
+      scope: { kind: 'leg', plannedLegId: 123, source: 'prefile' },
+      prefiledLeg: { plannedLegId: 123, label: 'KJFK EGLL [REDACTED]' },
+    });
+    const clear = datalink('prefile-clear', {});
+    await flush();
+    expect(responseFor(clear)).toMatchObject({ ok: true, result: { cleared: true } });
+    expect(lastDatalinkState()).not.toHaveProperty('prefiledLeg');
+
+    for (const [, outcome] of FAULTS) {
+      mocks.datalinkRequest.mockResolvedValue(outcome);
+      reload({ ok: true, config: sentinelConfig, warnings: [] });
+      datalink('simbrief-settings', {});
+      datalink('simbrief-prefile', {});
+      await flush();
+    }
+    control('shutdown');
+    await flush();
+    const logs = messages.filter((m) => m.type === 'log').map((m) => m.message);
+    expect(logs).toContain('SimBrief prefile imported (HTTP 201)');
+    const everything = JSON.stringify(messages);
+    expect(everything).not.toContain(SENTINEL);
+    expect(everything).not.toContain('SENTINEL-DATALINK');
+    expect(everything).not.toContain('1234567');
   });
 
   it('never writes the token to stdout across success, all 401s, 403, 409 and unreachable', async () => {

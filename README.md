@@ -246,7 +246,10 @@ line and its own vocabulary, separate from the `STATUS` page's Backend axis.
 - **`DL-INDEX`** (`ACARS DATALINK`) — current scope and the DATALINK state
   line. `L3` `<MESSAGES` → `DL-THREAD`; `L4` `<DOWNLINK` → `DL-CANNED`; `R3`
   `WX REQUEST>` → `DL-WX`; `R4` `LOADSHEET>` → `DL-LOADSHEET`; `R6`
-  `REFRESH>` polls immediately; `L6` `<INDEX` → `MENU`.
+  `REFRESH>` polls immediately; `L6` `<INDEX` → `MENU`. If a leg prefiled from
+  `FPLN` (below) is held, the scope line instead reads `PREFILE` and `R1`
+  shows `CLR PREFILE>` to drop it; the leg's id then shows on its own row
+  below, under `PREFILED LEG`.
 - **`DL-THREAD`** (`ACARS MSGS`) — the message thread for the current scope,
   five messages per page, oldest first, opening on the newest page. `L1`–`L5`
   open a message; `L6` `<RETURN`; `R6` `REFRESH>`.
@@ -313,6 +316,130 @@ cached yet):
 | `NOT A CANNED MESSAGE` / `UNKNOWN CANNED MESSAGE` / `FLIGHT NOT FOUND` / `PLANNED LEG NOT FOUND` / `DATALINK INVALID ID` | Server-side or scope-staleness faults; not expected from normal use of this app's own pages |
 | `DATALINK BUSY` / `DATALINK OFFLINE` / `DATALINK NOT SUPPORTED` / `DATALINK HOST FAULT` | A local fault in the relay between the webview and the sidecar, not a server response |
 
+## FPLN (SimBrief prefile)
+
+FPLN is a separate feature from DATALINK above: instead of reading and
+sending ACARS messages against an existing leg or flight, it imports your
+latest SimBrief OFP into the msfslogger server as a new, trip-less planned
+leg, which DATALINK can then be used against. It shares DATALINK's server
+connection and ingest token, but has its own pages and its own state.
+
+### Requirements
+
+- **The msfslogger server must be on commit `92fa6f6` or later** — later than
+  DATALINK's own `9a52d2d` floor. Before that, FPLN reads
+  `SIMBRIEF UNAVAILABLE` (hint `SERVER UPDATE NEEDED`) and `PREFILE>` stays
+  hidden; this has **no effect on DATALINK or on the regular flight-data
+  uplink**.
+- FPLN uses the **same ingest token already set on `CFG NETWORK`** — there is
+  no extra login or setting to configure, and the token is **never shown** on
+  any FPLN page, in the sidecar log, or in an event sent to the webview.
+- Your **SimBrief Pilot ID is set only on the msfslogger web app** — there is
+  no CDU page to enter or change it. FPLN only reads whether one is
+  configured; it never writes it.
+
+### Reaching FPLN
+
+`MENU` → `L6` `<FPLN` opens `FPLN` (`FLIGHT PLAN`). It behaves identically
+before and after `START>`.
+
+### PREFILE flow
+
+- `FPLN` row 2 shows `CONFIGURED` or `NOT SET` for the Pilot ID, read fresh
+  each time the page opens.
+- With a Pilot ID configured, `R6` `PREFILE>` opens `FPLN-CONFIRM`
+  (`PREFILE SIMBRIEF`) showing `IMPORT` / `LATEST SIMBRIEF OFP` / `AS` /
+  `PLANNED LEG, NO TRIP`. Nothing is sent yet — this is a staging page.
+- `R6` `CONFIRM*` on that page is the one press that actually sends the
+  request. It reads `SENDING` / `WAIT UP TO 30 SEC` while in flight, and the
+  app makes at most one prefile request at a time: pressing `R6` again while
+  sending, on `FPLN` or `FPLN-CONFIRM`, is simply ignored — the page already
+  says `SENDING` and makes no second call. `PREFILE IN PROGRESS` is a
+  different case: it only appears if the shell or the sidecar itself refuses
+  a concurrent request underneath the app (single-flight below the
+  webview).
+- **PREFILE is never retried automatically**, by the webview, the shell or
+  the sidecar. If the result comes back unknown (a timeout at any layer —
+  `PREFILE RESULT UNKNOWN`, hint `SAFE TO PREFILE AGAIN`), pressing PREFILE
+  again is safe: the server checks for a duplicate before writing, so a
+  repeat for the same OFP answers `200 duplicate`, never a second leg.
+- On success, `FPLN-RESULT` shows `PREFILED` (a new leg was created) or
+  `ALREADY FILED` (this OFP was already prefiled), plus the label and
+  `PLANNED LEG` / `LEG <id>`. Re-pressing PREFILE for an already-filed OFP
+  always answers `ALREADY FILED` with the same id, never a new leg.
+- A prefiled leg is trip-less: it never appears in the server's
+  `ground-sessions/current`, and a flight the app later detects never links
+  back to it.
+
+### The prefiled-leg scope
+
+Once PREFILE succeeds, DATALINK picks it up as the active scope: `DL-INDEX`'s
+scope line reads `PREFILE` with `R1` `CLR PREFILE>`, and the id itself moves
+to its own row, `PREFILED LEG` / the bare id (both blank when nothing is
+held); `DL-THREAD`'s label row reads `PREFILE <id>`, with the id. DATALINK's
+message thread, `WX REQUEST` and `LOADSHEET` all target that leg.
+Precedence: an active flight always wins over a prefiled leg, which in turn
+wins over any ground-session leg the server reports.
+
+The prefiled leg is cleared automatically the moment a flight is detected, if
+the leg itself is gone from the server (a `404`), on a token rejection, or on
+a `CFG NETWORK` change that alters the server URL or token; it is also
+cleared manually with `CLR PREFILE>` — `DL-INDEX` `R1` or `FPLN` `R3` — which
+answers `PREFILE CLEARED` and returns DATALINK to whatever scope applies
+without it. It lives only in the sidecar's memory: it is not saved to
+`config.json` and does not survive a sidecar restart. A newer successful
+PREFILE simply replaces the leg already held.
+
+### Timeouts
+
+PREFILE waits longer than every other FPLN/DATALINK request: up to 25 s for
+the sidecar's own request to the server, and up to 30 s for the shell before
+it gives up and reports `PREFILE RESULT UNKNOWN` itself. Every other FPLN
+request (the Pilot ID check, clearing) keeps the existing 8 s / 12 s bounds.
+
+### FPLN vocabulary
+
+**Pilot ID and prefile outcome** (`FPLN` rows 2 and 10):
+
+| CDU text | Hint | Meaning |
+|---|---|---|
+| `CONFIGURED` | | The server has a SimBrief Pilot ID on file |
+| `NOT SET` | `SET PILOT ID ON SERVER` | No Pilot ID is configured; set it on the msfslogger web app |
+| `SENDING` | | The prefile request is in flight |
+| `PREFILED` | | A new planned leg was created from the latest OFP |
+| `ALREADY FILED` | | This OFP was already prefiled; same leg id, nothing new written |
+| `NONE` | | No prefile attempt yet this session |
+
+**SimBrief-specific errors** (shown on `FPLN` row 2 or row 10):
+
+| CDU text | Hint | Meaning |
+|---|---|---|
+| `NO SIMBRIEF PILOT ID` | `SET PILOT ID ON SERVER` | The server has no Pilot ID configured for this prefile |
+| `SIMBRIEF ID NOT FOUND` | `CHECK PILOT ID ON SERVER` | The configured Pilot ID doesn't resolve on SimBrief |
+| `NO SIMBRIEF OFP` | `GENERATE OFP ON SIMBRIEF` | The Pilot ID has no current OFP to import |
+| `SIMBRIEF TIMEOUT` | `TRY AGAIN SHORTLY` | The server's own call to SimBrief timed out |
+| `SIMBRIEF NO COMM` | `TRY AGAIN SHORTLY` | The server couldn't reach SimBrief |
+| `SIMBRIEF ERROR` | `TRY AGAIN SHORTLY` | SimBrief answered with an unexpected status |
+| `SIMBRIEF BAD DATA` | `TRY AGAIN SHORTLY` | SimBrief's response wasn't usable |
+| `SERVER DB ERROR` | | The server failed to write the imported leg |
+| `SIMBRIEF UNAVAILABLE` | `SERVER UPDATE NEEDED` | The server answered, but predates SimBrief prefile support (older than commit `92fa6f6`) |
+| `PREFILE RESULT UNKNOWN` | `SAFE TO PREFILE AGAIN` | A sidecar or shell timeout on the prefile specifically — outcome unknown; see "PREFILE flow" above |
+| `PREFILE IN PROGRESS` | | The shell or sidecar refused a concurrent prefile request underneath the app; not shown for a repeat press on `FPLN`/`FPLN-CONFIRM`, which is silently ignored while `SENDING` |
+
+**Prefiled-leg scope and advisories:**
+
+| CDU text | When |
+|---|---|
+| `CLR PREFILE>` | Shown on `DL-INDEX` R1 and `FPLN` R3 whenever a prefiled leg is held |
+| `PREFILE CLEARED` | Advisory after a successful `CLR PREFILE>` |
+| `SIMBRIEF PLAN PREFILED` | Advisory after a `PREFILED` result |
+| `PLAN ALREADY FILED` | Advisory after an `ALREADY FILED` result |
+
+Every other fault FPLN can show (a rejected token, a busy or outdated
+sidecar, no config, and so on) reuses the same underlying codes as DATALINK,
+worded to fit FPLN's own rows — see `errorText`/`errorHint` in
+`ui/src/pages/fpln-vocab.js`.
+
 ## Troubleshooting
 
 The failure modes below are the same ones `agent/README.md` documents; this
@@ -331,6 +458,7 @@ log line.
 | Sidecar rebuilt/updated but the app not restarted (or vice versa) | N/A | Any `DATALINK` page reads `SIDECAR UPDATE REQUIRED` with hint `REBUILD SIDECAR THEN RESTART APP`. Fix: `npm --prefix sidecar run build`, then restart `cargo tauri dev` (or reinstall/relaunch a built app) |
 | Server predates DATALINK support | N/A | Any `DATALINK` page reads `DATALINK UNAVAILABLE` with hint `SERVER MAY PREDATE DATALINK`. The flight-data uplink (`STATUS` page) is unaffected. Fix: restart the server onto commit `9a52d2d` or later, when you choose to |
 | Wrong ingest token, DATALINK specifically | N/A | Any `DATALINK` page reads `INGEST TOKEN REJECTED` with hint `CHECK INGEST TOKEN ON CFG NETWORK`, and DATALINK stops polling until the token is corrected. Fix: re-enter the token on `CFG NETWORK`, L2, and save |
+| Server has DATALINK but predates SimBrief prefile | N/A | `FPLN` reads `SIMBRIEF UNAVAILABLE` with hint `SERVER UPDATE NEEDED`, and `PREFILE>` stays hidden. DATALINK itself is unaffected. Fix: restart the server onto commit `92fa6f6` or later, when you choose to |
 
 ## Manual test plan (run this on the Windows box)
 

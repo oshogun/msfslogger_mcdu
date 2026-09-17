@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { selectScope } from '../src/datalink-scope';
+import { selectScopeWithPrefile } from '../src/datalink-scope';
 import { fixture } from './helpers/datalink-scratch-server';
 
 const flying = fixture('01a-get-status-flying').response.body as Record<string, unknown>;
@@ -72,5 +73,62 @@ describe('selectScope', () => {
     expect(selectScope(groundNoLeg, { session: { id: 4, plannedLegId: 12 } })).toEqual({ kind: 'none' });
     expect(selectScope(groundNoLeg, { session: { id: 4, planned_leg_id: null } })).toEqual({ kind: 'none' });
     expect(selectScope(groundNoLeg, { session: { id: 4, planned_leg_id: '12' } })).toEqual({ kind: 'none' });
+  });
+});
+
+describe('selectScopeWithPrefile', () => {
+  const P = 4812;
+  const prefile = { kind: 'leg', plannedLegId: P, source: 'prefile' };
+
+  // Every (status, ground) pair the selectScope cases above use.
+  const CASES: [unknown, unknown?][] = [
+    [null], [[]], ['x'], [{}], [{ currentFlightId: 0 }], [{ currentFlightId: '92' }], [{ currentFlightId: 1.5 }],
+    [flying], [{ currentFlightId: 7 }], [{ currentFlightId: 7, plannedLeg: { plannedLegId: 'x' } }],
+    [{ ...flying, groundSession: { groundSessionId: 4, plannedLegId: 55 } }],
+    [{ ...flying, groundSession: { groundSessionId: 4, plannedLegId: 55 } }, sessionOpen],
+    [groundLeg], [groundLeg, sessionNone],
+    [{ currentFlightId: null, groundSession: { plannedLegId: -1 } }], [{ currentFlightId: null, groundSession: 'x' }],
+    [groundNoLeg], [groundNoLeg, {}], [groundNoLeg, []], [groundNoLeg, sessionNone], [groundNoLeg, { session: 4 }],
+    [groundNoLeg, sessionOpen], [groundNoLeg, { session: { id: 4, plannedLegId: 12 } }],
+    [groundNoLeg, { session: { id: 4, planned_leg_id: null } }], [groundNoLeg, { session: { id: 4, planned_leg_id: '12' } }],
+  ];
+
+  it('(a) with no prefiled leg, every selectScope result is unchanged and the prefile is unused', () => {
+    for (const [status, ground] of CASES) {
+      const expected = ground === undefined ? selectScope(status) : selectScope(status, ground);
+      const got = ground === undefined ? selectScopeWithPrefile(status, null) : selectScopeWithPrefile(status, null, ground);
+      expect(got).toEqual({ selection: expected, prefile: 'unused' });
+    }
+  });
+
+  it('(b) no flight and no leg in status -> the prefiled leg, never the ground-session fallback', () => {
+    expect(selectScopeWithPrefile(groundNoLeg, P)).toEqual({ selection: prefile, prefile: 'applied' });
+    expect(selectScopeWithPrefile({ currentFlightId: null }, P)).toEqual({ selection: prefile, prefile: 'applied' });
+    // A ground-session body handed in anyway changes nothing.
+    expect(selectScopeWithPrefile(groundNoLeg, P, sessionNone)).toEqual({ selection: prefile, prefile: 'applied' });
+  });
+
+  it('(c) no flight and a different ground-session leg -> the prefiled leg wins', () => {
+    expect(selectScopeWithPrefile(groundLeg, P)).toEqual({ selection: prefile, prefile: 'applied' });
+    expect(selectScopeWithPrefile(groundNoLeg, P, sessionOpen)).toEqual({ selection: prefile, prefile: 'applied' });
+  });
+
+  it('(d) no flight and the same ground-session leg -> still the prefile scope, on the same leg', () => {
+    expect(selectScopeWithPrefile(groundLeg, 12)).toEqual({
+      selection: { kind: 'leg', plannedLegId: 12, source: 'prefile' },
+      prefile: 'applied',
+    });
+  });
+
+  it('(e) a flight -> flight scope exactly as selectScope gives it, and the prefile is cleared', () => {
+    expect(selectScopeWithPrefile(flying, P)).toEqual({ selection: selectScope(flying), prefile: 'clear' });
+    const both = { ...flying, groundSession: { groundSessionId: 4, plannedLegId: P } };
+    expect(selectScopeWithPrefile(both, P)).toEqual({ selection: selectScope(both), prefile: 'clear' });
+  });
+
+  it('a status body selectScope calls bad-response stays bad-response, and the prefile is kept (unused)', () => {
+    for (const body of [null, [], {}, { currentFlightId: 0 }, { currentFlightId: '92' }]) {
+      expect(selectScopeWithPrefile(body, P)).toEqual({ selection: selectScope(body), prefile: 'unused' });
+    }
   });
 });

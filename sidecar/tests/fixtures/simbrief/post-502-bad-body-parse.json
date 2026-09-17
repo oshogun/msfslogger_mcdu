@@ -1,0 +1,35 @@
+{
+  "_sample": "post-502-bad-body-parse",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 502,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SimBrief returned a plan with no usable route.",
+      "code": "BAD_BODY"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-bad-body",
+    "httpStatus": 502,
+    "serverCode": "BAD_BODY",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "SIMBRIEF BAD DATA",
+    "hint": "TRY AGAIN SHORTLY"
+  }
+}

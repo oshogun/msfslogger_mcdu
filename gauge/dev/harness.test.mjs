@@ -82,7 +82,8 @@ const plain = (value) => (value === undefined ? undefined : JSON.parse(JSON.stri
 const pageModule = (name) => import(new URL(`../../ui/src/pages/${name}`, import.meta.url));
 
 async function loadMock() {
-  const context = vm.createContext({ window: {} });
+  // The mock's prefile answers after a timer, as the preview's delay control needs.
+  const context = vm.createContext({ window: {}, setTimeout, clearTimeout });
   vm.runInContext(await readFile(new URL('./mock-host.js', import.meta.url), 'utf8'), context);
   const { __FMC_HOST__: host, gaugeDev } = context.window;
   return { host, gaugeDev };
@@ -405,12 +406,16 @@ function fakeDocument() {
  * the parts of the shell they use (same scratchpad and page-change rules as
  * app.js) and wired to the mock host. Leaving to MENU afterwards releases the
  * lease, so a failing test cannot leave the renew interval holding Node open.
+ *
+ * `overrides.fpln` also registers the FPLN pages; `overrides.via` routes every
+ * host call through another object (an adopted bridge) instead of the mock.
  */
 async function mountDatalinkPages(t, tag, overrides = {}) {
   globalThis.document = fakeDocument();
   const { register } = await import(new URL(`../../ui/src/pages/datalink-pages.js?${tag}`, import.meta.url));
   const write = await import(new URL(`../../ui/src/pages/datalink-write-pages.js?${tag}`, import.meta.url));
-  const { host, gaugeDev } = await loadMock();
+  const { host, gaugeDev } = overrides.mock || await loadMock();
+  const api = overrides.via || host;
   const pages = new Map();
   const shell = { id: null, view: null, scratchpad: null, entry: '', number: '', datalink: null, title: '' };
   const run = (fn) => Promise.resolve().then(fn).then(
@@ -436,14 +441,17 @@ async function mountDatalinkPages(t, tag, overrides = {}) {
     getScratchpad: () => (shell.scratchpad ? '' : shell.entry),
     hasScratchpadError: () => Boolean(shell.scratchpad && shell.scratchpad[1] === 'error'),
     getDatalinkState: () => shell.datalink,
-    watchDatalink: (on) => run(() => host.watchDatalink(on)),
-    refreshDatalink: () => run(() => host.refreshDatalink()),
-    getDatalinkThread: (req) => run(() => host.getDatalinkThread(req)),
-    getCannedMessages: () => run(() => host.getCannedMessages()),
-    sendCannedMessage: (req) => run(() => (overrides.sendCannedMessage || host.sendCannedMessage)(req)),
-    requestWeather: (req) => run(() => host.requestWeather(req)),
-    requestLoadsheet: (req) => run(() => host.requestLoadsheet(req)),
+    watchDatalink: (on) => run(() => api.watchDatalink(on)),
+    refreshDatalink: () => run(() => api.refreshDatalink()),
+    getDatalinkThread: (req) => run(() => api.getDatalinkThread(req)),
+    getCannedMessages: () => run(() => api.getCannedMessages()),
+    sendCannedMessage: (req) => run(() => (overrides.sendCannedMessage || api.sendCannedMessage)(req)),
+    requestWeather: (req) => run(() => api.requestWeather(req)),
+    requestLoadsheet: (req) => run(() => api.requestLoadsheet(req)),
     setPageNumber: (n, m) => { shell.number = m > 1 ? `${n}/${m}` : ''; },
+    getSimbriefSettings: () => run(() => api.getSimbriefSettings()),
+    prefileSimbrief: () => run(() => (overrides.prefileSimbrief || api.prefileSimbrief)()),
+    clearPrefiledLeg: () => run(() => (overrides.clearPrefiledLeg || api.clearPrefiledLeg)()),
   };
   host.onDatalink((state) => {
     shell.datalink = plain(state);
@@ -451,6 +459,9 @@ async function mountDatalinkPages(t, tag, overrides = {}) {
     if (page && page.onDatalink) page.onDatalink(shell.datalink);
   });
   write.register(fmc, register(fmc));
+  if (overrides.fpln) {
+    (await import(new URL(`../../ui/src/pages/fpln-pages.js?${tag}`, import.meta.url))).register(fmc);
+  }
   t.after(async () => {
     fmc.showPage('MENU');
     await settle();
@@ -928,4 +939,834 @@ test('datalink token sentinel stays out of every write made through the pages', 
   const writes = ui.writes();
   assert.ok(['sendCannedMessage', 'requestWeather', 'requestLoadsheet'].every((name) => writes.some((call) => call.method === name)));
   assert.equal(JSON.stringify({ screens, calls: ui.gaugeDev.calls }).includes(SENTINEL), false);
+});
+
+// ── SimBrief prefile (FPLN) ──────────────────────────────────────────────────
+
+const SIMBRIEF_METHODS = ['getSimbriefSettings', 'prefileSimbrief', 'clearPrefiledLeg'];
+const SIMBRIEF_SENTINEL = 'SENTINEL-SIMBRIEF-TOKEN-0000';
+const SAMPLE_LABEL = 'KJFK → EGLL (BAW178)';
+const LONG_LABEL = 'SBGR → LFPG (TAP084 São Paulo–Paris Ext)';
+const later = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const fail = (code, httpStatus = null, serverCode = null) => ({ ok: false, error: { code, httpStatus, serverCode } });
+const configuredOk = { ok: true, result: { configured: true } };
+const prefileOk = (status, plannedLegId, label, warningCount) => (
+  { ok: true, result: { status, plannedLegId, label, warningCount, httpStatus: status === 'imported' ? 201 : 200 } });
+const both = (...args) => [fail(...args), fail(...args)];
+const all = (code) => [fail(code), fail(code), fail(code)];
+
+/** Scenario → [settings, prefile, clear] answers; a missing clear is the normal held-leg clear. */
+const SIMBRIEF_SCENARIOS = {
+  configured: [configuredOk, prefileOk('imported', 4812, SAMPLE_LABEL, 0)],
+  'not-configured': [{ ok: true, result: { configured: false } }, fail('simbrief-no-user-id', 400, 'NO_USER_ID')],
+  duplicate: [configuredOk, prefileOk('duplicate', 4812, SAMPLE_LABEL, 0)],
+  'long-label': [configuredOk, prefileOk('imported', 4813, LONG_LABEL, 2)],
+  prefiled: [configuredOk, prefileOk('duplicate', 4812, SAMPLE_LABEL, 0)],
+  'no-user-id': [configuredOk, fail('simbrief-no-user-id', 400, 'NO_USER_ID')],
+  'unknown-user': [configuredOk, fail('simbrief-unknown-user', 400, 'UNKNOWN_USER')],
+  'no-plan': [configuredOk, fail('simbrief-no-plan', 404, 'NO_PLAN')],
+  'simbrief-timeout': [configuredOk, fail('simbrief-timeout', 504, 'TIMEOUT')],
+  network: [configuredOk, fail('simbrief-network', 502, 'NETWORK')],
+  'bad-status': [configuredOk, fail('simbrief-bad-status', 502, 'BAD_STATUS')],
+  'bad-body': [configuredOk, fail('simbrief-bad-body', 502, 'BAD_BODY')],
+  'db-error': [configuredOk, fail('simbrief-db-error', 500, 'DB_ERROR')],
+  'unknown-code': [configuredOk, fail('http-error', 409, 'SOMETHING_NEW')],
+  'invalid-token': both('token-invalid', 401, 'INVALID_INGEST_TOKEN'),
+  'token-missing': both('token-missing', 401),
+  unavailable: both('simbrief-unavailable', 401),
+  rejected: both('rejected', 403),
+  'bad-response': [fail('bad-response', 200), fail('bad-response', 201)],
+  'tls-error': both('tls-error'),
+  unreachable: both('unreachable'),
+  'client-timeout': both('timeout'),
+  'relay-timeout': both('shell-timeout'),
+  'no-config': both('no-config'),
+  'in-progress': [configuredOk, fail('prefile-in-progress')],
+  busy: all('busy'),
+  'sidecar-exited': both('sidecar-exited'),
+  'sidecar-unavailable': all('sidecar-unavailable'),
+  'sidecar-outdated': all('sidecar-outdated'),
+  'not-supported': all('host-unsupported'),
+};
+const OK_PREFILES = ['configured', 'duplicate', 'long-label', 'prefiled'];
+
+/**
+ * What FPLN shows after CONFIRM fails in each scenario, character for
+ * character: [row 2, row 3] from the settings read that follows, then
+ * [row 10, row 11] (and the scratchpad) from the prefile.
+ */
+const FPLN_ERROR_ROWS = {
+  'not-configured': [['NOT SET', 'SET PILOT ID ON SERVER'], ['NO SIMBRIEF PILOT ID', 'SET PILOT ID ON SERVER']],
+  'no-user-id': [['CONFIGURED', ''], ['NO SIMBRIEF PILOT ID', 'SET PILOT ID ON SERVER']],
+  'unknown-user': [['CONFIGURED', ''], ['SIMBRIEF ID NOT FOUND', 'CHECK PILOT ID ON SERVER']],
+  'no-plan': [['CONFIGURED', ''], ['NO SIMBRIEF OFP', 'GENERATE OFP ON SIMBRIEF']],
+  'simbrief-timeout': [['CONFIGURED', ''], ['SIMBRIEF TIMEOUT', 'TRY AGAIN SHORTLY']],
+  network: [['CONFIGURED', ''], ['SIMBRIEF NO COMM', 'TRY AGAIN SHORTLY']],
+  'bad-status': [['CONFIGURED', ''], ['SIMBRIEF ERROR', 'TRY AGAIN SHORTLY']],
+  'bad-body': [['CONFIGURED', ''], ['SIMBRIEF BAD DATA', 'TRY AGAIN SHORTLY']],
+  'db-error': [['CONFIGURED', ''], ['SERVER DB ERROR', '']],
+  'unknown-code': [['CONFIGURED', ''], ['SERVER FAULT 409', 'SAFE TO PREFILE AGAIN']],
+  'invalid-token': [['INGEST TOKEN REJECTED', 'CHECK TOKEN ON CFG'], ['INGEST TOKEN REJECTED', 'CHECK TOKEN ON CFG']],
+  'token-missing': [['TOKEN NOT RECEIVED', 'TOKEN LOST IN TRANSIT'], ['TOKEN NOT RECEIVED', 'TOKEN LOST IN TRANSIT']],
+  unavailable: [['SIMBRIEF UNAVAILABLE', 'SERVER UPDATE NEEDED'], ['SIMBRIEF UNAVAILABLE', 'SERVER UPDATE NEEDED']],
+  rejected: [['SERVER REJECTED 403', ''], ['SERVER REJECTED 403', '']],
+  'bad-response': [['SERVER BAD DATA', ''], ['SERVER BAD DATA', 'SAFE TO PREFILE AGAIN']],
+  'tls-error': [['SERVER CERT FAULT', 'CHECK CERTIFICATE PATH'], ['SERVER CERT FAULT', 'CHECK CERTIFICATE PATH']],
+  unreachable: [['SERVER NO COMM', ''], ['SERVER NO COMM', 'SAFE TO PREFILE AGAIN']],
+  'client-timeout': [['SERVER TIMEOUT', ''], ['PREFILE RESULT UNKNOWN', 'SAFE TO PREFILE AGAIN']],
+  'relay-timeout': [['SIDECAR TIMEOUT', ''], ['PREFILE RESULT UNKNOWN', 'SAFE TO PREFILE AGAIN']],
+  'no-config': [['SERVER NOT CONFIGURED', 'COMPLETE CFG NETWORK'], ['SERVER NOT CONFIGURED', 'COMPLETE CFG NETWORK']],
+  'in-progress': [['CONFIGURED', ''], ['PREFILE IN PROGRESS', '']],
+  busy: [['SIDECAR BUSY', ''], ['SIDECAR BUSY', '']],
+  'sidecar-exited': [['SIDECAR OFFLINE', ''], ['SIDECAR OFFLINE', 'SAFE TO PREFILE AGAIN']],
+  'sidecar-unavailable': [['SIDECAR OFFLINE', ''], ['SIDECAR OFFLINE', '']],
+  'sidecar-outdated': [['SIDECAR UPDATE REQUIRED', 'RESTART APP AFTER BUILD'], ['SIDECAR UPDATE REQUIRED', 'RESTART APP AFTER BUILD']],
+  'not-supported': [['FPLN NOT SUPPORTED', ''], ['FPLN NOT SUPPORTED', '']],
+};
+
+const callsOf = (gaugeDev, method) => plain(gaugeDev.calls).filter((call) => call.method === method);
+const withoutClock = (state) => {
+  const { at, lastOkAt, lastErrorAt, ...rest } = plain(state);
+  return rest;
+};
+
+test('simbrief mock: every method answers every scenario with the host contract shape', async () => {
+  const { host, gaugeDev } = await loadMock();
+  for (const name of SIMBRIEF_METHODS) assert.equal(typeof host[name], 'function', name);
+  assert.equal(typeof gaugeDev.setSimbriefDelay, 'function');
+  assert.throws(() => gaugeDev.simbriefScenario('nope'), /Unknown simbrief scenario: nope/);
+  assert.equal(Object.keys(SIMBRIEF_SCENARIOS).length, 30);
+  // The preview's default, before any scenario is picked.
+  assert.deepEqual(plain(await host.getSimbriefSettings()), configuredOk);
+
+  gaugeDev.datalinkScenario('leg');
+  for (const [name, [settings, prefile, clear]] of Object.entries(SIMBRIEF_SCENARIOS)) {
+    assert.equal(gaugeDev.simbriefScenario(name), name);
+    gaugeDev.datalinkScenario('leg');
+    gaugeDev.simbriefScenario(name);
+    const initial = plain(await host.getDatalinkState());
+    if (name === 'prefiled') {
+      assert.deepEqual(initial.prefiledLeg, { plannedLegId: 4812, label: SAMPLE_LABEL });
+      assert.deepEqual(initial.scope, { kind: 'leg', plannedLegId: 4812, source: 'prefile' });
+    } else {
+      assert.equal('prefiledLeg' in initial, false, name);
+    }
+    assert.deepEqual(plain(await host.getSimbriefSettings()), settings, `${name} settings`);
+    const answered = plain(await host.prefileSimbrief());
+    assert.deepEqual(answered, prefile, `${name} prefile`);
+    for (const envelope of [settings, prefile]) {
+      if (envelope.ok) continue;
+      assert.deepEqual(Object.keys(envelope.error).sort(), ['code', 'httpStatus', 'serverCode']);
+    }
+    const state = plain(await host.getDatalinkState());
+    const cleared = plain(await host.clearPrefiledLeg());
+    if (clear) {
+      assert.deepEqual(cleared, clear, `${name} clear`);
+    } else {
+      const held = answered.ok === true || name === 'prefiled';
+      assert.deepEqual(cleared, { ok: true, result: { cleared: held } }, `${name} clear`);
+      if (answered.ok) {
+        assert.deepEqual(Object.keys(answered.result).sort(), ['httpStatus', 'label', 'plannedLegId', 'status', 'warningCount']);
+        assert.deepEqual(state.prefiledLeg, { plannedLegId: answered.result.plannedLegId, label: answered.result.label });
+        assert.deepEqual(state.scope, { kind: 'leg', plannedLegId: answered.result.plannedLegId, source: 'prefile' });
+      }
+      const after = plain(await host.getDatalinkState());
+      assert.equal('prefiledLeg' in after, false, name);
+      assert.deepEqual(plain(await host.clearPrefiledLeg()), { ok: true, result: { cleared: false } }, name);
+    }
+  }
+
+  // Held leg: the prefile scope is a new thread epoch, and clearing restores the scenario's own.
+  gaugeDev.simbriefScenario('configured');
+  gaugeDev.datalinkScenario('leg');
+  const own = plain(await host.getDatalinkState());
+  await host.prefileSimbrief();
+  const held = plain(await host.getDatalinkState());
+  assert.deepEqual([held.scope, held.thread.total, held.thread.epoch], [{ kind: 'leg', plannedLegId: 4812, source: 'prefile' }, 3, own.thread.epoch + 1]);
+  await host.clearPrefiledLeg();
+  const restored = plain(await host.getDatalinkState());
+  assert.deepEqual([restored.scope, restored.thread.epoch, 'prefiledLeg' in restored], [LEG, own.thread.epoch + 2, false]);
+  gaugeDev.datalinkScenario('no-flight-plan');
+  await host.prefileSimbrief();
+  const noPlan = plain(await host.getDatalinkState());
+  assert.deepEqual([noPlan.scope, noPlan.thread.total], [{ kind: 'leg', plannedLegId: 4812, source: 'prefile' }, 3]);
+  assert.equal(plain(await host.getDatalinkThread({ epoch: noPlan.thread.epoch, endSeq: 3 })).result.messages.length, 3);
+  await host.clearPrefiledLeg();
+  const noPlanAgain = plain(await host.getDatalinkState());
+  assert.deepEqual([noPlanAgain.scope, noPlanAgain.thread], [{ kind: 'none' }, null]);
+
+  // A flight clears the held leg as soon as it is seen.
+  gaugeDev.datalinkScenario('flight');
+  await host.prefileSimbrief();
+  const flight = plain(await host.getDatalinkState());
+  assert.deepEqual([flight.scope, 'prefiledLeg' in flight], [FLIGHT, false]);
+
+  // The rejected-token scenario latches the datalink on its first call only.
+  gaugeDev.datalinkScenario('leg');
+  gaugeDev.simbriefScenario('invalid-token');
+  const emitted = [];
+  const off = host.onDatalink((next) => emitted.push(plain(next)));
+  await host.getSimbriefSettings();
+  await host.prefileSimbrief();
+  off();
+  assert.deepEqual(emitted.map((next) => next.state), ['dl.token-invalid']);
+
+  // The pre-SimBrief server scenario never touches the datalink state.
+  gaugeDev.datalinkScenario('leg');
+  gaugeDev.simbriefScenario('unavailable');
+  const quiet = [];
+  const offQuiet = host.onDatalink((next) => quiet.push(next));
+  const before = withoutClock(await host.getDatalinkState());
+  await host.getSimbriefSettings();
+  await host.prefileSimbrief();
+  await host.clearPrefiledLeg();
+  offQuiet();
+  assert.deepEqual([withoutClock(await host.getDatalinkState()), quiet.length], [before, 0]);
+
+  // The delay control holds only the prefile.
+  gaugeDev.simbriefScenario('configured');
+  assert.equal(gaugeDev.setSimbriefDelay(60), 60);
+  const started = Date.now();
+  await host.getSimbriefSettings();
+  assert.ok(Date.now() - started < 40);
+  await host.prefileSimbrief();
+  assert.ok(Date.now() - started >= 50);
+  gaugeDev.setSimbriefDelay(0);
+
+  for (const call of gaugeDev.calls.filter((entry) => SIMBRIEF_METHODS.includes(entry.method))) {
+    assert.deepEqual(Object.keys(call).sort(), ['args', 'at', 'method']);
+    assert.deepEqual(plain(call.args), []);
+  }
+});
+
+test('fpln vocab: every string fits 24 columns, codes map to fixed texts, labels render per the fixtures', async () => {
+  const vocab = await pageModule('fpln-vocab.js');
+  const { formatScope } = await pageModule('datalink-vocab.js');
+  assert.equal(typeof document, 'undefined');
+  const widest = '9'.repeat(16);
+  const strings = [
+    ...Object.values(vocab.ERRORS).flatMap((entry) => [entry.text, entry.hint]),
+    ...Object.values(vocab.TEXT), ...Object.values(vocab.ADVISORY),
+    vocab.UNKNOWN_CODE_TEXT, vocab.PREFILE_RESULT_UNKNOWN, vocab.SAFE_TO_PREFILE_AGAIN,
+    vocab.formatLeg(widest), formatScope({ kind: 'leg', plannedLegId: Number(widest), source: 'prefile' }).replace(/\d+$/, widest),
+    vocab.errorText({ code: 'http-error', httpStatus: 599 }), '999',
+  ];
+  for (const text of strings) assert.ok(text.length <= 24, text);
+  assert.equal(`PREFILE ${widest}`.length, 24);
+  // Cells that share a row with CLR PREFILE>, at a 9-digit id and at the widest safe integer.
+  const clear = vocab.TEXT.clearPrefile;
+  assert.equal(vocab.TEXT.prefileScope, 'PREFILE');
+  assert.ok(vocab.TEXT.prefileScope.length + clear.length <= 24);
+  assert.ok('123456789'.length + clear.length <= 24);
+  assert.equal(`LEG ${'1'.repeat(9)}`.length + clear.length, 25, 'why the id is not paired with its LEG prefix');
+
+  // Code → [text, hint, unknown outcome on prefile], transcribed from the design's table.
+  const table = {
+    'simbrief-no-user-id': ['NO SIMBRIEF PILOT ID', 'SET PILOT ID ON SERVER', false],
+    'simbrief-unknown-user': ['SIMBRIEF ID NOT FOUND', 'CHECK PILOT ID ON SERVER', false],
+    'simbrief-no-plan': ['NO SIMBRIEF OFP', 'GENERATE OFP ON SIMBRIEF', false],
+    'simbrief-timeout': ['SIMBRIEF TIMEOUT', 'TRY AGAIN SHORTLY', false],
+    'simbrief-network': ['SIMBRIEF NO COMM', 'TRY AGAIN SHORTLY', false],
+    'simbrief-bad-status': ['SIMBRIEF ERROR', 'TRY AGAIN SHORTLY', false],
+    'simbrief-bad-body': ['SIMBRIEF BAD DATA', 'TRY AGAIN SHORTLY', false],
+    'simbrief-db-error': ['SERVER DB ERROR', '', false],
+    'simbrief-unavailable': ['SIMBRIEF UNAVAILABLE', 'SERVER UPDATE NEEDED', false],
+    'token-invalid': ['INGEST TOKEN REJECTED', 'CHECK TOKEN ON CFG', false],
+    'token-missing': ['TOKEN NOT RECEIVED', 'TOKEN LOST IN TRANSIT', false],
+    rejected: ['SERVER REJECTED 403', '', false],
+    'http-error': ['SERVER FAULT', '', true],
+    'bad-response': ['SERVER BAD DATA', '', true],
+    'too-large': ['SERVER BAD DATA', '', true],
+    unreachable: ['SERVER NO COMM', '', true],
+    'tls-error': ['SERVER CERT FAULT', 'CHECK CERTIFICATE PATH', false],
+    timeout: ['SERVER TIMEOUT', '', true],
+    'shell-timeout': ['SIDECAR TIMEOUT', '', true],
+    'no-config': ['SERVER NOT CONFIGURED', 'COMPLETE CFG NETWORK', false],
+    'bad-request': ['INVALID ENTRY', '', false],
+    'prefile-in-progress': ['PREFILE IN PROGRESS', '', false],
+    busy: ['SIDECAR BUSY', '', false],
+    'sidecar-exited': ['SIDECAR OFFLINE', '', true],
+    'sidecar-unavailable': ['SIDECAR OFFLINE', '', false],
+    'sidecar-outdated': ['SIDECAR UPDATE REQUIRED', 'RESTART APP AFTER BUILD', false],
+    'host-unsupported': ['FPLN NOT SUPPORTED', '', false],
+    'host-error': ['FPLN HOST FAULT', '', true],
+    'something-new': ['FPLN FAULT', '', true],
+  };
+  for (const [code, [text, hint, unknown]] of Object.entries(table)) {
+    const error = { code, httpStatus: null, serverCode: 'SERVER SAYS SOMETHING ELSE' };
+    assert.equal(vocab.isUnknownOutcome(code), unknown, code);
+    for (const op of ['settings', 'clear']) {
+      assert.deepEqual([vocab.errorText(error, op), vocab.errorHint(error, op)], [text, hint], `${code} ${op}`);
+    }
+    const prefileText = code === 'timeout' || code === 'shell-timeout' ? 'PREFILE RESULT UNKNOWN' : text;
+    assert.deepEqual([vocab.errorText(error, 'prefile'), vocab.errorHint(error, 'prefile')],
+      [prefileText, unknown ? 'SAFE TO PREFILE AGAIN' : hint], `${code} prefile`);
+  }
+  assert.equal(vocab.errorText({ code: 'http-error', httpStatus: 502 }, 'prefile'), 'SERVER FAULT 502');
+  for (const status of [null, 99, 600, 502.5, '502']) {
+    assert.equal(vocab.errorText({ code: 'http-error', httpStatus: status }, 'settings'), 'SERVER FAULT', String(status));
+  }
+  for (const missing of [undefined, null, 'oops']) {
+    assert.deepEqual([vocab.errorText(missing, 'prefile'), vocab.errorHint(missing, 'prefile')], ['FPLN HOST FAULT', 'SAFE TO PREFILE AGAIN']);
+  }
+
+  const fixtures = [
+    [SAMPLE_LABEL, 'KJFK/EGLL (BAW178)', ['KJFK/EGLL (BAW178)']],
+    [LONG_LABEL, 'SBGR/LFPG (TAP084 SAO PAULO-PARIS EXT)', ['SBGR/LFPG (TAP084 SAO', 'PAULO-PARIS EXT)']],
+    ['LFPG → KSFO (AFR084 A LABEL MADE DELIBERATELY FAR TOO LONG)', 'LFPG/KSFO (AFR084 A LABEL MADE DELIBERATELY FAR TOO LONG)',
+      ['LFPG/KSFO (AFR084 A', 'LABEL MADE DELIBERATELY+']],
+    ['ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ['ABCDEFGHIJKLMNOPQRSTUVWX', 'YZ0123456789']],
+    ['', '----', ['----']],
+    [`KJFK\t→\nEGLL ${String.fromCodePoint(0x1F600)}`, 'KJFK/EGLL ?', ['KJFK/EGLL ?']],
+  ];
+  assert.equal(LONG_LABEL.length, 40);
+  for (const [input, normalised, lines] of fixtures) {
+    assert.equal(vocab.normaliseLabel(input), normalised, input);
+    assert.deepEqual(vocab.labelLines(normalised), lines, input);
+    for (const line of lines) assert.ok(line.length <= 24, line);
+  }
+
+  assert.equal(vocab.formatLeg(4812), 'LEG 4812');
+  assert.equal(formatScope({ kind: 'leg', plannedLegId: 4812, source: 'prefile' }), 'PREFILE 4812');
+  assert.equal(formatScope({ kind: 'leg', plannedLegId: 12, source: 'status' }), 'LEG 12');
+  const leg = { plannedLegId: 4812, label: '' };
+  assert.deepEqual(vocab.heldPrefiledLeg({ prefiledLeg: leg }), leg);
+  for (const state of [null, {}, { prefiledLeg: null }, { prefiledLeg: { plannedLegId: 0, label: 'X' } },
+    { prefiledLeg: { plannedLegId: '4812', label: 'X' } }, { prefiledLeg: { plannedLegId: 4812 } }]) {
+    assert.equal(vocab.heldPrefiledLeg(state), null, JSON.stringify(state));
+  }
+});
+
+/** A DOM just rich enough for the real shell to boot, route and paint. */
+function bootDocument() {
+  class Element {
+    constructor() {
+      this.children = []; this.attributes = {}; this.className = ''; this.ownText = ''; this.found = new Map();
+      const classes = new Set();
+      this.classList = {
+        add: (name) => classes.add(name), remove: (name) => classes.delete(name), contains: (name) => classes.has(name),
+        toggle: (name, on) => ((on ?? !classes.has(name)) ? classes.add(name) : classes.delete(name)),
+      };
+    }
+    get textContent() { return this.children.length ? this.children.map((child) => child.textContent).join('') : this.ownText; }
+    set textContent(value) { this.children = []; this.ownText = String(value); }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+    getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
+    appendChild(child) { this.children.push(child); return child; }
+    removeChild(child) { this.children.splice(this.children.indexOf(child), 1); return child; }
+    get firstChild() { return this.children[0] || null; }
+    get childElementCount() { return this.children.length; }
+    querySelector(selector) {
+      if (!this.found.has(selector)) this.found.set(selector, new Element());
+      return this.found.get(selector);
+    }
+    closest() { return this; }
+  }
+  const root = new Element();
+  const listeners = new Map();
+  const document = {
+    getElementById: (id) => root.querySelector(`#${id}`),
+    querySelector: (selector) => root.querySelector(selector),
+    createElement: () => new Element(),
+    addEventListener: (type, fn) => listeners.set(type, [...(listeners.get(type) || []), fn]),
+  };
+  const press = (attribute, value) => {
+    const target = new Element();
+    target.setAttribute(attribute, value);
+    for (const fn of listeners.get('click') || []) fn({ target });
+  };
+  return { Element, document, press };
+}
+
+test('app shell: MENU keeps L1 to L5 and L6 opens FPLN through the real router and host bridge', async (t) => {
+  const { Element, document, press } = bootDocument();
+  const { host, gaugeDev } = await loadMock();
+  const saved = { setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval };
+  // The shell's once-a-second repaint and the datalink lease renewal would keep the test process alive.
+  globalThis.setInterval = () => ({ fake: true });
+  globalThis.clearInterval = () => {};
+  Object.assign(globalThis, { window: { __FMC_HOST__: host }, document, Node: Element, Element });
+  t.after(() => {
+    Object.assign(globalThis, saved);
+    for (const name of ['window', 'document', 'Node', 'Element']) delete globalThis[name];
+  });
+  await import(new URL('../../ui/src/app.js', import.meta.url));
+  const screen = document.getElementById('fmc-screen');
+  const body = document.getElementById('page-body');
+  const cells = () => body.children[0].children.map((line) => line.children.map((cell) => cell.textContent));
+  const landOn = async (id) => {
+    for (let i = 0; i < 400 && screen.getAttribute('data-page') !== id; i += 1) await later(5);
+    assert.equal(screen.getAttribute('data-page'), id);
+    await settle();
+  };
+
+  press('data-key', 'MENU');
+  await landOn('MENU');
+  assert.deepEqual(cells(), [
+    ['SELECT PAGE'], ['<STATUS'], [''], ['<NETWORK'], [''], ['<SIM'], [''], ['<TRAFFIC'], [''], ['<DATALINK'], [''], ['<FPLN'],
+  ]);
+  for (const [lsk, id] of [['L1', 'STATUS'], ['L2', 'NETWORK'], ['L3', 'SIM'], ['L4', 'TRAFFIC'], ['L5', 'DL-INDEX'], ['L6', 'FPLN']]) {
+    press('data-key', 'MENU');
+    await landOn('MENU');
+    press('data-lsk', lsk);
+    await landOn(id);
+  }
+  assert.equal(document.getElementById('page-title').textContent, 'FLIGHT PLAN');
+  assert.deepEqual(cells().slice(0, 2), [['SIMBRIEF PILOT ID'], ['CONFIGURED']]);
+  assert.deepEqual(cells()[11], ['<MENU', 'PREFILE>']);
+  press('data-lsk', 'R6');
+  await landOn('FPLN-CONFIRM');
+  assert.equal(callsOf(gaugeDev, 'prefileSimbrief').length, 0);
+  press('data-lsk', 'R6');
+  await landOn('FPLN-RESULT');
+  assert.equal(callsOf(gaugeDev, 'prefileSimbrief').length, 1);
+  assert.deepEqual(cells().slice(0, 6).map((line) => line[0]), ['PREFILED', 'KJFK/EGLL (BAW178)', '', '', 'PLANNED LEG', 'LEG 4812']);
+  assert.equal(document.getElementById('scratchpad').textContent, 'SIMBRIEF PLAN PREFILED');
+  press('data-key', 'NEXT');
+  assert.equal(document.getElementById('scratchpad').textContent, 'KEY NOT ACTIVE');
+});
+
+test('fpln settings: PREFILE is offered only with a Pilot ID, and without one R6 calls nothing', async (t) => {
+  const ui = await mountDatalinkPages(t, 'fpln-settings', { fpln: true });
+  const { shell, fmc, gaugeDev, rows, pages } = ui;
+  assert.deepEqual([...pages.values()].filter((page) => page.id.startsWith('FPLN')).map((page) => [page.id, page.title, page.group, page.n, page.m]), [
+    ['FPLN', 'FLIGHT PLAN', 'FPLN', 1, 1], ['FPLN-CONFIRM', 'PREFILE SIMBRIEF', 'FPLN-CONFIRM', 1, 1], ['FPLN-RESULT', 'PREFILE', 'FPLN-RESULT', 1, 1],
+  ]);
+  fmc.showPage('FPLN');
+  // Painted before the settings read answers.
+  assert.deepEqual(rows().map((line) => line[0]), [
+    'SIMBRIEF PILOT ID', '----', '', '', 'PREFILED LEG', 'NONE', '', '', 'LAST PREFILE', 'NONE', '', '<MENU',
+  ]);
+  await settle();
+  assert.deepEqual([rows()[1], rows()[2], rows()[11]], [['CONFIGURED'], [''], ['<MENU', 'PREFILE>']]);
+  assert.deepEqual(callsOf(gaugeDev, 'getSimbriefSettings').length, 1);
+
+  gaugeDev.simbriefScenario('not-configured');
+  fmc.showPage('FPLN');
+  await settle();
+  assert.deepEqual([rows()[1], rows()[2], rows()[11]], [['NOT SET'], ['SET PILOT ID ON SERVER'], ['<MENU', '']]);
+  assert.equal(await ui.lsk('FPLN', 'R6'), false);
+  assert.equal(await ui.lsk('FPLN', 'R3'), false);
+  assert.equal(await ui.lsk('FPLN', 'L1'), false);
+  assert.deepEqual([shell.id, callsOf(gaugeDev, 'prefileSimbrief').length, callsOf(gaugeDev, 'clearPrefiledLeg').length], ['FPLN', 0, 0]);
+  assert.equal(await ui.lsk('FPLN', 'L6'), true);
+  assert.equal(shell.id, 'MENU');
+});
+
+test('fpln prefile: one press sends nothing, CONFIRM sends once, and no failure is ever resent', async (t) => {
+  const ui = await mountDatalinkPages(t, 'fpln-send', { fpln: true });
+  const { shell, fmc, gaugeDev, rows, pages } = ui;
+  const prefiles = () => callsOf(gaugeDev, 'prefileSimbrief').length;
+  const screens = [];
+  const look = () => {
+    screens.push(rows());
+    if (shell.scratchpad) screens.push([[shell.scratchpad[0]]]);
+  };
+  gaugeDev.datalinkScenario('leg');
+
+  fmc.showPage('FPLN');
+  await settle();
+  assert.equal(await ui.lsk('FPLN', 'R6'), true);
+  assert.equal(shell.id, 'FPLN-CONFIRM');
+  look();
+  assert.deepEqual(rows(), [['IMPORT'], ['LATEST SIMBRIEF OFP'], ['AS'], ['PLANNED LEG, NO TRIP'], [''], [''], [''], [''], [''], [''], [''], ['<CANCEL', 'CONFIRM*']]);
+  assert.equal(prefiles(), 0, 'PREFILE alone sends nothing');
+  assert.equal(await ui.lsk('FPLN-CONFIRM', 'L6'), true);
+  assert.deepEqual([shell.id, prefiles()], ['FPLN', 0], 'CANCEL sends nothing');
+
+  // In flight: CONFIRM again, CANCEL and PREFILE from FPLN all do nothing more.
+  await ui.lsk('FPLN', 'R6');
+  gaugeDev.setSimbriefDelay(60);
+  assert.equal(pages.get('FPLN-CONFIRM').onLsk('R6', {}), true);
+  assert.deepEqual([rows()[9], rows()[11]], [['WAIT UP TO 30 SEC'], ['', 'SENDING']]);
+  look();
+  assert.equal(pages.get('FPLN-CONFIRM').onLsk('R6', {}), true);
+  assert.equal(pages.get('FPLN-CONFIRM').onLsk('L6', {}), true);
+  await settle();
+  assert.deepEqual([shell.id, prefiles()], ['FPLN-CONFIRM', 1]);
+  fmc.showPage('FPLN');
+  await settle();
+  assert.deepEqual([rows()[9], rows()[11]], [['SENDING'], ['<MENU', '']]);
+  assert.equal(await ui.lsk('FPLN', 'R6'), true);
+  assert.deepEqual([shell.id, rows()[11], prefiles()], ['FPLN-CONFIRM', ['', 'SENDING'], 1]);
+  await later(100);
+  assert.deepEqual([shell.id, shell.scratchpad, prefiles()], ['FPLN-RESULT', ['SIMBRIEF PLAN PREFILED', 'advisory'], 1]);
+  gaugeDev.setSimbriefDelay(0);
+
+  // Imported, duplicate and a long label, on the result page and on FPLN.
+  const results = {
+    configured: [['PREFILED'], ['KJFK/EGLL (BAW178)'], [''], [''], ['PLANNED LEG'], ['LEG 4812'], [''], [''], [''], ['', 'DATALINK>'], [''], ['<RETURN']],
+    duplicate: [['ALREADY FILED'], ['KJFK/EGLL (BAW178)'], [''], [''], ['PLANNED LEG'], ['LEG 4812'], [''], [''], [''], ['', 'DATALINK>'], [''], ['<RETURN']],
+    'long-label': [['PREFILED'], ['SBGR/LFPG (TAP084 SAO'], [''], ['PAULO-PARIS EXT)'], ['PLANNED LEG'], ['LEG 4813'], ['WARNINGS'], ['2'], [''], ['', 'DATALINK>'], [''], ['<RETURN']],
+  };
+  const advisories = { configured: 'SIMBRIEF PLAN PREFILED', duplicate: 'PLAN ALREADY FILED', 'long-label': 'SIMBRIEF PLAN PREFILED' };
+  for (const [name, expected] of Object.entries(results)) {
+    gaugeDev.datalinkScenario('leg');
+    gaugeDev.simbriefScenario(name);
+    fmc.showPage('FPLN');
+    await settle();
+    await ui.lsk('FPLN', 'R6');
+    const before = prefiles();
+    await ui.lsk('FPLN-CONFIRM', 'R6');
+    assert.deepEqual([shell.id, shell.title, rows(), shell.scratchpad], ['FPLN-RESULT', 'PREFILE', expected, [advisories[name], 'advisory']], name);
+    look();
+    assert.equal(rows().flat().includes('ALREADY FILED'), name === 'duplicate', name);
+    await ui.lsk('FPLN-RESULT', 'L6');
+    const [line] = expected[1];
+    assert.deepEqual(rows().slice(4, 10), [['PREFILED LEG'], [expected[5][0].slice('LEG '.length), 'CLR PREFILE>'], [''], [line], ['LAST PREFILE'], [expected[0][0]]], name);
+    look();
+    await later(100);
+    assert.equal(prefiles(), before + 1, name);
+  }
+
+  // Every failure: back on FPLN with its text, once, and nothing sent again later.
+  for (const [name, [settingsRows, prefileRows]] of Object.entries(FPLN_ERROR_ROWS)) {
+    gaugeDev.datalinkScenario('leg');
+    gaugeDev.simbriefScenario('configured');
+    fmc.showPage('FPLN');
+    await settle();
+    await ui.lsk('FPLN', 'R6');
+    gaugeDev.simbriefScenario(name);
+    const before = prefiles();
+    await ui.lsk('FPLN-CONFIRM', 'R6');
+    await settle();
+    assert.deepEqual([shell.id, shell.scratchpad], ['FPLN', [prefileRows[0], 'error']], name);
+    assert.deepEqual([rows()[1][0], rows()[2][0]], settingsRows, `${name} settings`);
+    assert.deepEqual([rows()[9][0], rows()[10][0]], prefileRows, `${name} prefile`);
+    assert.equal(rows()[11][1], settingsRows[0] === 'CONFIGURED' ? 'PREFILE>' : '', name);
+    look();
+    await later(100);
+    assert.equal(prefiles(), before + 1, `${name} sent once`);
+  }
+
+  // A rejected host call and a code this build does not know.
+  for (const [override, text] of [[async () => { throw new Error('transport'); }, 'FPLN HOST FAULT'], [async () => fail('brand-new-code'), 'FPLN FAULT']]) {
+    const odd = await mountDatalinkPages(t, `fpln-odd-${text.length}`, { fpln: true, prefileSimbrief: override });
+    odd.fmc.showPage('FPLN');
+    await settle();
+    await odd.lsk('FPLN', 'R6');
+    await odd.lsk('FPLN-CONFIRM', 'R6');
+    assert.deepEqual([odd.shell.id, odd.shell.scratchpad, odd.rows()[9][0], odd.rows()[10][0]], ['FPLN', [text, 'error'], text, 'SAFE TO PREFILE AGAIN']);
+    screens.push(odd.rows());
+  }
+
+  // The answer arrives while the pilot is elsewhere: nothing moves, FPLN keeps it.
+  gaugeDev.simbriefScenario('unreachable');
+  gaugeDev.setSimbriefDelay(30);
+  fmc.showPage('FPLN-CONFIRM');
+  pages.get('FPLN-CONFIRM').onLsk('R6', {});
+  fmc.showPage('DL-INDEX');
+  await later(80);
+  assert.deepEqual([shell.id, shell.scratchpad], ['DL-INDEX', null]);
+  fmc.showPage('FPLN');
+  await settle();
+  assert.deepEqual([rows()[9][0], rows()[10][0]], ['SERVER NO COMM', 'SAFE TO PREFILE AGAIN']);
+  gaugeDev.setSimbriefDelay(0);
+
+  for (const screen of screens) {
+    for (const cell of screen.flat()) assert.ok(cell.length <= 24, cell);
+  }
+  assert.equal(JSON.stringify(screens).includes('SOMETHING_NEW'), false, 'server codes are never shown');
+});
+
+test('fpln prefiled leg: DATALINK uses it for scope, thread, WX and load sheet, and every clear restores the scope line', async (t) => {
+  const ui = await mountDatalinkPages(t, 'fpln-scope', { fpln: true });
+  const { shell, fmc, host, gaugeDev, rows } = ui;
+  const prefileFromFpln = async () => {
+    fmc.showPage('FPLN');
+    await settle();
+    await ui.lsk('FPLN', 'R6');
+    await ui.lsk('FPLN-CONFIRM', 'R6');
+    assert.equal(shell.id, 'FPLN-RESULT');
+  };
+  const scopeLine = async () => {
+    fmc.showPage('DL-INDEX');
+    await settle();
+    // DL-INDEX row 2 (scope and CLR PREFILE>) and row 10 (the held leg's id).
+    return [...rows()[1], ...rows()[9]];
+  };
+
+  await ui.scenario('leg');
+  assert.deepEqual(await scopeLine(), ['LEG 12', '']);
+  assert.equal(await ui.lsk('DL-INDEX', 'R1'), false);
+  const epochBefore = shell.datalink.thread.epoch;
+
+  for (const name of ['configured', 'duplicate']) {
+    gaugeDev.datalinkScenario('leg');
+    gaugeDev.simbriefScenario(name);
+    await prefileFromFpln();
+    await ui.lsk('FPLN-RESULT', 'R5');
+    assert.equal(shell.id, 'DL-INDEX');
+    assert.deepEqual([...rows()[1], ...rows()[8], ...rows()[9]], ['PREFILE', 'CLR PREFILE>', 'PREFILED LEG', '4812'], name);
+  }
+  assert.ok(shell.datalink.thread.epoch > epochBefore);
+
+  await ui.lsk('DL-INDEX', 'L3');
+  assert.equal(shell.id, 'DL-THREAD');
+  assert.deepEqual([rows()[0], rows()[10]], [['UP 1220Z DISPATCH RELEASE'], ['PREFILE 4812']]);
+  const threadCall = callsOf(gaugeDev, 'getDatalinkThread').at(-1);
+  assert.equal(threadCall.args[0].epoch, shell.datalink.thread.epoch);
+  await ui.lsk('DL-THREAD', 'L6');
+
+  await ui.lsk('DL-INDEX', 'R3');
+  ui.type('EGLL');
+  await ui.lsk('DL-WX', 'L1');
+  await ui.lsk('DL-WX', 'R6');
+  assert.deepEqual(rows()[3], ['LEG 4812']);
+  await ui.lsk('DL-CONFIRM', 'R6');
+  assert.deepEqual(callsOf(gaugeDev, 'requestWeather').at(-1).args, [{ target: { kind: 'leg', id: 4812 }, icao: 'EGLL' }]);
+
+  fmc.showPage('DL-INDEX');
+  await ui.lsk('DL-INDEX', 'R4');
+  assert.equal(shell.id, 'DL-LOADSHEET');
+  await ui.lsk('DL-LOADSHEET', 'R6');
+  assert.deepEqual([rows()[1], rows()[3]], [['LEG 4812'], ['LEG 4812']]);
+  await ui.lsk('DL-CONFIRM', 'R6');
+  assert.deepEqual(callsOf(gaugeDev, 'requestLoadsheet').at(-1).args, [{ plannedLegId: 4812 }]);
+
+  // CLR PREFILE on DL-INDEX.
+  fmc.showPage('DL-INDEX');
+  await settle();
+  assert.equal(await ui.lsk('DL-INDEX', 'R1'), true);
+  assert.deepEqual([rows()[1], rows()[8], rows()[9], shell.scratchpad], [['LEG 12'], [''], [''], ['PREFILE CLEARED', 'advisory']]);
+  assert.equal('prefiledLeg' in shell.datalink, false);
+  fmc.showPage('DL-THREAD');
+  await settle();
+  assert.deepEqual(rows()[10], ['']);
+
+  // CLR PREFILE on FPLN.
+  gaugeDev.simbriefScenario('configured');
+  await prefileFromFpln();
+  await ui.lsk('FPLN-RESULT', 'L6');
+  assert.deepEqual(rows()[5], ['4812', 'CLR PREFILE>']);
+  assert.equal(await ui.lsk('FPLN', 'R3'), true);
+  assert.deepEqual([rows()[5], rows()[7], shell.scratchpad], [['NONE'], [''], ['PREFILE CLEARED', 'advisory']]);
+  assert.deepEqual(await scopeLine(), ['LEG 12', '']);
+
+  // The other clearing events the mock can produce.
+  const events = {
+    'a datalink scenario change': async () => { gaugeDev.datalinkScenario('leg'); },
+    'a different server URL': async () => { await host.setConfig({ serverUrl: 'http://other.invalid' }); },
+    'a different ingest token': async () => { await host.setConfig({ ingestToken: 'another-token' }); },
+    'a flight': async () => { gaugeDev.datalinkScenario('flight'); },
+    'a rejected token': async () => { gaugeDev.datalinkScenario('invalid-token'); },
+  };
+  const own = { 'a flight': ['FLT 92 LEG 12', ''], 'a rejected token': ['----', ''] };
+  for (const [event, run] of Object.entries(events)) {
+    gaugeDev.datalinkScenario('leg');
+    gaugeDev.simbriefScenario('configured');
+    await prefileFromFpln();
+    assert.deepEqual(await scopeLine(), ['PREFILE', 'CLR PREFILE>', '4812'], event);
+    await run();
+    await settle();
+    assert.deepEqual([...rows()[1], ...rows()[9]], own[event] || ['LEG 12', ''], event);
+    assert.equal('prefiledLeg' in shell.datalink, false, event);
+  }
+  // Saving the same server and token keeps it.
+  gaugeDev.datalinkScenario('leg');
+  await prefileFromFpln();
+  await host.setConfig({ serverUrl: 'http://other.invalid', ingestToken: 'another-token', trafficRadiusM: 45000 });
+  assert.deepEqual(await scopeLine(), ['PREFILE', 'CLR PREFILE>', '4812']);
+
+  // A prefile seen with a flight never takes the scope.
+  gaugeDev.datalinkScenario('flight');
+  await prefileFromFpln();
+  assert.deepEqual(await scopeLine(), ['FLT 92 LEG 12', '']);
+
+  // A clear the host refuses says so, once per press, and the leg stays.
+  let refusals = 0;
+  const refusing = await mountDatalinkPages(t, 'fpln-clear-refused', {
+    fpln: true,
+    clearPrefiledLeg: () => { refusals += 1; return new Promise((resolve) => setTimeout(() => resolve(fail('busy')), 20)); },
+  });
+  refusing.gaugeDev.datalinkScenario('leg');
+  refusing.gaugeDev.simbriefScenario('prefiled');
+  refusing.fmc.showPage('DL-INDEX');
+  await settle();
+  assert.deepEqual([...refusing.rows()[1], ...refusing.rows()[9]], ['PREFILE', 'CLR PREFILE>', '4812']);
+  assert.equal(refusing.pages.get('DL-INDEX').onLsk('R1', {}), true);
+  assert.equal(refusing.pages.get('DL-INDEX').onLsk('R1', {}), true);
+  await later(40);
+  assert.deepEqual([refusals, refusing.shell.scratchpad, refusing.rows()[1]], [1, ['SIDECAR BUSY', 'error'], ['PREFILE', 'CLR PREFILE>']]);
+  refusing.fmc.showPage('FPLN');
+  await settle();
+  assert.equal(refusing.pages.get('FPLN').onLsk('R3', {}), true);
+  assert.equal(refusing.pages.get('FPLN').onLsk('R3', {}), true);
+  await later(40);
+  assert.deepEqual([refusals, refusing.shell.scratchpad, refusing.rows()[5]], [2, ['SIDECAR BUSY', 'error'], ['4812', 'CLR PREFILE>']]);
+});
+
+test('fpln prefiled leg ids of 5 and 9 digits keep every DL-INDEX, FPLN and result row within 24 columns', async (t) => {
+  for (const id of [48123, 123456789]) {
+    const ui = await mountDatalinkPages(t, `fpln-wide-${id}`, {
+      fpln: true,
+      prefileSimbrief: async () => ({ ok: true, result: { status: 'imported', plannedLegId: id, label: SAMPLE_LABEL, warningCount: 999, httpStatus: 201 } }),
+    });
+    const { shell, fmc, pages, rows } = ui;
+    const within = (where) => {
+      for (const line of rows()) assert.ok(line.join('').length <= 24, `${id} ${where}: ${JSON.stringify(line)}`);
+    };
+    await ui.scenario('leg');
+    // The sidecar's state once this leg is held and applied; set again after anything the mock emits.
+    const held = { ...shell.datalink, scope: { kind: 'leg', plannedLegId: id, source: 'prefile' }, prefiledLeg: { plannedLegId: id, label: SAMPLE_LABEL } };
+    const hold = () => {
+      shell.datalink = held;
+      const page = pages.get(shell.id);
+      if (page && page.onDatalink) page.onDatalink(held);
+    };
+
+    hold();
+    fmc.showPage('FPLN');
+    await settle();
+    assert.deepEqual(rows().slice(4, 8), [['PREFILED LEG'], [String(id), 'CLR PREFILE>'], [''], ['KJFK/EGLL (BAW178)']], `${id} FPLN`);
+    within('FPLN');
+    await ui.lsk('FPLN', 'R6');
+    await ui.lsk('FPLN-CONFIRM', 'R6');
+    assert.equal(shell.id, 'FPLN-RESULT');
+    assert.deepEqual([rows()[5], rows()[7]], [[`LEG ${id}`], ['999']], `${id} FPLN-RESULT`);
+    within('FPLN-RESULT');
+
+    fmc.showPage('DL-INDEX');
+    await settle();
+    hold();
+    assert.deepEqual([rows()[1], rows()[8], rows()[9]], [['PREFILE', 'CLR PREFILE>'], ['PREFILED LEG'], [String(id)]], `${id} DL-INDEX`);
+    within('DL-INDEX');
+    await ui.lsk('DL-INDEX', 'L3');
+    hold();
+    assert.deepEqual(rows()[10], [`PREFILE ${id}`], `${id} DL-THREAD`);
+    assert.ok(rows()[10][0].length <= 24);
+  }
+});
+
+test('fpln on an older host: still adopted, FPLN says NOT SUPPORTED, and DATALINK works as before', async (t) => {
+  const importBridge = async (window, tag) => {
+    globalThis.window = window;
+    try {
+      return (await import(new URL(`../../ui/src/bridge.js?${tag}`, import.meta.url))).default;
+    } finally {
+      delete globalThis.window;
+    }
+  };
+  const legacy = { hostLabel: 'LEGACY' };
+  const seenArgs = [];
+  for (const name of ['getConfig', 'setConfig', 'getConfigPath', 'startUplink', 'stopUplink', 'restartSidecar', 'getStatus', 'onStatus', 'onLog', 'onExit']) {
+    legacy[name] = async () => null;
+  }
+  const bare = await importBridge({ __FMC_HOST__: legacy }, 'simbrief-legacy');
+  assert.equal(bare.hostLabel, 'LEGACY');
+  for (const name of SIMBRIEF_METHODS) assert.deepEqual(await bare[name](SIMBRIEF_SENTINEL), localError('host-unsupported'), name);
+
+  // A host that has them gets every call, with nothing passed through.
+  const modern = { ...legacy, hostLabel: 'MODERN' };
+  for (const name of SIMBRIEF_METHODS) modern[name] = async (...args) => { seenArgs.push([name, args.length]); return { ok: true, result: {} }; };
+  const adoptedModern = await importBridge({ __FMC_HOST__: modern }, 'simbrief-modern');
+  for (const name of SIMBRIEF_METHODS) await adoptedModern[name]({ ingestToken: SIMBRIEF_SENTINEL });
+  assert.deepEqual(seenArgs, SIMBRIEF_METHODS.map((name) => [name, 0]));
+
+  // Tauri: the three command names, no arguments object.
+  const invoked = [];
+  const tauri = await importBridge({ __TAURI__: { core: { invoke: async (cmd, args) => { invoked.push([cmd, args]); return { ok: true, result: {} }; } } } }, 'simbrief-tauri');
+  for (const name of SIMBRIEF_METHODS) await tauri[name]({ pilotId: '1' });
+  assert.deepEqual(invoked, [['simbrief_settings', undefined], ['simbrief_prefile', undefined], ['simbrief_clear_prefile', undefined]]);
+
+  // Stub: recorded and unsupported until a result is set.
+  const stubWindow = {};
+  const stubBridge = await importBridge(stubWindow, 'simbrief-stub');
+  const stub = stubWindow.__FMC_STUB__;
+  assert.deepEqual(await stubBridge.getSimbriefSettings(), localError('host-unsupported'));
+  stub.datalinkResults.prefileSimbrief = { ok: true, result: { status: 'imported', plannedLegId: 7, label: '', warningCount: 0, httpStatus: 201 } };
+  assert.equal((await stubBridge.prefileSimbrief()).result.plannedLegId, 7);
+  assert.deepEqual(stub.calls.slice(-2).map((call) => [call.method, call.args]), [['getSimbriefSettings', []], ['prefileSimbrief', []]]);
+
+  // The preview mock with the three methods removed, through the adopted bridge, on the pages.
+  const mock = await loadMock();
+  for (const name of SIMBRIEF_METHODS) delete mock.host[name];
+  const adopted = await importBridge({ __FMC_HOST__: mock.host }, 'simbrief-old-mock');
+  const ui = await mountDatalinkPages(t, 'fpln-old-host', { fpln: true, mock, via: adopted });
+  const { shell, fmc, rows } = ui;
+  await ui.scenario('flight');
+  fmc.showPage('FPLN');
+  await settle();
+  assert.deepEqual([rows()[1], rows()[2], rows()[11]], [['FPLN NOT SUPPORTED'], [''], ['<MENU', '']]);
+  assert.equal(await ui.lsk('FPLN', 'R6'), false);
+  fmc.showPage('DL-INDEX');
+  await settle();
+  assert.deepEqual([rows()[1], rows()[3], rows()[5], rows()[11]], [['FLT 92 LEG 12'], ['DATALINK ONLINE'], ['<MESSAGES', 'WX REQUEST>'], ['<INDEX', 'REFRESH>']]);
+  await ui.lsk('DL-INDEX', 'L3');
+  assert.deepEqual([shell.id, rows()[0][0].startsWith('UP 1220Z'), rows()[10]], ['DL-THREAD', true, ['']]);
+  assert.equal(await ui.lsk('DL-INDEX', 'R1'), false);
+});
+
+test('fpln before START: the same text and the same calls whether the uplink is stopped or running', async (t) => {
+  const run = async (status) => {
+    const ui = await mountDatalinkPages(t, `fpln-${status}`, { fpln: true });
+    const { fmc, gaugeDev, rows, shell } = ui;
+    gaugeDev.scenario(status);
+    await ui.scenario('leg');
+    const screens = [];
+    fmc.showPage('FPLN');
+    await settle();
+    screens.push(rows());
+    await ui.lsk('FPLN', 'R6');
+    await ui.lsk('FPLN-CONFIRM', 'R6');
+    screens.push(rows(), shell.scratchpad);
+    await ui.lsk('FPLN-RESULT', 'L6');
+    screens.push(rows());
+    await ui.lsk('FPLN', 'R3');
+    screens.push(rows(), shell.scratchpad);
+    gaugeDev.simbriefScenario('no-config');
+    fmc.showPage('FPLN');
+    await settle();
+    screens.push(rows());
+    const methods = plain(gaugeDev.calls).map((call) => call.method)
+      .filter((method) => SIMBRIEF_METHODS.includes(method) || ['startUplink', 'stopUplink', 'restartSidecar', 'watchDatalink'].includes(method));
+    return { screens, methods };
+  };
+  const stopped = await run('stopped');
+  const online = await run('online');
+  assert.deepEqual(stopped, online);
+  assert.deepEqual(stopped.methods, ['getSimbriefSettings', 'prefileSimbrief', 'getSimbriefSettings', 'clearPrefiledLeg', 'getSimbriefSettings']);
+  assert.deepEqual(stopped.screens.at(-1).slice(1, 3), [['SERVER NOT CONFIGURED'], ['COMPLETE CFG NETWORK']]);
+  assert.deepEqual(stopped.screens.at(-1)[11], ['<MENU', '']);
+});
+
+test('simbrief token sentinel never reaches a result, a state, a recorded call or the screen', async (t) => {
+  const { host, gaugeDev } = await loadMock();
+  const seen = [];
+  host.onDatalink((state) => seen.push(plain(state)));
+  await host.setConfig({ ingestToken: SIMBRIEF_SENTINEL });
+  for (const datalink of ['leg', 'flight', 'no-flight-plan']) {
+    for (const name of Object.keys(SIMBRIEF_SCENARIOS)) {
+      gaugeDev.datalinkScenario(datalink);
+      seen.push(gaugeDev.simbriefScenario(name));
+      seen.push(plain(await host.getSimbriefSettings()), plain(await host.prefileSimbrief()));
+      seen.push(plain(await host.getDatalinkState()), plain(await host.clearPrefiledLeg()), plain(await host.getDatalinkState()));
+    }
+  }
+  assert.ok(seen.length > 30 * 3 * 6);
+  assert.equal(JSON.stringify({ seen, calls: gaugeDev.calls }).includes(SIMBRIEF_SENTINEL), false);
+
+  const ui = await mountDatalinkPages(t, 'fpln-sentinel', { fpln: true });
+  await ui.host.setConfig({ ingestToken: SIMBRIEF_SENTINEL });
+  const screens = [];
+  const look = () => screens.push(ui.shell.title, ui.rows(), ui.shell.scratchpad);
+  for (const name of Object.keys(SIMBRIEF_SCENARIOS)) {
+    ui.gaugeDev.datalinkScenario('leg');
+    ui.gaugeDev.simbriefScenario('configured');
+    ui.fmc.showPage('FPLN');
+    await settle();
+    await ui.lsk('FPLN', 'R6');
+    ui.gaugeDev.simbriefScenario(name);
+    await ui.lsk('FPLN-CONFIRM', 'R6');
+    look();
+    ui.fmc.showPage('FPLN');
+    await settle();
+    look();
+    await ui.lsk('FPLN', 'R3');
+    look();
+    ui.fmc.showPage('DL-INDEX');
+    await settle();
+    look();
+  }
+  assert.equal(JSON.stringify({ screens, calls: ui.gaugeDev.calls }).includes(SIMBRIEF_SENTINEL), false);
 });

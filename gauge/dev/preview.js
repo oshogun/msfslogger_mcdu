@@ -7,6 +7,10 @@ const datalinkScenario = document.getElementById('datalink-scenario');
 function applyDatalinkScenario() { frame.contentWindow.gaugeDev.datalinkScenario(datalinkScenario.value); }
 frame.addEventListener('load', applyDatalinkScenario);
 datalinkScenario.addEventListener('change', applyDatalinkScenario);
+const simbriefScenario = document.getElementById('simbrief-scenario');
+function applySimbriefScenario() { frame.contentWindow.gaugeDev.simbriefScenario(simbriefScenario.value); }
+frame.addEventListener('load', applySimbriefScenario);
+simbriefScenario.addEventListener('change', applySimbriefScenario);
 document.getElementById('size').addEventListener('change', event => { frame.style.width = event.target.value + 'px'; });
 document.getElementById('reload').addEventListener('click', () => frame.contentWindow.location.reload());
 let revision;

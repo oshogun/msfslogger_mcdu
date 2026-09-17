@@ -1,0 +1,33 @@
+{
+  "_sample": "get-settings-401-no-scope-header",
+  "request": {
+    "method": "GET",
+    "path": "/api/settings/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "Unauthorized"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-unavailable",
+    "httpStatus": 401,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "n/a",
+    "cdu": "SIMBRIEF UNAVAILABLE",
+    "hint": "SERVER UPDATE NEEDED"
+  }
+}

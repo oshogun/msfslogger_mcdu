@@ -38,6 +38,9 @@ const COMMANDS = {
   datalinkSendCanned: 'datalink_send_canned',
   datalinkWx: 'datalink_wx',
   datalinkLoadsheet: 'datalink_loadsheet',
+  simbriefSettings: 'simbrief_settings',
+  simbriefPrefile: 'simbrief_prefile',
+  simbriefClearPrefile: 'simbrief_clear_prefile',
 };
 
 /** Event names the shell emits into the webview. */
@@ -92,6 +95,15 @@ const DATALINK_HOST_METHODS = [
   'requestWeather', 'requestLoadsheet',
 ];
 
+/**
+ * The SimBrief methods are optional in the same way: a host without them is
+ * still adopted and FPLN says NOT SUPPORTED. None takes an argument — no token,
+ * no Pilot ID — and anything passed is dropped rather than forwarded. Each
+ * resolves to an `{ok, result|error}` envelope; the held prefiled leg is read
+ * from the datalink state, not from a method of its own.
+ */
+const SIMBRIEF_HOST_METHODS = ['getSimbriefSettings', 'prefileSimbrief', 'clearPrefiledLeg'];
+
 const datalinkError = (code) => ({ ok: false, error: { code, httpStatus: null, serverCode: null } });
 const UNSUPPORTED = datalinkError('host-unsupported');
 const BAD_REQUEST = datalinkError('bad-request');
@@ -142,6 +154,11 @@ function adoptHost(installed) {
     adapter[name] = typeof installed[name] === 'function'
       ? (...args) => installed[name](...args)
       : datalinkFallback(name);
+  }
+  for (const name of SIMBRIEF_HOST_METHODS) {
+    adapter[name] = typeof installed[name] === 'function'
+      ? () => installed[name]()
+      : async () => clone(UNSUPPORTED);
   }
   return adapter;
 }
@@ -257,6 +274,9 @@ function createTauriBridge(host) {
       if (!isPlainObject(req) || !isCount(req.plannedLegId)) return clone(BAD_REQUEST);
       return host.invoke(COMMANDS.datalinkLoadsheet, { plannedLegId: req.plannedLegId });
     },
+    getSimbriefSettings: () => host.invoke(COMMANDS.simbriefSettings),
+    prefileSimbrief: () => host.invoke(COMMANDS.simbriefPrefile),
+    clearPrefiledLeg: () => host.invoke(COMMANDS.simbriefClearPrefile),
   };
 }
 
@@ -296,7 +316,8 @@ function createStubBridge() {
     status: null,
     datalinkState: null,
     // Method name → the envelope that method resolves; unset methods answer
-    // host-unsupported, the same as an installed host without the datalink.
+    // host-unsupported, the same as an installed host without the datalink or
+    // the SimBrief methods.
     datalinkResults: {},
     calls: [],
     setConfigResult: { ok: true, path: DEFAULT_STUB_PATH },
@@ -388,7 +409,7 @@ function createStubBridge() {
       return subscribe(listeners.datalink, fn);
     },
   };
-  for (const name of DATALINK_HOST_METHODS) {
+  for (const name of [...DATALINK_HOST_METHODS, ...SIMBRIEF_HOST_METHODS]) {
     if (name === 'getDatalinkState' || name === 'onDatalink') continue;
     bridge[name] = async (...args) => {
       record(name, clone(args));

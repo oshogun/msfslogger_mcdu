@@ -147,6 +147,23 @@ async fn datalink_loadsheet(
     relay_datalink(state, "loadsheet", json!({"plannedLegId": planned_leg_id})).await
 }
 
+// The SimBrief commands take no arguments: the server picks the pilot's
+// current OFP, and nothing here can force a duplicate or write a Pilot ID.
+#[tauri::command]
+async fn simbrief_settings(state: State<'_, Supervisor>) -> Result<Value, String> {
+    relay_datalink(state, "simbrief-settings", json!({})).await
+}
+
+#[tauri::command]
+async fn simbrief_prefile(state: State<'_, Supervisor>) -> Result<Value, String> {
+    relay_datalink(state, "simbrief-prefile", json!({})).await
+}
+
+#[tauri::command]
+async fn simbrief_clear_prefile(state: State<'_, Supervisor>) -> Result<Value, String> {
+    relay_datalink(state, "prefile-clear", json!({})).await
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
@@ -193,7 +210,10 @@ fn main() {
             datalink_canned,
             datalink_send_canned,
             datalink_wx,
-            datalink_loadsheet
+            datalink_loadsheet,
+            simbrief_settings,
+            simbrief_prefile,
+            simbrief_clear_prefile
         ])
         .build(tauri::generate_context!())
         .expect("Cannot initialize msfslogger desktop shell");

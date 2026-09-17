@@ -1,0 +1,36 @@
+{
+  "_sample": "post-401-invalid-token",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "Invalid ingest token",
+      "code": "INVALID_INGEST_TOKEN"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "token-invalid",
+    "httpStatus": 401,
+    "serverCode": "INVALID_INGEST_TOKEN",
+    "latch": true,
+    "datalinkState": "dl.token-invalid",
+    "override": "cleared",
+    "prefileOutcome": "not-imported",
+    "cdu": "INGEST TOKEN REJECTED",
+    "hint": "CHECK TOKEN ON CFG"
+  }
+}

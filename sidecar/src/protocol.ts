@@ -147,6 +147,12 @@ export interface TrafficMessage {
 // has to renegotiate anything.
 
 export const DATALINK_FEATURE = 'datalink';
+/**
+ * The SimBrief settings, prefile and prefile-clear ops. A shell must not send
+ * them to a sidecar whose hello lacks this feature, for the same reason as
+ * 'datalink': an older sidecar would leave the request unanswered.
+ */
+export const SIMBRIEF_FEATURE = 'simbrief-prefile';
 
 export const DATALINK_REQUEST_ID_PATTERN = /^dl-[0-9]{1,20}$/;
 export const CANNED_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -154,7 +160,7 @@ export const ICAO_PATTERN = /^[A-Z][A-Z0-9]{3}$/;
 
 export type DatalinkScope =
   | { kind: 'flight'; flightId: number; plannedLegId: number | null }
-  | { kind: 'leg'; plannedLegId: number; source: 'status' | 'ground-session' }
+  | { kind: 'leg'; plannedLegId: number; source: 'status' | 'ground-session' | 'prefile' }
   | { kind: 'none' };
 
 export interface DatalinkThreadSummary {
@@ -206,7 +212,17 @@ export interface DatalinkError {
   serverCode: string | null;
 }
 
-export type DatalinkOp = 'watch' | 'refresh' | 'thread' | 'canned-list' | 'send-canned' | 'wx' | 'loadsheet';
+export type DatalinkOp =
+  | 'watch'
+  | 'refresh'
+  | 'thread'
+  | 'canned-list'
+  | 'send-canned'
+  | 'wx'
+  | 'loadsheet'
+  | 'simbrief-settings'
+  | 'simbrief-prefile'
+  | 'prefile-clear';
 
 export interface WriteTarget {
   kind: 'flight' | 'leg';
@@ -221,6 +237,11 @@ export interface DatalinkParams {
   'send-canned': { target: WriteTarget; cannedId: string };
   wx: { target: WriteTarget; icao: string };
   loadsheet: { plannedLegId: number };
+  // None of the SimBrief ops takes a parameter: the server picks the pilot's
+  // current OFP, and duplicates are never forced through.
+  'simbrief-settings': Record<string, never>;
+  'simbrief-prefile': Record<string, never>;
+  'prefile-clear': Record<string, never>;
 }
 
 export interface DatalinkResults {
@@ -238,6 +259,25 @@ export interface DatalinkResults {
   'send-canned': { sent: true; httpStatus: number };
   wx: { icao: string; available: boolean; metar: string | null; taf: string | null; fetchedAt: string | null };
   loadsheet: { plannedLegId: number; created: boolean; httpStatus: number; sheet: LoadsheetSheet };
+  /** Whether a SimBrief Pilot ID is saved on the server. The id itself never crosses the wire. */
+  'simbrief-settings': { configured: boolean };
+  'simbrief-prefile': {
+    status: 'imported' | 'duplicate';
+    plannedLegId: number;
+    /** Token-scrubbed, then capped; may be empty. */
+    label: string;
+    /** How many warnings the server attached; their text is never forwarded. */
+    warningCount: number;
+    httpStatus: number;
+  };
+  /** True when a prefiled leg was held and has now been dropped. */
+  'prefile-clear': { cleared: boolean };
+}
+
+/** The leg the user prefiled from SimBrief, held by the sidecar as a scope of its own. */
+export interface PrefiledLeg {
+  plannedLegId: number;
+  label: string;
 }
 
 /** An op's answer before it is wrapped in a response line. */
@@ -271,6 +311,8 @@ export interface DatalinkStateMessage {
   scope: DatalinkScope | null;
   /** null when there is no cached thread for the scope. */
   thread: DatalinkThreadSummary | null;
+  /** Present only while a prefiled leg is held; the key is omitted otherwise. */
+  prefiledLeg?: PrefiledLeg;
 }
 
 export type SidecarMessage =
@@ -359,7 +401,7 @@ const CONTROL_TYPES: readonly ControlMessageType[] = [
   'datalink-request',
 ];
 
-const DATALINK_OPS: readonly DatalinkOp[] = [
+export const DATALINK_OPS: readonly DatalinkOp[] = [
   'watch',
   'refresh',
   'thread',
@@ -367,6 +409,9 @@ const DATALINK_OPS: readonly DatalinkOp[] = [
   'send-canned',
   'wx',
   'loadsheet',
+  'simbrief-settings',
+  'simbrief-prefile',
+  'prefile-clear',
 ];
 
 const LOG_LEVELS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
@@ -436,6 +481,11 @@ function datalinkParamsProblem(op: DatalinkOp, params: Record<string, unknown>):
         : 'watch params must be exactly { on }';
     case 'refresh':
     case 'canned-list':
+    // Any key here, a duplicate override or a trip or pilot id among them,
+    // would ask the server for something the CDU never offers.
+    case 'simbrief-settings':
+    case 'simbrief-prefile':
+    case 'prefile-clear':
       return hasExactKeys(params, []) ? null : `${op} params must be empty`;
     case 'thread':
       return hasExactKeys(params, ['epoch', 'endSeq']) && isSafeInt(params.epoch, 1) && isSafeInt(params.endSeq, 0)

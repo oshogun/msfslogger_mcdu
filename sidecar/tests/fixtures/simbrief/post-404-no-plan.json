@@ -1,0 +1,35 @@
+{
+  "_sample": "post-404-no-plan",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/simbrief",
+    "headers": {
+      "x-ingest-token": "SENTINEL-SIMBRIEF-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "That SimBrief account has no flight plan on file. Generate a flight plan on simbrief.com first, then import it here.",
+      "code": "NO_PLAN"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "simbrief-no-plan",
+    "httpStatus": 404,
+    "serverCode": "NO_PLAN",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "override": "unchanged",
+    "prefileOutcome": "not-imported",
+    "cdu": "NO SIMBRIEF OFP",
+    "hint": "GENERATE OFP ON SIMBRIEF"
+  }
+}

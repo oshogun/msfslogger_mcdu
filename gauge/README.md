@@ -9,12 +9,10 @@ powershell -ExecutionPolicy Bypass -File tools/dev-gauge.ps1
 Open **http://127.0.0.1:8380** in Edge or Chrome. Stop the server with Ctrl+C.
 Use `-Port 8381` if that port is occupied. The server binds only to loopback.
 No npm dependencies, Rust, MSFS, SimConnect, or Linux server are required.
-The launcher uses Node on PATH, or the project-local portable runtime in
-`.tools/`. This machine was provisioned with Node 20.20.2 from nodejs.org,
-verified against the vendor's SHA-256 list; `.tools/` is ignored by Git.
-On another machine install Node 20 or newer before running the launcher.
-Node 20 matches the inherited project's tooling requirement; the harness
-itself also works with newer Node versions and has no native dependencies.
+The launcher uses Node on PATH, or a project-local portable runtime under
+`.tools/` if you've placed one there (`.tools/` is ignored by Git). Install
+Node 20 or newer before running the launcher; the harness has no native
+dependencies and also works with newer Node versions.
 
 With Node on PATH, equivalent commands are:
 
@@ -24,7 +22,7 @@ npm run test:gauge
 npm run check:ui
 ```
 
-For the portable runtime installed here:
+With a portable runtime under `.tools/`, run its `node.exe` directly, e.g.:
 
 ```powershell
 & ./.tools/node-v20.20.2-win-x64/node.exe --test gauge/dev/harness.test.mjs
@@ -61,3 +59,7 @@ boundary and never talks to a real server or simulator.
 The tests cover scenario transitions, unsubscribe behavior, configuration
 isolation, secret omission, adapter injection order, and server route isolation.
 The existing UI boundary and Rust/webview contract checks also pass.
+
+See [../docs/development.md](../docs/development.md) for the rest of the dev
+workflow and checks, and [../docs/cdu-reference.md](../docs/cdu-reference.md)
+for the page map, LSK layout and CDU vocabulary this harness exercises.

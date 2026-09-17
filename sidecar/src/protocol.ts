@@ -153,6 +153,11 @@ export const DATALINK_FEATURE = 'datalink';
  * 'datalink': an older sidecar would leave the request unanswered.
  */
 export const SIMBRIEF_FEATURE = 'simbrief-prefile';
+/**
+ * The clearance op. A shell must not send it to a sidecar whose hello lacks
+ * this feature: an older sidecar would leave the request unanswered.
+ */
+export const CLEARANCE_FEATURE = 'pdc-clearance';
 
 export const DATALINK_REQUEST_ID_PATTERN = /^dl-[0-9]{1,20}$/;
 export const CANNED_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -222,7 +227,8 @@ export type DatalinkOp =
   | 'loadsheet'
   | 'simbrief-settings'
   | 'simbrief-prefile'
-  | 'prefile-clear';
+  | 'prefile-clear'
+  | 'clearance';
 
 export interface WriteTarget {
   kind: 'flight' | 'leg';
@@ -242,6 +248,8 @@ export interface DatalinkParams {
   'simbrief-settings': Record<string, never>;
   'simbrief-prefile': Record<string, never>;
   'prefile-clear': Record<string, never>;
+  // The server takes no request body: the leg id is the whole request.
+  clearance: { plannedLegId: number };
 }
 
 export interface DatalinkResults {
@@ -272,6 +280,26 @@ export interface DatalinkResults {
   };
   /** True when a prefiled leg was held and has now been dropped. */
   'prefile-clear': { cleared: boolean };
+  /**
+   * The structured clearance only. The request and reply messages, their
+   * bodies and the server's payload reach the webview through the thread.
+   */
+  clearance: {
+    /** Always the requested id; a body naming another leg is bad-response. */
+    plannedLegId: number;
+    /** false: the leg already had a clearance, and these are the stored rows. */
+    created: boolean;
+    /** Trimmed and upper-cased, 1 to 8 of [A-Z0-9], or null. */
+    departure: string | null;
+    destination: string | null;
+    /** Token-scrubbed, never blank, at most 4096 UTF-16 units; or null. */
+    route: string | null;
+    /** A safe integer from 0 to 99 999. */
+    initialAltitudeFt: number;
+    /** Four octal digits. */
+    squawk: string;
+    httpStatus: number;
+  };
 }
 
 /** The leg the user prefiled from SimBrief, held by the sidecar as a scope of its own. */
@@ -412,6 +440,7 @@ export const DATALINK_OPS: readonly DatalinkOp[] = [
   'simbrief-settings',
   'simbrief-prefile',
   'prefile-clear',
+  'clearance',
 ];
 
 const LOG_LEVELS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
@@ -509,6 +538,12 @@ function datalinkParamsProblem(op: DatalinkOp, params: Record<string, unknown>):
       return hasExactKeys(params, ['plannedLegId']) && isSafeInt(params.plannedLegId, 1)
         ? null
         : 'loadsheet params must be exactly { plannedLegId }';
+    // A trip or flight id next to the leg would let the request aim at
+    // something other than the leg the CDU confirmed.
+    case 'clearance':
+      return hasExactKeys(params, ['plannedLegId']) && isSafeInt(params.plannedLegId, 1)
+        ? null
+        : 'clearance params must be exactly { plannedLegId }';
   }
 }
 

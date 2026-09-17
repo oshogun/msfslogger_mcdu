@@ -11,6 +11,10 @@ const simbriefScenario = document.getElementById('simbrief-scenario');
 function applySimbriefScenario() { frame.contentWindow.gaugeDev.simbriefScenario(simbriefScenario.value); }
 frame.addEventListener('load', applySimbriefScenario);
 simbriefScenario.addEventListener('change', applySimbriefScenario);
+const clearanceScenario = document.getElementById('clearance-scenario');
+function applyClearanceScenario() { frame.contentWindow.gaugeDev.clearanceScenario(clearanceScenario.value); }
+frame.addEventListener('load', applyClearanceScenario);
+clearanceScenario.addEventListener('change', applyClearanceScenario);
 document.getElementById('size').addEventListener('change', event => { frame.style.width = event.target.value + 'px'; });
 document.getElementById('reload').addEventListener('click', () => frame.contentWindow.location.reload());
 let revision;

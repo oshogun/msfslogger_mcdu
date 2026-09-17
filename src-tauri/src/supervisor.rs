@@ -65,14 +65,17 @@ pub struct Supervisor {
     // Set while a SimBrief prefile is outstanding, so a second press is refused
     // here rather than creating a second planned leg.
     prefile_in_flight: Arc<AtomicBool>,
+    // Set while a clearance request is outstanding. The server writes logbook
+    // rows for the first one, so a second press is refused rather than sent.
+    clearance_in_flight: Arc<AtomicBool>,
     worker: Arc<WorkerHandle>,
 }
 
-/// Holds the prefile flag for one relayed prefile and releases it on every
-/// way out: an answer, a timeout, an exited sidecar or a refused queue.
-struct PrefileGuard(Arc<AtomicBool>);
+/// Holds an in-flight flag for one relayed prefile or clearance and releases it
+/// on every way out: an answer, a timeout, an exited sidecar or a refused queue.
+struct InFlightGuard(Arc<AtomicBool>);
 
-impl PrefileGuard {
+impl InFlightGuard {
     fn acquire(flag: &Arc<AtomicBool>) -> Option<Self> {
         flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
@@ -80,7 +83,7 @@ impl PrefileGuard {
     }
 }
 
-impl Drop for PrefileGuard {
+impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
@@ -149,6 +152,7 @@ impl Supervisor {
             relay,
             relay_timeouts: datalink::RelayTimeouts::PRODUCTION,
             prefile_in_flight: Arc::new(AtomicBool::new(false)),
+            clearance_in_flight: Arc::new(AtomicBool::new(false)),
             worker: Arc::new(WorkerHandle {
                 stopping,
                 thread: Mutex::new(Some(thread)),
@@ -187,12 +191,16 @@ impl Supervisor {
         if self.stopping.load(Ordering::Acquire) {
             return datalink::error_envelope("sidecar-unavailable");
         }
-        let (refused, simbrief) = {
+        let (refused, simbrief, clearance) = {
             let mut snapshot = lock(&self.snapshot);
             let simbrief = snapshot
                 .hello
                 .as_ref()
                 .is_some_and(datalink::supports_simbrief);
+            let clearance = snapshot
+                .hello
+                .as_ref()
+                .is_some_and(datalink::supports_clearance);
             let state = match snapshot.hello.as_ref() {
                 None => Some(datalink::STATE_UNAVAILABLE),
                 Some(hello) if !datalink::supports_datalink(hello) => {
@@ -211,7 +219,7 @@ impl Supervisor {
                 }
                 (state, synthetic)
             });
-            (refused, simbrief)
+            (refused, simbrief, clearance)
         };
         if let Some((state, synthetic)) = refused {
             if let Some(value) = synthetic {
@@ -228,13 +236,26 @@ impl Supervisor {
         if datalink::SIMBRIEF_OPS.contains(&op) && !simbrief {
             return datalink::error_envelope("sidecar-outdated");
         }
+        // Likewise a sidecar that predates the clearance op: nothing is written
+        // and the datalink state is left as it is.
+        if datalink::CLEARANCE_OPS.contains(&op) && !clearance {
+            return datalink::error_envelope("sidecar-outdated");
+        }
         if !datalink::valid_params(op, &params) {
             return datalink::error_envelope("bad-request");
         }
         let _prefile = if op == "simbrief-prefile" {
-            match PrefileGuard::acquire(&self.prefile_in_flight) {
+            match InFlightGuard::acquire(&self.prefile_in_flight) {
                 Some(guard) => Some(guard),
                 None => return datalink::error_envelope("prefile-in-progress"),
+            }
+        } else {
+            None
+        };
+        let _clearance = if op == "clearance" {
+            match InFlightGuard::acquire(&self.clearance_in_flight) {
+                Some(guard) => Some(guard),
+                None => return datalink::error_envelope("clearance-in-progress"),
             }
         } else {
             None
@@ -1780,5 +1801,316 @@ mod simbrief_process_tests {
             assert!(!output.contains(SENTINEL));
         }
         assert_eq!(fixture.backend(), backend);
+    }
+}
+
+// The clearance op through the relay, against the Python fixture, with the
+// relay deadline scaled down so nothing waits the production 12 s.
+#[cfg(test)]
+mod clearance_process_tests {
+    use super::*;
+    use std::{fs, sync::atomic::AtomicUsize};
+
+    const SENTINEL: &str = "SENTINEL-CLEARANCE-TOKEN-0000";
+    const SCALED: datalink::RelayTimeouts = datalink::RelayTimeouts {
+        default: Duration::from_millis(1_000),
+        prefile: Duration::from_millis(2_500),
+    };
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn python_path() -> &'static str {
+        if cfg!(windows) {
+            "python"
+        } else {
+            "/usr/bin/python3"
+        }
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        supervisor: Supervisor,
+        events: Arc<Mutex<Vec<(&'static str, Value)>>>,
+    }
+
+    impl Fixture {
+        fn new(mode: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "msfslogger-clearance-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::SeqCst)
+            ));
+            fs::create_dir_all(root.join("dist")).unwrap();
+            let entry = root.join("dist").join("index.js");
+            fs::write(&entry, include_str!("../tests/fake-sidecar.py")).unwrap();
+            let config = ConfigStore::new(root.join("config.json"));
+            config
+                .save(
+                    json!({"nodePath":python_path(), "autoUplink":false, "datalinkMode":mode,
+                    "serverUrl":"http://127.0.0.1:1", "ingestToken":SENTINEL}),
+                )
+                .unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let sink = Arc::new(move |event| {
+                let recorded = match event {
+                    Event::Status(v) => ("status", v),
+                    Event::Log(v) => ("log", v),
+                    Event::Exit(v) => ("exit", v),
+                    Event::Datalink(v) => ("datalink", v),
+                };
+                lock(&captured).push(recorded);
+            });
+            let supervisor = Supervisor::new(config, Some(entry), sink)
+                .unwrap()
+                .with_relay_timeouts(SCALED);
+            let fixture = Self {
+                root,
+                supervisor,
+                events,
+            };
+            fixture.wait(|| fixture.app_state() == "app.stopped", 10);
+            fixture.wait(|| fixture.count("datalink") >= 1, 5);
+            fixture
+        }
+
+        fn wait(&self, predicate: impl Fn() -> bool, seconds: u64) {
+            let deadline = Instant::now() + Duration::from_secs(seconds);
+            while !predicate() {
+                assert!(
+                    Instant::now() < deadline,
+                    "Timed out waiting for fixture state"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn app_state(&self) -> String {
+            lock(&self.supervisor.snapshot).status.as_ref().unwrap()["app"]["state"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+
+        fn backend(&self) -> Value {
+            lock(&self.supervisor.snapshot).status.as_ref().unwrap()["backend"].clone()
+        }
+
+        fn count(&self, kind: &str) -> usize {
+            lock(&self.events)
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .count()
+        }
+
+        fn starts(&self) -> usize {
+            fs::read_to_string(self.root.join("starts"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        }
+
+        /// Every op the fixture received, one per request line, in order.
+        fn ops(&self) -> Vec<String> {
+            fs::read_to_string(self.root.join("datalink-ops"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        fn clearance_lines(&self) -> usize {
+            self.ops().iter().filter(|op| *op == "clearance").count()
+        }
+
+        fn in_flight(&self) -> bool {
+            self.supervisor.clearance_in_flight.load(Ordering::Acquire)
+        }
+
+        fn timed(&self, op: &str, params: Value) -> (Value, Duration) {
+            let started = Instant::now();
+            let envelope = self.supervisor.datalink(op, params);
+            (envelope, started.elapsed())
+        }
+
+        fn spawn_clearance(&self) -> thread::JoinHandle<(Value, Duration)> {
+            let supervisor = self.supervisor.clone();
+            thread::spawn(move || {
+                let started = Instant::now();
+                (
+                    supervisor.datalink("clearance", json!({"plannedLegId":12})),
+                    started.elapsed(),
+                )
+            })
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.supervisor.shutdown();
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn code(envelope: &Value) -> &str {
+        envelope["error"]["code"].as_str().unwrap_or_default()
+    }
+
+    #[test]
+    fn one_clearance_writes_one_line_and_waits_only_the_default_deadline() {
+        let fixture = Fixture::new("answer");
+        let backend = fixture.backend();
+        let statuses = fixture.count("status");
+        let (envelope, elapsed) = fixture.timed("clearance", json!({"plannedLegId":12}));
+        assert_eq!(envelope, json!({"ok":true, "result":{"echo":"clearance"}}));
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        assert_eq!(fixture.ops(), ["clearance"]);
+        assert!(!fixture.in_flight());
+        assert_eq!(
+            fixture.supervisor.relay_timeouts.for_op("clearance"),
+            SCALED.default
+        );
+
+        // Params out of contract never reach the sidecar.
+        for params in [
+            json!({"plannedLegId":12, "tripId":1}),
+            json!({"plannedLegId":12, "flightId":92}),
+            json!({"plannedLegId":0}),
+            json!({"plannedLegId":"12"}),
+            json!({"plannedLegId":12.5}),
+            json!({"plannedLegId":9_007_199_254_740_992_u64}),
+            json!({}),
+            json!(null),
+        ] {
+            let (envelope, elapsed) = fixture.timed("clearance", params);
+            assert_eq!(code(&envelope), "bad-request");
+            assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        }
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(fixture.ops(), ["clearance"]);
+        assert!(!fixture.in_flight());
+        assert_eq!(fixture.backend(), backend);
+        assert_eq!(fixture.count("status"), statuses);
+    }
+
+    #[test]
+    fn an_unanswered_clearance_times_out_is_single_flight_and_is_never_resent() {
+        let fixture = Fixture::new("ignore");
+        let backend = fixture.backend();
+        let statuses = fixture.count("status");
+        let first = fixture.spawn_clearance();
+        fixture.wait(|| fixture.clearance_lines() == 1, 5);
+
+        let (envelope, elapsed) = fixture.timed("clearance", json!({"plannedLegId":12}));
+        assert_eq!(
+            envelope,
+            json!({"ok":false, "error":{"code":"clearance-in-progress", "httpStatus":null, "serverCode":null}})
+        );
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        assert_eq!(fixture.clearance_lines(), 1);
+        // Nothing was registered for the refused press.
+        assert_eq!(fixture.supervisor.relay.pending(), 1);
+
+        let (envelope, elapsed) = first.join().unwrap();
+        assert_eq!(code(&envelope), "shell-timeout");
+        assert!(elapsed >= SCALED.default, "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+        assert!(!fixture.in_flight());
+        assert_eq!(fixture.supervisor.relay.pending(), 0);
+
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(fixture.clearance_lines(), 1);
+
+        // Once settled, a new press is accepted and writes its own line.
+        let (envelope, _) = fixture.timed("clearance", json!({"plannedLegId":12}));
+        assert_eq!(code(&envelope), "shell-timeout");
+        assert_eq!(fixture.clearance_lines(), 2);
+        assert!(!fixture.in_flight());
+        assert_eq!(fixture.backend(), backend);
+        assert_eq!(fixture.count("status"), statuses);
+    }
+
+    #[test]
+    fn a_clearance_is_never_resent_after_the_sidecar_exits() {
+        let fixture = Fixture::new("exit-on-request");
+        let (envelope, elapsed) = fixture.timed("clearance", json!({"plannedLegId":12}));
+        assert_eq!(code(&envelope), "sidecar-exited");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        assert!(!fixture.in_flight());
+        fixture.wait(|| fixture.starts() == 2, 10);
+        fixture.wait(|| lock(&fixture.supervisor.snapshot).hello.is_some(), 5);
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(fixture.ops(), ["clearance"]);
+    }
+
+    #[test]
+    fn a_clearance_is_never_resent_after_a_restart() {
+        let fixture = Fixture::new("ignore");
+        let waiter = fixture.spawn_clearance();
+        fixture.wait(|| fixture.clearance_lines() == 1, 5);
+        fixture.supervisor.request(Operation::Restart).unwrap();
+        let (envelope, elapsed) = waiter.join().unwrap();
+        assert_eq!(code(&envelope), "sidecar-exited");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        fixture.wait(|| fixture.starts() == 2, 10);
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(fixture.ops(), ["clearance"]);
+        assert!(!fixture.in_flight());
+    }
+
+    #[test]
+    fn a_sidecar_without_the_clearance_feature_is_refused_at_once_and_keeps_the_rest() {
+        for mode in ["no-clearance", "no-simbrief"] {
+            let fixture = Fixture::new(mode);
+            let backend = fixture.backend();
+            let statuses = fixture.count("status");
+            let events = fixture.count("datalink");
+            let state = fixture.supervisor.current_datalink_state();
+            let (envelope, elapsed) = fixture.timed("clearance", json!({"plannedLegId":12}));
+            assert_eq!(
+                envelope,
+                json!({"ok":false, "error":{"code":"sidecar-outdated", "httpStatus":null, "serverCode":null}}),
+                "{mode}"
+            );
+            assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+            // Gated before params: even a malformed request is simply outdated.
+            let (envelope, _) = fixture.timed("clearance", json!({"tripId":1}));
+            assert_eq!(code(&envelope), "sidecar-outdated");
+            thread::sleep(Duration::from_millis(300));
+            assert_eq!(fixture.ops(), Vec::<String>::new(), "{mode}");
+            assert_eq!(fixture.count("datalink"), events);
+            assert_eq!(fixture.supervisor.current_datalink_state(), state);
+            assert!(!fixture.in_flight());
+
+            let (envelope, _) = fixture.timed("watch", json!({"on":true}));
+            assert_eq!(envelope, json!({"ok":true, "result":{"echo":"watch"}}));
+            assert_eq!(fixture.ops(), ["watch"]);
+            assert_eq!(fixture.backend(), backend);
+            assert_eq!(fixture.count("status"), statuses);
+        }
+        let fixture = Fixture::new("no-clearance");
+        let (envelope, _) = fixture.timed("simbrief-settings", json!({}));
+        assert_eq!(
+            envelope,
+            json!({"ok":true, "result":{"echo":"simbrief-settings"}})
+        );
+    }
+
+    #[test]
+    fn the_ingest_token_never_leaves_the_shell_on_the_clearance_op() {
+        let fixture = Fixture::new("echo-token");
+        let backend = fixture.backend();
+        let statuses = fixture.count("status");
+        let (envelope, _) = fixture.timed("clearance", json!({"plannedLegId":12}));
+        assert_eq!(envelope["ok"], true);
+        assert_eq!(envelope["result"]["note"], "token [REDACTED]");
+        fixture.wait(|| fixture.count("datalink") >= 2, 5);
+        let state = fixture.supervisor.current_datalink_state();
+        let events = serde_json::to_string(&*lock(&fixture.events)).unwrap();
+        let logs = serde_json::to_string(&lock(&fixture.supervisor.snapshot).logs).unwrap();
+        for output in [envelope.to_string(), state.to_string(), events, logs] {
+            assert!(!output.contains(SENTINEL));
+        }
+        assert_eq!(fixture.backend(), backend);
+        assert_eq!(fixture.count("status"), statuses);
     }
 }

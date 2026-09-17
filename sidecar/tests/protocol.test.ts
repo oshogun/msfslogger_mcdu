@@ -18,6 +18,7 @@ import {
   isBlankLine,
   MAX_LINE_BYTES,
   PROTOCOL_VERSION,
+  CLEARANCE_FEATURE,
   DATALINK_OPS,
   SIMBRIEF_FEATURE,
   type ControlMessage,
@@ -467,7 +468,7 @@ describe('SimBrief datalink ops', () => {
   it('lists the ops in their frozen order, and names the feature', () => {
     expect(DATALINK_OPS).toEqual([
       'watch', 'refresh', 'thread', 'canned-list', 'send-canned', 'wx', 'loadsheet',
-      'simbrief-settings', 'simbrief-prefile', 'prefile-clear',
+      'simbrief-settings', 'simbrief-prefile', 'prefile-clear', 'clearance',
     ]);
     expect(SIMBRIEF_FEATURE).toBe('simbrief-prefile');
     expect(PROTOCOL_VERSION).toBe(1);
@@ -485,5 +486,114 @@ describe('SimBrief datalink ops', () => {
     for (const line of lines) {
       expect(decodeSidecarMessage(line)).toEqual({ ok: true, message: JSON.parse(line) });
     }
+  });
+});
+
+describe('clearance datalink op', () => {
+  const REQUEST = '{"v":1,"type":"datalink-request","id":"dl-51","op":"clearance","params":{"plannedLegId":12}}';
+  // Each rejected request, and the answer the sidecar gives it.
+  const REJECTED = [
+    '{"v":1,"type":"datalink-request","id":"dl-60","op":"clearance","params":{"plannedLegId":12,"tripId":1}}',
+    '{"v":1,"type":"datalink-request","id":"dl-61","op":"clearance","params":{"plannedLegId":12,"flightId":92}}',
+    '{"v":1,"type":"datalink-request","id":"dl-62","op":"clearance","params":{"plannedLegId":"12"}}',
+    '{"v":1,"type":"datalink-request","id":"dl-63","op":"clearance","params":{"plannedLegId":0}}',
+    '{"v":1,"type":"datalink-request","id":"dl-64","op":"clearance","params":{"plannedLegId":12.5}}',
+    '{"v":1,"type":"datalink-request","id":"dl-65","op":"clearance","params":{"plannedLegId":9007199254740992}}',
+    '{"v":1,"type":"datalink-request","id":"dl-66","op":"clearance","params":{}}',
+    '{"v":1,"type":"datalink-request","id":"dl-67","op":"clearance","params":{"legId":12}}',
+    '{"v":1,"type":"datalink-request","id":"dl-68","op":"clearance","params":null}',
+    '{"v":1,"type":"datalink-request","id":"dl-69","op":"clearance","params":[]}',
+    '{"v":1,"type":"datalink-request","id":"dl-70","op":"clearance","params":"x"}',
+  ];
+  const REJECTED_ANSWERS = [
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-60","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-61","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-62","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-63","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-64","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-65","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-66","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-67","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-68","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-69","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-70","ok":false,"error":{"code":"bad-request","httpStatus":null,"serverCode":null}}',
+  ];
+  const RESPONSES = [
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-51","ok":true,"result":{"plannedLegId":12,"created":true,"departure":"KJFK","destination":"EGLL","route":"GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H","initialAltitudeFt":5000,"squawk":"4521","httpStatus":201}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-52","ok":true,"result":{"plannedLegId":12,"created":false,"departure":"KJFK","destination":"EGLL","route":"GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H","initialAltitudeFt":5000,"squawk":"4521","httpStatus":200}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-53","ok":true,"result":{"plannedLegId":12,"created":true,"departure":null,"destination":null,"route":null,"initialAltitudeFt":5000,"squawk":"4521","httpStatus":201}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-54","ok":false,"error":{"code":"leg-not-found","httpStatus":404,"serverCode":"PLANNED_LEG_NOT_FOUND"}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-55","ok":false,"error":{"code":"clearance-no-flight-plan","httpStatus":409,"serverCode":"NO_FLIGHT_PLAN"}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-56","ok":false,"error":{"code":"clearance-unavailable","httpStatus":401,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-57","ok":false,"error":{"code":"clearance-in-progress","httpStatus":null,"serverCode":null}}',
+    '{"v":1,"type":"datalink-response","at":1789700000000,"id":"dl-58","ok":false,"error":{"code":"bad-response","httpStatus":201,"serverCode":null}}',
+  ];
+  const HELLOS = [
+    '{"v":1,"type":"hello","at":1789700000000,"pid":4242,"sidecarVersion":"0.1.0","nodeVersion":"v20.20.2","configPath":"C:\\\\Users\\\\<you>\\\\AppData\\\\Roaming\\\\msfslogger\\\\config.json","features":["datalink","simbrief-prefile","pdc-clearance"]}',
+    '{"v":1,"type":"hello","at":1789700000000,"pid":4243,"sidecarVersion":"0.1.0","nodeVersion":"v20.20.2","configPath":"C:\\\\Users\\\\<you>\\\\AppData\\\\Roaming\\\\msfslogger\\\\config.json","features":["datalink","simbrief-prefile"]}',
+  ];
+
+  it('decodes the op with exactly { plannedLegId } and round-trips it', () => {
+    const result = decodeControlMessage(REQUEST);
+    expect(result).toEqual({ ok: true, message: JSON.parse(REQUEST) });
+    if (result.ok) expect(encodeControlMessage(result.message)).toBe(`${REQUEST}\n`);
+    const widest = '{"v":1,"type":"datalink-request","id":"dl-52","op":"clearance","params":{"plannedLegId":9007199254740991}}';
+    expect(decodeControlMessage(widest)).toEqual({ ok: true, message: JSON.parse(widest) });
+  });
+
+  it('rejects extra, missing and mistyped keys as bad-shape with the request id echoed', () => {
+    expect(REJECTED).toHaveLength(REJECTED_ANSWERS.length);
+    REJECTED.forEach((line, i) => {
+      const result = decodeControlMessage(line);
+      const answer = JSON.parse(REJECTED_ANSWERS[i]) as { id: string; error: unknown };
+      expect(JSON.parse(line).id).toBe(answer.id);
+      expect(result).toMatchObject({
+        ok: false, error: 'bad-shape', messageType: 'datalink-request', requestId: answer.id,
+      });
+      expect(answer).toMatchObject({ ok: false, error: { code: 'bad-request', httpStatus: null, serverCode: null } });
+    });
+    // A trip or flight id on its own is refused too, as is no params at all.
+    for (const params of ['{"tripId":12}', '{"flightId":92}', '{"plannedLegId":-1}']) {
+      const result = decodeControlMessage(`{"v":1,"type":"datalink-request","id":"dl-71","op":"clearance","params":${params}}`);
+      expect(result).toMatchObject({ ok: false, error: 'bad-shape', requestId: 'dl-71' });
+      if (!result.ok) {
+        expect(describeDecodeError(result)).toBe(
+          'dropped a malformed "datalink-request" message (clearance params must be exactly { plannedLegId })',
+        );
+      }
+    }
+    expect(
+      decodeControlMessage('{"v":1,"type":"datalink-request","id":"dl-72","op":"clearance"}'),
+    ).toMatchObject({ ok: false, error: 'bad-shape', requestId: 'dl-72' });
+  });
+
+  it('decodes the clearance responses, the rejected answers and both hellos', () => {
+    for (const line of [...RESPONSES, ...REJECTED_ANSWERS, ...HELLOS]) {
+      const result = decodeSidecarMessage(line);
+      expect(result).toEqual({ ok: true, message: JSON.parse(line) });
+      if (result.ok) expect(encodeSidecarMessage(result.message)).toBe(`${line}\n`);
+    }
+  });
+
+  it('a 4096-unit route response encodes to one line and decodes back', () => {
+    const longRoute = {
+      v: 1 as const, type: 'datalink-response' as const, at: AT, id: 'dl-59', ok: true as const,
+      result: {
+        plannedLegId: 12, created: true, departure: 'KJFK', destination: 'EGLL', route: `${'GREKI DCT '.repeat(409)}NUMPOL`,
+        initialAltitudeFt: 5000, squawk: '4521', httpStatus: 201,
+      },
+    };
+    expect(longRoute.result.route).toHaveLength(4096);
+    const encoded = encodeDatalinkResponse(longRoute);
+    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(MAX_LINE_BYTES);
+    expect(decodeSidecarMessage(encoded.trim())).toEqual({ ok: true, message: longRoute });
+  });
+
+  it('names the feature, keeps the protocol version, and lists the op last', () => {
+    expect(CLEARANCE_FEATURE).toBe('pdc-clearance');
+    expect(JSON.parse(HELLOS[0]).features).toEqual(['datalink', 'simbrief-prefile', CLEARANCE_FEATURE]);
+    expect(PROTOCOL_VERSION).toBe(1);
+    expect(DATALINK_OPS[DATALINK_OPS.length - 1]).toBe('clearance');
+    expect(DATALINK_OPS.filter((op) => op === 'clearance')).toHaveLength(1);
   });
 });

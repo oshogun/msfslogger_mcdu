@@ -1,5 +1,5 @@
-// The three CFG pages, plus the DATALINK and FPLN pages that load in the same
-// bundle.
+// The three CFG pages, plus the DATALINK, clearance and FPLN pages that load in
+// the same bundle.
 // A shared draft keeps CFG edits across them. Existing credentials stay in the
 // shell: an untouched token is omitted from the patch so the writer preserves it.
 //
@@ -9,6 +9,7 @@
 // name the host adapter, read a global for the interface, or subscribe to host
 // events; the shell owns all three. That is why the same page code will run
 // unchanged on a host this build has never seen.
+import { forgetClearances, register as registerClearancePages } from './datalink-clearance-pages.js';
 import { register as registerDatalinkPages } from './datalink-pages.js';
 import { register as registerDatalinkWritePages } from './datalink-write-pages.js';
 import { register as registerFplnPages } from './fpln-pages.js';
@@ -169,6 +170,10 @@ async function save() {
     const result = await fmc.setConfig(patch);
     if (!result?.ok) { feedback('CONFIG WRITE', 'SAVE FAILED'); return; }
     const { ingestToken, ...safe } = patch;
+    // The token never reaches the panel, so any token entered counts as a
+    // change; an untouched token is not in the patch at all.
+    const saved = fmc.getConfigCache();
+    if (ingestToken !== undefined || !saved || saved.serverUrl !== safe.serverUrl) forgetClearances();
     Object.assign(draft, safe);
     if (ingestToken) draft.tokenSet = true;
     pendingToken = undefined;
@@ -219,6 +224,8 @@ export function register(api) {
       },
     });
   }
-  registerDatalinkWritePages(api, registerDatalinkPages(api));
+  const shared = registerDatalinkPages(api);
+  registerDatalinkWritePages(api, shared);
+  registerClearancePages(api, shared);
   registerFplnPages(api);
 }

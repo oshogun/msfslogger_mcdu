@@ -1,0 +1,74 @@
+{
+  "_sample": "post-201-bad-squawk-length",
+  "_why": "Squawk has 5 digits.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "planned_leg_id": 12,
+      "created": true,
+      "request": {
+        "id": 501,
+        "flight_id": null,
+        "planned_leg_id": 12,
+        "direction": "downlink",
+        "category": "pdc",
+        "label": "REQUEST CLEARANCE",
+        "body": "REQUEST CLEARANCE",
+        "payload_json": null,
+        "correlation_id": null,
+        "dedup_key": "(server-defined; never read by the client)",
+        "sent_at": "2026-09-17T09:15:00.000Z",
+        "read_at": null
+      },
+      "reply": {
+        "id": 502,
+        "flight_id": null,
+        "planned_leg_id": 12,
+        "direction": "uplink",
+        "category": "pdc",
+        "label": "PDC",
+        "body": "PDC\nKJFK TO EGLL\nCLEARED VIA GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H\nCLIMB AND MAINTAIN 5000FT\nSQUAWK 04521\nSIMULATED CLEARANCE - NOT FOR REAL WORLD USE",
+        "payload_json": "{\"v\":1,\"departure_icao\":\"KJFK\",\"destination_icao\":\"EGLL\",\"route\":\"GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H\",\"initial_altitude_ft\":5000,\"squawk\":\"04521\"}",
+        "correlation_id": 501,
+        "dedup_key": "(server-defined; never read by the client)",
+        "sent_at": "2026-09-17T09:15:00.000Z",
+        "read_at": null
+      },
+      "clearance": {
+        "v": 1,
+        "departure_icao": "KJFK",
+        "destination_icao": "EGLL",
+        "route": "GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H",
+        "initial_altitude_ft": 5000,
+        "squawk": "04521"
+      }
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "bad-response",
+    "httpStatus": 201,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": true,
+    "outcome": "unknown",
+    "cdu": "CLEARANCE BAD DATA",
+    "hint": "SAFE TO REQUEST AGAIN"
+  }
+}

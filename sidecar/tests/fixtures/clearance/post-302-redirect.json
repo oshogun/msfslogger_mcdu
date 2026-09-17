@@ -1,0 +1,34 @@
+{
+  "_sample": "post-302-redirect",
+  "_why": "Redirects are never followed.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 302,
+    "headers": {
+      "location": "https://elsewhere.invalid/"
+    },
+    "body": ""
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 302,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": false,
+    "outcome": "unknown",
+    "cdu": "CLEARANCE FAULT 302",
+    "hint": "SAFE TO REQUEST AGAIN"
+  }
+}

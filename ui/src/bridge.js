@@ -41,6 +41,7 @@ const COMMANDS = {
   simbriefSettings: 'simbrief_settings',
   simbriefPrefile: 'simbrief_prefile',
   simbriefClearPrefile: 'simbrief_clear_prefile',
+  datalinkClearance: 'datalink_clearance',
 };
 
 /** Event names the shell emits into the webview. */
@@ -104,6 +105,15 @@ const DATALINK_HOST_METHODS = [
  */
 const SIMBRIEF_HOST_METHODS = ['getSimbriefSettings', 'prefileSimbrief', 'clearPrefiledLeg'];
 
+/**
+ * The clearance request is optional too: a host without it is still adopted
+ * and the clearance flow says NOT SUPPORTED. Only the planned leg id is read
+ * and forwarded; there is no token argument and anything else passed is
+ * dropped. It resolves to an `{ok, result|error}` envelope, and nothing calls
+ * it except the clearance confirm key: it writes logbook rows on the server.
+ */
+const CLEARANCE_HOST_METHODS = ['requestClearance'];
+
 const datalinkError = (code) => ({ ok: false, error: { code, httpStatus: null, serverCode: null } });
 const UNSUPPORTED = datalinkError('host-unsupported');
 const BAD_REQUEST = datalinkError('bad-request');
@@ -160,6 +170,9 @@ function adoptHost(installed) {
       ? () => installed[name]()
       : async () => clone(UNSUPPORTED);
   }
+  adapter.requestClearance = typeof installed.requestClearance === 'function'
+    ? (req) => installed.requestClearance({ plannedLegId: isPlainObject(req) ? req.plannedLegId : undefined })
+    : async () => clone(UNSUPPORTED);
   return adapter;
 }
 
@@ -277,6 +290,10 @@ function createTauriBridge(host) {
     getSimbriefSettings: () => host.invoke(COMMANDS.simbriefSettings),
     prefileSimbrief: () => host.invoke(COMMANDS.simbriefPrefile),
     clearPrefiledLeg: () => host.invoke(COMMANDS.simbriefClearPrefile),
+    requestClearance: async (req) => {
+      if (!isPlainObject(req) || !isCount(req.plannedLegId)) return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.datalinkClearance, { plannedLegId: req.plannedLegId });
+    },
   };
 }
 
@@ -409,7 +426,7 @@ function createStubBridge() {
       return subscribe(listeners.datalink, fn);
     },
   };
-  for (const name of [...DATALINK_HOST_METHODS, ...SIMBRIEF_HOST_METHODS]) {
+  for (const name of [...DATALINK_HOST_METHODS, ...SIMBRIEF_HOST_METHODS, ...CLEARANCE_HOST_METHODS]) {
     if (name === 'getDatalinkState' || name === 'onDatalink') continue;
     bridge[name] = async (...args) => {
       record(name, clone(args));

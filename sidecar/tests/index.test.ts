@@ -296,7 +296,7 @@ describe('datalink wiring', () => {
   });
 
   it('hello advertises the datalink feature and is followed by one idle datalink-state', () => {
-    expect(messages[0]).toMatchObject({ type: 'hello', features: ['datalink', 'simbrief-prefile'] });
+    expect(messages[0]).toMatchObject({ type: 'hello', features: ['datalink', 'simbrief-prefile', 'pdc-clearance'] });
     expect(messages[1]).toEqual({
       v: 1, type: 'datalink-state', at: 60000, state: 'dl.idle', watching: false, httpStatus: null,
       serverCode: null, lastOkAt: null, lastErrorAt: null, nextPollAt: null, scope: null, thread: null,
@@ -475,5 +475,105 @@ describe('datalink wiring', () => {
     const everything = JSON.stringify(messages);
     expect(everything).not.toContain(SENTINEL);
     expect(everything).not.toContain('SENTINEL-DATALINK');
+  });
+
+  it('clearance through 401 (three variants), 403, 404, 409, 500, timeout and unreachable leaves the backend axis identical', async () => {
+    await start();
+    sendFrame();
+    await flush();
+    const before = status().backend;
+    expect(before.state).toBe('net.ok');
+
+    const clearanceFaults: [string, Outcome][] = [
+      ...FAULTS.filter(([name]) => name !== '500'),
+      ['404', respond(404, { error: `Planned leg 12 not found ${SENTINEL}`, code: 'PLANNED_LEG_NOT_FOUND' }, 'accepted')],
+      ['409', respond(409, { error: `NO FLIGHT PLAN ON FILE ${SENTINEL}`, code: 'NO_FLIGHT_PLAN' }, 'accepted')],
+      ['500', respond(500, { error: SENTINEL })],
+      ['timeout', { kind: 'transport', errorName: 'TimeoutError', errorCode: null }],
+    ];
+    const ids: string[] = [];
+    for (const [, outcome] of clearanceFaults) {
+      mocks.datalinkRequest.mockResolvedValue(outcome);
+      reload({ ok: true, config: sentinelConfig, warnings: [] });
+      const id = datalink('clearance', { plannedLegId: 12 });
+      ids.push(id);
+      await flush();
+      expect(responseFor(id)).toMatchObject({ ok: false });
+      expect(status().backend).toEqual(before);
+    }
+    const routes = mocks.datalinkRequest.mock.calls.map(([route]) => route as { key: string; id: number });
+    expect(routes).toEqual(clearanceFaults.map(() => ({ key: 'leg-clearance', id: 12 })));
+    const codes = ids.map((id) => {
+      const message = responseFor(id);
+      return message && message.type === 'datalink-response' && !message.ok ? message.error.code : '';
+    });
+    expect(codes).toEqual([
+      'token-invalid', 'token-missing', 'clearance-unavailable', 'rejected', 'unreachable',
+      'leg-not-found', 'clearance-no-flight-plan', 'http-error', 'timeout',
+    ]);
+    const backends = messages.filter((m): m is StatusMessage => m.type === 'status').slice(-3).map((m) => m.backend);
+    for (const backend of backends) {
+      expect({ state: backend.state, httpStatus: backend.httpStatus, message: backend.message, lastErrorAt: backend.lastErrorAt })
+        .toEqual({ state: before.state, httpStatus: before.httpStatus, message: before.message, lastErrorAt: before.lastErrorAt });
+    }
+    control('shutdown');
+    await flush();
+    const everything = JSON.stringify(messages);
+    expect(everything).not.toContain(SENTINEL);
+    const logs = messages.filter((m) => m.type === 'log').map((m) => m.message);
+    expect(logs.filter((line) => line.startsWith('Clearance '))).toEqual([
+      'Clearance token-invalid (HTTP 401)', 'Clearance token-missing (HTTP 401)', 'Clearance clearance-unavailable (HTTP 401)',
+      'Clearance rejected (HTTP 403)', 'Clearance unreachable (HTTP ---)', 'Clearance leg-not-found (HTTP 404)',
+      'Clearance clearance-no-flight-plan (HTTP 409)', 'Clearance http-error (HTTP 500)', 'Clearance timeout (HTTP ---)',
+    ]);
+  });
+
+  it('answers each malformed clearance request with exactly the bad-request line, sending nothing', async () => {
+    const rejected: [string, unknown][] = [
+      ['dl-60', { plannedLegId: 12, tripId: 1 }],
+      ['dl-61', { plannedLegId: 12, flightId: 92 }],
+      ['dl-62', { plannedLegId: '12' }],
+      ['dl-63', { plannedLegId: 0 }],
+      ['dl-64', { plannedLegId: 12.5 }],
+      ['dl-65', { plannedLegId: 9007199254740992 }],
+      ['dl-66', {}],
+      ['dl-67', { legId: 12 }],
+      ['dl-68', null],
+      ['dl-69', []],
+      ['dl-70', 'x'],
+    ];
+    const logsBefore = messages.filter((m) => m.type === 'log').length;
+    for (const [id, params] of rejected) datalink('clearance', params, id);
+    await flush();
+    for (const [id] of rejected) {
+      expect(responseFor(id)).toEqual({
+        v: 1, type: 'datalink-response', at: expect.any(Number), id, ok: false,
+        error: { code: 'bad-request', httpStatus: null, serverCode: null },
+      });
+    }
+    expect(messages.filter((m) => m.type === 'log').length).toBe(logsBefore);
+    expect(mocks.datalinkRequest).not.toHaveBeenCalled();
+  });
+
+  it('a clearance success is answered with the structured result only, and emits no datalink-state when not watching', async () => {
+    mocks.datalinkRequest.mockResolvedValue(respond(201, {
+      planned_leg_id: 12, created: true,
+      request: { id: 501, body: `REQUEST CLEARANCE ${SENTINEL}` },
+      reply: { id: 502, correlation_id: 501, body: `PDC ${SENTINEL}`, payload_json: SENTINEL },
+      clearance: { v: 1, departure_icao: 'kjfk', destination_icao: 'EGLL', route: `GREKI ${SENTINEL} DCT`, initial_altitude_ft: 5000, squawk: '4521' },
+    }, 'accepted'));
+    const states = messages.filter((m) => m.type === 'datalink-state').length;
+    const id = datalink('clearance', { plannedLegId: 12 });
+    await flush();
+    expect(responseFor(id)).toEqual({
+      v: 1, type: 'datalink-response', at: expect.any(Number), id, ok: true,
+      result: {
+        plannedLegId: 12, created: true, departure: 'KJFK', destination: 'EGLL', route: 'GREKI [REDACTED] DCT',
+        initialAltitudeFt: 5000, squawk: '4521', httpStatus: 201,
+      },
+    });
+    expect(messages.filter((m) => m.type === 'datalink-state').length).toBe(states);
+    expect(JSON.stringify(messages)).not.toContain(SENTINEL);
+    expect(JSON.stringify(messages)).not.toContain('PDC');
   });
 });

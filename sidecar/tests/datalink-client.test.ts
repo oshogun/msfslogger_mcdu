@@ -2,8 +2,8 @@
 // scratch HTTP server on an ephemeral port with a sentinel token.
 //
 // The server records every request, so the properties asserted are the ones
-// the server's token check depends on: exactly twelve (method, path) pairs, the
-// token in x-ingest-token and nowhere else, no Origin or Cookie, and bodies
+// the server's token check depends on: exactly thirteen (method, path) pairs,
+// the token in x-ingest-token and nowhere else, no Origin or Cookie, and bodies
 // limited to a canned id or an ICAO.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -20,6 +20,8 @@ import {
 import { classifyOutcome } from '../src/datalink-classify';
 import { Uplink } from '../src/uplink';
 import {
+  clearanceFixture,
+  clearanceReply,
   closedPort,
   fixture,
   reply,
@@ -44,6 +46,7 @@ const FROZEN_ROUTES = new Set([
   'GET /api/ground-sessions/current',
   'GET /api/settings/simbrief',
   'POST /api/planned-legs/simbrief',
+  'POST /api/planned-legs/12/acars-messages/clearance',
 ]);
 
 const ALL_ROUTES: DatalinkRoute[] = [
@@ -60,6 +63,10 @@ const ALL_ROUTES: DatalinkRoute[] = [
   { key: 'simbrief-settings' },
   { key: 'simbrief-prefile' },
 ];
+
+// Not in ALL_ROUTES, because the prefile timeout test pins that list at twelve
+// keys. The route-list test and the every-key timeout test add it.
+const CLEARANCE_ROUTE: DatalinkRoute = { key: 'leg-clearance', id: 12 };
 
 describe('DatalinkClient against a scratch server', () => {
   let server: ScratchServer;
@@ -80,6 +87,7 @@ describe('DatalinkClient against a scratch server', () => {
       'GET /api/ground-sessions/current': reply('10a-get-ground-session-open'),
       'GET /api/settings/simbrief': simbriefReply('get-settings-configured'),
       'POST /api/planned-legs/simbrief': simbriefReply('post-201-imported'),
+      'POST /api/planned-legs/12/acars-messages/clearance': clearanceReply('post-201-created'),
       'GET /redirected': () => ({ status: 200, body: { followed: true } }),
     });
     uplink = new Uplink(scratchConfig(server.baseUrl));
@@ -91,15 +99,15 @@ describe('DatalinkClient against a scratch server', () => {
     await server.close();
   });
 
-  it('exercises all twelve routes; each request is one of the frozen twelve, tokened, with no Origin or Cookie', async () => {
+  it('exercises all thirteen routes; each request is one of the frozen thirteen, tokened, with no Origin or Cookie', async () => {
     const before = server.requests.length;
-    for (const route of ALL_ROUTES) {
+    for (const route of [...ALL_ROUTES, CLEARANCE_ROUTE]) {
       const outcome = await client.request(route);
       expect(outcome.kind).toBe('response');
       if (outcome.kind === 'response') expect(outcome.status).toBeLessThan(300);
     }
     const made = server.requests.slice(before);
-    expect(made).toHaveLength(12);
+    expect(made).toHaveLength(13);
     expect(new Set(made.map((r) => `${r.method} ${r.path}`))).toEqual(FROZEN_ROUTES);
 
     for (const request of made) {
@@ -293,6 +301,77 @@ describe('DatalinkClient against a scratch server', () => {
     } finally {
       server.routes['POST /api/planned-legs/simbrief'] = simbriefReply('post-201-imported');
       server.routes['GET /api/planned-legs/12/acars-messages'] = reply('06-get-leg-thread');
+    }
+  });
+
+  it('one clearance op sends exactly one POST with no body, the sentinel token, and no Origin or Cookie', async () => {
+    const before = server.requests.length;
+    const outcome = await client.request(CLEARANCE_ROUTE);
+    expect(outcome).toMatchObject({ kind: 'response', status: 201, bodyTooLarge: false });
+    const made = server.requests.slice(before);
+    expect(made.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /api/planned-legs/12/acars-messages/clearance']);
+    const [request] = made;
+    expect(request.body).toBe('');
+    expect(request.headers['content-length']).toBe('0');
+    expect(request.headers['content-type']).toBeUndefined();
+    expect(request.headers['x-ingest-token']).toBe(SENTINEL_TOKEN);
+    expect(request.headers.origin).toBeUndefined();
+    expect(request.headers.cookie).toBeUndefined();
+    expect(request.headers.accept).toBe('application/json');
+    expect(request.path).not.toContain(SENTINEL_TOKEN);
+    expect(buildRequest(CLEARANCE_ROUTE)).toEqual({
+      method: 'POST',
+      path: '/api/planned-legs/12/acars-messages/clearance',
+      template: '/api/planned-legs/:id/acars-messages/clearance',
+      body: null,
+      maxBodyBytes: 1024 * 1024,
+    });
+  });
+
+  it('builds no clearance request, and sends nothing, for an id outside the param rule', async () => {
+    const before = server.requests.length;
+    for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, '12' as unknown as number]) {
+      const route: DatalinkRoute = { key: 'leg-clearance', id };
+      expect(buildRequest(route)).toBeNull();
+      expect(await client.request(route)).toEqual({ kind: 'transport', errorName: 'InvalidRoute', errorCode: null });
+    }
+    expect(server.requests.length).toBe(before);
+    expect(buildRequest({ key: 'leg-clearance', id: Number.MAX_SAFE_INTEGER })?.path).toBe(
+      `/api/planned-legs/${Number.MAX_SAFE_INTEGER}/acars-messages/clearance`,
+    );
+  });
+
+  it('every route key has its effective timeout: the prefile 25 s, the clearance and every other route 8 s', () => {
+    const keys = [...ALL_ROUTES, CLEARANCE_ROUTE].map((route) => route.key);
+    expect(new Set(keys).size).toBe(13);
+    for (const key of keys) {
+      const expected = key === 'simbrief-prefile' ? SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS : DATALINK_HTTP_TIMEOUT_MS;
+      expect(httpTimeoutMs(key, {}), key).toBe(expected);
+      expect(httpTimeoutMs(key, { timeoutMs: 100, prefileTimeoutMs: 400 }), key).toBe(key === 'simbrief-prefile' ? 400 : 100);
+    }
+    expect(httpTimeoutMs('leg-clearance', {})).toBe(8000);
+    expect(httpTimeoutMs('leg-clearance', { prefileTimeoutMs: 400 })).toBe(8000);
+  });
+
+  it('a clearance answering after the scaled default timeout times out; the prefile with the same delay does not', async () => {
+    server.routes['POST /api/planned-legs/12/acars-messages/clearance'] = () => ({
+      ...clearanceFixture('post-201-created').response,
+      delayMs: 200,
+    });
+    server.routes['POST /api/planned-legs/simbrief'] = () => ({ ...simbriefFixture('post-201-imported').response, delayMs: 200 });
+    try {
+      const before = server.requests.length;
+      const scaled = new DatalinkClient(() => uplink, { timeoutMs: 100, prefileTimeoutMs: 400 });
+      const [clearance, prefile] = await Promise.all([
+        scaled.request(CLEARANCE_ROUTE),
+        scaled.request({ key: 'simbrief-prefile' }),
+      ]);
+      expect(clearance).toEqual({ kind: 'transport', errorName: 'TimeoutError', errorCode: null });
+      expect(prefile).toMatchObject({ kind: 'response', status: 201 });
+      expect(server.requests.slice(before).filter((r) => r.path.endsWith('/clearance'))).toHaveLength(1);
+    } finally {
+      server.routes['POST /api/planned-legs/12/acars-messages/clearance'] = clearanceReply('post-201-created');
+      server.routes['POST /api/planned-legs/simbrief'] = simbriefReply('post-201-imported');
     }
   });
 

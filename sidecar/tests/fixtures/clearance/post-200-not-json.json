@@ -1,0 +1,34 @@
+{
+  "_sample": "post-200-not-json",
+  "_why": "A 2xx whose body is not JSON: the rows may exist, so the outcome is unknown.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/html"
+    },
+    "body": "<html>proxy page</html>"
+  },
+  "expect": {
+    "ok": false,
+    "code": "bad-response",
+    "httpStatus": 200,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": true,
+    "outcome": "unknown",
+    "cdu": "CLEARANCE BAD DATA",
+    "hint": "SAFE TO REQUEST AGAIN"
+  }
+}

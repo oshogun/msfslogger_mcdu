@@ -1,0 +1,38 @@
+{
+  "_sample": "post-401-code-shaped-token",
+  "_why": "A code equal to a code-shaped token is classified raw but emitted as null.",
+  "configToken": "SENTINELCLEARANCETOKEN0000",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINELCLEARANCETOKEN0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW",
+      "code": "SENTINELCLEARANCETOKEN0000"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "clearance-unavailable",
+    "httpStatus": 401,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged, nothing emitted",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": false,
+    "outcome": "not-issued",
+    "cdu": "CLEARANCE UNAVAILABLE",
+    "hint": "SERVER UPDATE NEEDED"
+  }
+}

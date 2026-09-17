@@ -1,0 +1,38 @@
+{
+  "_sample": "post-404-leg-not-found",
+  "_why": "Unknown leg. The error text is a sentinel and must never be shown or forwarded.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW Planned leg 12 not found",
+      "code": "PLANNED_LEG_NOT_FOUND"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "leg-not-found",
+    "httpStatus": 404,
+    "serverCode": "PLANNED_LEG_NOT_FOUND",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "dropped when the held prefiled leg is 12",
+    "cycleSoon": true,
+    "outcome": "not-issued",
+    "cdu": "PLANNED LEG NOT FOUND",
+    "hint": ""
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "_sample": "post-201-route-contains-token",
+  "_why": "Forwarded text is token-scrubbed before any length check.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "planned_leg_id": 12,
+      "created": true,
+      "request": {
+        "id": 501,
+        "flight_id": null,
+        "planned_leg_id": 12,
+        "direction": "downlink",
+        "category": "pdc",
+        "label": "REQUEST CLEARANCE",
+        "body": "REQUEST CLEARANCE",
+        "payload_json": null,
+        "correlation_id": null,
+        "dedup_key": "(server-defined; never read by the client)",
+        "sent_at": "2026-09-17T09:15:00.000Z",
+        "read_at": null
+      },
+      "reply": {
+        "id": 502,
+        "flight_id": null,
+        "planned_leg_id": 12,
+        "direction": "uplink",
+        "category": "pdc",
+        "label": "PDC",
+        "body": "PDC\nKJFK TO EGLL\nCLEARED VIA GREKI SENTINEL-CLEARANCE-TOKEN-0000 DCT\nCLIMB AND MAINTAIN 5000FT\nSQUAWK 4521\nSIMULATED CLEARANCE - NOT FOR REAL WORLD USE",
+        "payload_json": "{\"v\":1,\"departure_icao\":\"KJFK\",\"destination_icao\":\"EGLL\",\"route\":\"GREKI SENTINEL-CLEARANCE-TOKEN-0000 DCT\",\"initial_altitude_ft\":5000,\"squawk\":\"4521\"}",
+        "correlation_id": 501,
+        "dedup_key": "(server-defined; never read by the client)",
+        "sent_at": "2026-09-17T09:15:00.000Z",
+        "read_at": null
+      },
+      "clearance": {
+        "v": 1,
+        "departure_icao": "KJFK",
+        "destination_icao": "EGLL",
+        "route": "GREKI SENTINEL-CLEARANCE-TOKEN-0000 DCT",
+        "initial_altitude_ft": 5000,
+        "squawk": "4521"
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "plannedLegId": 12,
+      "created": true,
+      "departure": "KJFK",
+      "destination": "EGLL",
+      "route": "GREKI [REDACTED] DCT",
+      "initialAltitudeFt": 5000,
+      "squawk": "4521",
+      "httpStatus": 201
+    },
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": true,
+    "outcome": "issued",
+    "advisory": "CLEARANCE RECEIVED"
+  }
+}

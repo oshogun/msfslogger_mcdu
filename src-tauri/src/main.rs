@@ -164,6 +164,15 @@ async fn simbrief_clear_prefile(state: State<'_, Supervisor>) -> Result<Value, S
     relay_datalink(state, "prefile-clear", json!({})).await
 }
 
+// Only the leg the CDU confirmed: no token, trip or flight id, and no text.
+#[tauri::command]
+async fn datalink_clearance(
+    planned_leg_id: u64,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    relay_datalink(state, "clearance", json!({"plannedLegId": planned_leg_id})).await
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
@@ -213,7 +222,8 @@ fn main() {
             datalink_loadsheet,
             simbrief_settings,
             simbrief_prefile,
-            simbrief_clear_prefile
+            simbrief_clear_prefile,
+            datalink_clearance
         ])
         .build(tauri::generate_context!())
         .expect("Cannot initialize msfslogger desktop shell");

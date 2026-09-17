@@ -557,6 +557,7 @@ function boot() {
     getSimbriefSettings: () => runDatalink(() => bridge.getSimbriefSettings()),
     prefileSimbrief: () => runDatalink(() => bridge.prefileSimbrief()),
     clearPrefiledLeg: () => runDatalink(() => bridge.clearPrefiledLeg()),
+    requestClearance: (req) => runDatalink(() => bridge.requestClearance(req)),
   };
   window.FMC = fmc;
 

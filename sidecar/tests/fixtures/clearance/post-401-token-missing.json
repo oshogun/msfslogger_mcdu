@@ -1,0 +1,37 @@
+{
+  "_sample": "post-401-token-missing",
+  "_why": "The route takes the token but none arrived.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "token-missing",
+    "httpStatus": 401,
+    "serverCode": null,
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": false,
+    "outcome": "not-issued",
+    "cdu": "CLEARANCE TOKEN NOT RECEIVED",
+    "hint": "TOKEN HEADER LOST IN TRANSIT"
+  }
+}

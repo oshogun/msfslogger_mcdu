@@ -416,6 +416,324 @@
       return envelope({ cleared: held });
     }
   };
+  // ── Clearance ─────────────────────────────────────────────────────────────
+  // What requestClearance answers in each preview scenario. An ok answer is for
+  // the leg that was asked for, and the first one for the leg the thread shows
+  // adds the request and the PDC reply to it, as the server's rows would.
+  // "reject" makes the call itself fail. The serverError members stand in for
+  // server text that no page may show. Nothing but requestClearance asks for a
+  // clearance, and only the invalid-token and leg-not-found answers change the
+  // datalink state, the way the sidecar's latch and dropped prefiled leg do.
+  var CLEARANCE_SCENARIOS = {
+    "_note": "Envelope requestClearance resolves in each scenario. For ok envelopes the mock replaces result.plannedLegId with the requested id. \"reject\" means the promise rejects (host-error through runDatalink). serverError members are sentinels the pages must never show.",
+    "_default": "created",
+    "created": {
+      "ok": true,
+      "result": {
+        "plannedLegId": 12,
+        "created": true,
+        "departure": "KJFK",
+        "destination": "EGLL",
+        "route": "GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H",
+        "initialAltitudeFt": 5000,
+        "squawk": "4521",
+        "httpStatus": 201
+      }
+    },
+    "not-created": {
+      "ok": true,
+      "result": {
+        "plannedLegId": 12,
+        "created": false,
+        "departure": "KJFK",
+        "destination": "EGLL",
+        "route": "GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H",
+        "initialAltitudeFt": 5000,
+        "squawk": "4521",
+        "httpStatus": 200
+      }
+    },
+    "long-route": {
+      "ok": true,
+      "result": {
+        "plannedLegId": 12,
+        "created": true,
+        "departure": "KJFK",
+        "destination": "EGLL",
+        "route": "GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONAN UL607 REDFA 5530N02000W M626 SUNOT GREKI DCT MARTN N251A JOOPY NATW GISTI UN514 NUMPO L9 KONANX",
+        "initialAltitudeFt": 5000,
+        "squawk": "4521",
+        "httpStatus": 201
+      }
+    },
+    "null-route-and-icaos": {
+      "ok": true,
+      "result": {
+        "plannedLegId": 12,
+        "created": true,
+        "departure": null,
+        "destination": null,
+        "route": null,
+        "initialAltitudeFt": 5000,
+        "squawk": "4521",
+        "httpStatus": 201
+      }
+    },
+    "fl-altitude": {
+      "ok": true,
+      "result": {
+        "plannedLegId": 12,
+        "created": true,
+        "departure": "KJFK",
+        "destination": "EGLL",
+        "route": "GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H",
+        "initialAltitudeFt": 18000,
+        "squawk": "4521",
+        "httpStatus": 201
+      }
+    },
+    "ft-altitude": {
+      "ok": true,
+      "result": {
+        "plannedLegId": 12,
+        "created": true,
+        "departure": "KJFK",
+        "destination": "EGLL",
+        "route": "GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H",
+        "initialAltitudeFt": 4500,
+        "squawk": "4521",
+        "httpStatus": 201
+      }
+    },
+    "leg-not-found": {
+      "ok": false,
+      "error": {
+        "code": "leg-not-found",
+        "httpStatus": 404,
+        "serverCode": "PLANNED_LEG_NOT_FOUND",
+        "serverError": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW Planned leg 12 not found"
+      }
+    },
+    "no-flight-plan": {
+      "ok": false,
+      "error": {
+        "code": "clearance-no-flight-plan",
+        "httpStatus": 409,
+        "serverCode": "NO_FLIGHT_PLAN",
+        "serverError": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW NO FLIGHT PLAN ON FILE"
+      }
+    },
+    "invalid-token": {
+      "ok": false,
+      "error": {
+        "code": "token-invalid",
+        "httpStatus": 401,
+        "serverCode": "INVALID_INGEST_TOKEN"
+      }
+    },
+    "token-missing": {
+      "ok": false,
+      "error": {
+        "code": "token-missing",
+        "httpStatus": 401,
+        "serverCode": null
+      }
+    },
+    "unavailable": {
+      "ok": false,
+      "error": {
+        "code": "clearance-unavailable",
+        "httpStatus": 401,
+        "serverCode": null
+      }
+    },
+    "rejected": {
+      "ok": false,
+      "error": {
+        "code": "rejected",
+        "httpStatus": 403,
+        "serverCode": "CROSS_ORIGIN"
+      }
+    },
+    "http-error": {
+      "ok": false,
+      "error": {
+        "code": "http-error",
+        "httpStatus": 500,
+        "serverCode": null
+      }
+    },
+    "unknown-code": {
+      "ok": false,
+      "error": {
+        "code": "some-future-code",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "bad-response": {
+      "ok": false,
+      "error": {
+        "code": "bad-response",
+        "httpStatus": 201,
+        "serverCode": null
+      }
+    },
+    "too-large": {
+      "ok": false,
+      "error": {
+        "code": "too-large",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "unreachable": {
+      "ok": false,
+      "error": {
+        "code": "unreachable",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "tls-error": {
+      "ok": false,
+      "error": {
+        "code": "tls-error",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "client-timeout": {
+      "ok": false,
+      "error": {
+        "code": "timeout",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "relay-timeout": {
+      "ok": false,
+      "error": {
+        "code": "shell-timeout",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "busy": {
+      "ok": false,
+      "error": {
+        "code": "busy",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "in-progress": {
+      "ok": false,
+      "error": {
+        "code": "clearance-in-progress",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "no-config": {
+      "ok": false,
+      "error": {
+        "code": "no-config",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "sidecar-exited": {
+      "ok": false,
+      "error": {
+        "code": "sidecar-exited",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "sidecar-unavailable": {
+      "ok": false,
+      "error": {
+        "code": "sidecar-unavailable",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "sidecar-outdated": {
+      "ok": false,
+      "error": {
+        "code": "sidecar-outdated",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "not-supported": {
+      "ok": false,
+      "error": {
+        "code": "host-unsupported",
+        "httpStatus": null,
+        "serverCode": null
+      }
+    },
+    "host-error": "reject"
+  };
+  var clearance = { name: CLEARANCE_SCENARIOS._default, delay: 0, latched: false };
+
+  function clearanceNames() {
+    return Object.keys(CLEARANCE_SCENARIOS).filter(function (name) { return name.charAt(0) !== '_'; });
+  }
+  function isLegId(value) { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1; }
+  // The server's reply body is its own text; the pages draw the structured result instead.
+  function serverAltitude(ft) { return ft >= 18000 ? 'FL' + Math.round(ft / 100) : ft + 'FT'; }
+  function orDashes(value) { return value === null ? '----' : value; }
+  function appendClearancePair(result) {
+    if (!dl.messages || !dl.scope || (dl.scope.kind !== 'flight' && dl.scope.kind !== 'leg')) return;
+    if (dl.scope.plannedLegId !== result.plannedLegId) return;
+    var issued = dl.messages.some(function (m) { return m.category === 'pdc' && m.label === 'PDC'; });
+    if (issued) return;
+    var request = appendMessage('downlink', 'pdc', 'REQUEST CLEARANCE', 'REQUEST CLEARANCE', null);
+    appendMessage('uplink', 'pdc', 'PDC', [
+      'PDC',
+      orDashes(result.departure) + ' TO ' + orDashes(result.destination),
+      'CLEARED VIA ' + orDashes(result.route),
+      'CLIMB AND MAINTAIN ' + serverAltitude(result.initialAltitudeFt),
+      'SQUAWK ' + result.squawk,
+      'SIMULATED CLEARANCE - NOT FOR REAL WORLD USE'
+    ].join('\n'), request.id);
+    emitDatalink();
+  }
+
+  var clearanceHost = {
+    requestClearance: function (req) {
+      recordDatalink('requestClearance', [req]);
+      if (!req || typeof req !== 'object' || Array.isArray(req) || !isLegId(req.plannedLegId)) {
+        return Promise.resolve(failure('bad-request'));
+      }
+      var plannedLegId = req.plannedLegId;
+      var name = clearance.name;
+      if (name === 'invalid-token' && !clearance.latched) {
+        clearance.latched = true;
+        loadDatalinkScenario('invalid-token');
+        holdLeg(null);
+        emitDatalink();
+      }
+      var answer = CLEARANCE_SCENARIOS[name];
+      return new Promise(function (resolve, reject) {
+        setTimeout(function () {
+          if (answer === 'reject') { reject(new Error('mock host fault')); return; }
+          var answered = clone(answer);
+          if (answered.ok) {
+            answered.result.plannedLegId = plannedLegId;
+            appendClearancePair(answered.result);
+          } else if (name === 'leg-not-found' && simbrief.held && simbrief.held.plannedLegId === plannedLegId) {
+            holdLeg(null);
+            emitDatalink();
+          }
+          resolve(answered);
+        }, clearance.delay);
+      });
+    }
+  };
   // Kept only to notice a changed token, as the sidecar does; never returned or recorded.
   var ingestToken = null;
 
@@ -448,6 +766,7 @@
   };
   Object.keys(datalinkHost).forEach(function (name) { host[name] = datalinkHost[name]; });
   Object.keys(simbriefHost).forEach(function (name) { host[name] = simbriefHost[name]; });
+  Object.keys(clearanceHost).forEach(function (name) { host[name] = clearanceHost[name]; });
   window.__FMC_HOST__ = host;
   window.gaugeDev = {
     scenario: scenario, calls: calls,
@@ -462,6 +781,13 @@
       return name;
     },
     setSimbriefDelay: function (ms) { simbrief.delay = Math.max(0, Number(ms) || 0); return simbrief.delay; },
+    clearanceScenario: function (name) {
+      if (clearanceNames().indexOf(name) < 0) throw new Error('Unknown clearance scenario: ' + name);
+      clearance.name = name;
+      clearance.latched = false;
+      return name;
+    },
+    setClearanceDelay: function (ms) { clearance.delay = Math.max(0, Number(ms) || 0); return clearance.delay; },
     emitLog: function (message) { listeners.log.forEach(function (fn) { fn({ level: 'info', message: message }); }); },
     emitExit: function () { scenario('crashed'); listeners.exit.forEach(function (fn) { fn({ code: 1 }); }); }
   };

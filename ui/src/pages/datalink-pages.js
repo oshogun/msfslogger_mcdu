@@ -37,6 +37,8 @@ let current = null;
 let refreshing = false;
 let clearing = false;
 let textPage = 1;
+/** What DL-INDEX R5 does; the clearance pages register it. */
+let clearanceAction = null;
 
 // ── Rows ─────────────────────────────────────────────────────────────────────
 
@@ -96,8 +98,8 @@ function paintIndex(view) {
   const lastOkAt = state && typeof state.lastOkAt === 'number' ? state.lastOkAt : null;
   const scope = state && state.scope;
   // A held prefiled leg puts CLR PREFILE> beside the scope, so the scope line
-  // says only PREFILE and the leg id gets a row of its own: any id then fits
-  // the 24-column line.
+  // says only PREFILE and the leg id gets a row of its own, shared only with
+  // CLEARANCE>: a 16-digit id and the prompt still leave a gap between them.
   const held = heldPrefiledLeg(state);
   fill(view, [
     label('SCOPE', lastOkAt === null ? '' : `UPD ${formatTime(lastOkAt)}Z`),
@@ -111,7 +113,7 @@ function paintIndex(view) {
     label(''),
     value(prompt('<DOWNLINK'), prompt('LOADSHEET>')),
     label(held ? PREFILE_TEXT.prefiledLeg : ''),
-    value(held ? String(held.plannedLegId) : ''),
+    value(held ? String(held.plannedLegId) : '', prompt('CLEARANCE>')),
     label(described.hint),
     value(prompt('<INDEX'), prompt('REFRESH>')),
   ]);
@@ -303,9 +305,10 @@ function withTarget(open) {
 }
 
 /**
- * Registers the reading pages and returns what the write pages share with
- * them: the one session, the page factory, a repaint of whatever DATALINK page
- * is on screen, and its id.
+ * Registers the reading pages and returns what the write and clearance pages
+ * share with them: the one session, the page factory, a repaint of whatever
+ * DATALINK page is on screen, its id, and the hook that gives DL-INDEX R5 its
+ * action without this module importing the clearance pages.
  */
 export function register(api) {
   fmc = api;
@@ -339,6 +342,7 @@ export function register(api) {
         else fmc.showPage('DL-LOADSHEET');
         return true;
       }
+      if (lsk === 'R5') return clearanceAction ? clearanceAction() : false;
       if (lsk === 'R6') {
         void refresh();
         return true;
@@ -413,5 +417,6 @@ export function register(api) {
     dlPage,
     repaint,
     currentPageId: () => (current ? current.id : null),
+    setClearanceAction(fn) { clearanceAction = typeof fn === 'function' ? fn : null; },
   };
 }

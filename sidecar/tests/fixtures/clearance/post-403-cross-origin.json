@@ -1,0 +1,36 @@
+{
+  "_sample": "post-403-cross-origin",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW",
+      "code": "CROSS_ORIGIN"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "rejected",
+    "httpStatus": 403,
+    "serverCode": "CROSS_ORIGIN",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": false,
+    "outcome": "not-issued",
+    "cdu": "CLEARANCE REJECTED 403",
+    "hint": ""
+  }
+}

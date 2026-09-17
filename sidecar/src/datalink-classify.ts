@@ -72,6 +72,12 @@ export type DatalinkErrorCode =
   | 'simbrief-unavailable'
   // sidecar or shell: a prefile is already in flight, nothing was sent
   | 'prefile-in-progress'
+  // clearance route: 409 NO_FLIGHT_PLAN, the leg has no dispatch release
+  | 'clearance-no-flight-plan'
+  // a 401 with no token scope on the clearance route: the server predates it
+  | 'clearance-unavailable'
+  // sidecar or shell: a clearance is already in flight, nothing was sent
+  | 'clearance-in-progress'
   // sidecar-local
   | 'bad-request'
   | 'stale-epoch'

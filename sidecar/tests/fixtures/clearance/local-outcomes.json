@@ -1,0 +1,290 @@
+{
+  "transport-unreachable": {
+    "_why": "connection refused on a closed ephemeral port",
+    "expect": {
+      "ok": false,
+      "code": "unreachable",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": true,
+      "outcome": "unknown",
+      "cdu": "CLEARANCE NO COMM",
+      "hint": "SAFE TO REQUEST AGAIN"
+    }
+  },
+  "transport-reset": {
+    "_why": "the scratch server destroys the socket after reading the request",
+    "expect": {
+      "ok": false,
+      "code": "unreachable",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": true,
+      "outcome": "unknown",
+      "cdu": "CLEARANCE NO COMM",
+      "hint": "SAFE TO REQUEST AGAIN"
+    }
+  },
+  "transport-tls": {
+    "_why": "certificate rejected before any request is written",
+    "expect": {
+      "ok": false,
+      "code": "tls-error",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": true,
+      "outcome": "not-issued",
+      "cdu": "CLEARANCE CERT FAULT",
+      "hint": "CHECK CERTIFICATE PATH"
+    }
+  },
+  "transport-client-timeout": {
+    "_why": "no complete answer within the sidecar timeout (8000 ms; test-scaled)",
+    "expect": {
+      "ok": false,
+      "code": "timeout",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": true,
+      "outcome": "unknown",
+      "cdu": "CLEARANCE RESULT UNKNOWN",
+      "hint": "SAFE TO REQUEST AGAIN"
+    }
+  },
+  "body-too-large": {
+    "_why": "2xx body over DATALINK_OTHER_BODY_MAX_BYTES (1 MiB; test-scaled with maxBodyBytes)",
+    "expect": {
+      "ok": false,
+      "code": "bad-response",
+      "httpStatus": 201,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": true,
+      "outcome": "unknown",
+      "cdu": "CLEARANCE BAD DATA",
+      "hint": "SAFE TO REQUEST AGAIN"
+    }
+  },
+  "response-line-too-large": {
+    "_why": "unreachable with the §protocol caps; encodeDatalinkResponse guard",
+    "expect": {
+      "ok": false,
+      "code": "too-large",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "unknown",
+      "cdu": "CLEARANCE BAD DATA",
+      "hint": "SAFE TO REQUEST AGAIN"
+    }
+  },
+  "relay-timeout": {
+    "_why": "no datalink-response within the shell relay timeout (12 000 ms; test-scaled)",
+    "expect": {
+      "ok": false,
+      "code": "shell-timeout",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "unknown",
+      "cdu": "CLEARANCE RESULT UNKNOWN",
+      "hint": "SAFE TO REQUEST AGAIN"
+    }
+  },
+  "busy": {
+    "_why": "shell pending bound or writer queue full; no line written",
+    "expect": {
+      "ok": false,
+      "code": "busy",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "not-issued",
+      "cdu": "DATALINK BUSY",
+      "hint": ""
+    }
+  },
+  "clearance-in-progress": {
+    "_why": "sidecar or shell single flight; nothing sent by this press",
+    "expect": {
+      "ok": false,
+      "code": "clearance-in-progress",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "not-issued",
+      "cdu": "CLEARANCE IN PROGRESS",
+      "hint": ""
+    }
+  },
+  "no-config": {
+    "_why": "sidecar has no valid config; no request",
+    "expect": {
+      "ok": false,
+      "code": "no-config",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "not-issued",
+      "cdu": "DATALINK NO CONFIG",
+      "hint": "COMPLETE CFG NETWORK"
+    }
+  },
+  "latched": {
+    "_why": "an earlier INVALID_INGEST_TOKEN; no request",
+    "expect": {
+      "ok": false,
+      "code": "token-invalid",
+      "httpStatus": 401,
+      "serverCode": "INVALID_INGEST_TOKEN",
+      "latch": "stays",
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "not-issued",
+      "cdu": "INGEST TOKEN REJECTED",
+      "hint": "CHECK INGEST TOKEN ON CFG NETWORK"
+    }
+  },
+  "sidecar-exited": {
+    "_why": "sidecar exited with the request bound",
+    "expect": {
+      "ok": false,
+      "code": "sidecar-exited",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "unknown",
+      "cdu": "DATALINK OFFLINE",
+      "hint": "SAFE TO REQUEST AGAIN"
+    }
+  },
+  "sidecar-unavailable": {
+    "_why": "no sidecar or shutting down",
+    "expect": {
+      "ok": false,
+      "code": "sidecar-unavailable",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "not-issued",
+      "cdu": "DATALINK OFFLINE",
+      "hint": ""
+    }
+  },
+  "sidecar-outdated": {
+    "_why": "hello lacks pdc-clearance (or datalink); no line written",
+    "expect": {
+      "ok": false,
+      "code": "sidecar-outdated",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "not-issued",
+      "cdu": "SIDECAR UPDATE REQUIRED",
+      "hint": "REBUILD SIDECAR THEN RESTART APP"
+    }
+  },
+  "bad-request": {
+    "_why": "params out of contract (not reachable from the host API)",
+    "expect": {
+      "ok": false,
+      "code": "bad-request",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "not-issued",
+      "cdu": "INVALID ENTRY",
+      "hint": ""
+    }
+  },
+  "host-unsupported": {
+    "_why": "installed host without requestClearance",
+    "expect": {
+      "ok": false,
+      "code": "host-unsupported",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "not-issued",
+      "cdu": "CLEARANCE NOT SUPPORTED",
+      "hint": ""
+    }
+  },
+  "host-error": {
+    "_why": "host call rejected or resolved a non-envelope",
+    "expect": {
+      "ok": false,
+      "code": "host-error",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "unknown",
+      "cdu": "CLEARANCE HOST FAULT",
+      "hint": "SAFE TO REQUEST AGAIN"
+    }
+  },
+  "unknown-code": {
+    "_why": "a code this build does not know",
+    "expect": {
+      "ok": false,
+      "code": "some-future-code",
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "datalinkState": "unchanged",
+      "heldPrefiledLeg": "unchanged",
+      "cycleSoon": false,
+      "outcome": "unknown",
+      "cdu": "CLEARANCE FAULT",
+      "hint": "SAFE TO REQUEST AGAIN"
+    }
+  }
+}

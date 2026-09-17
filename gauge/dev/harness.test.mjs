@@ -398,7 +398,8 @@ function fakeDocument() {
     get firstChild() { return this.children[0] || null; }
     get childElementCount() { return this.children.length; }
   }
-  return { createElement: () => new Element() };
+  // The CFG pages look for their feedback line and field values; there are none here.
+  return { createElement: () => new Element(), querySelector: () => null, querySelectorAll: () => [] };
 }
 
 /**
@@ -407,8 +408,10 @@ function fakeDocument() {
  * app.js) and wired to the mock host. Leaving to MENU afterwards releases the
  * lease, so a failing test cannot leave the renew interval holding Node open.
  *
- * `overrides.fpln` also registers the FPLN pages; `overrides.via` routes every
- * host call through another object (an adopted bridge) instead of the mock.
+ * `overrides.fpln` also registers the FPLN pages and `overrides.clearance` the
+ * clearance pages; `overrides.cfg` registers everything through
+ * ui/src/pages/index.js instead, CFG pages included; `overrides.via` routes
+ * every host call through another object (an adopted bridge) instead of the mock.
  */
 async function mountDatalinkPages(t, tag, overrides = {}) {
   globalThis.document = fakeDocument();
@@ -417,7 +420,7 @@ async function mountDatalinkPages(t, tag, overrides = {}) {
   const { host, gaugeDev } = overrides.mock || await loadMock();
   const api = overrides.via || host;
   const pages = new Map();
-  const shell = { id: null, view: null, scratchpad: null, entry: '', number: '', datalink: null, title: '' };
+  const shell = { id: null, view: null, scratchpad: null, entry: '', number: '', datalink: null, title: '', config: null };
   const run = (fn) => Promise.resolve().then(fn).then(
     (result) => (result && typeof result.ok === 'boolean' ? plain(result) : localError('host-error')),
     () => localError('host-error'));
@@ -452,14 +455,30 @@ async function mountDatalinkPages(t, tag, overrides = {}) {
     getSimbriefSettings: () => run(() => api.getSimbriefSettings()),
     prefileSimbrief: () => run(() => (overrides.prefileSimbrief || api.prefileSimbrief)()),
     clearPrefiledLeg: () => run(() => (overrides.clearPrefiledLeg || api.clearPrefiledLeg)()),
+    requestClearance: (req) => run(() => (overrides.requestClearance || api.requestClearance)(req)),
+    getConfigCache: () => shell.config,
+    setConfig: (patch) => api.setConfig(patch),
+    refreshConfig: async () => {
+      const result = plain(await api.getConfig());
+      shell.config = result.raw || result.config;
+    },
   };
   host.onDatalink((state) => {
     shell.datalink = plain(state);
     const page = pages.get(shell.id);
     if (page && page.onDatalink) page.onDatalink(shell.datalink);
   });
-  write.register(fmc, register(fmc));
-  if (overrides.fpln) {
+  if (overrides.cfg) {
+    await fmc.refreshConfig();
+    (await import(new URL(`../../ui/src/pages/index.js?${tag}`, import.meta.url))).register(fmc);
+  } else {
+    const shared = register(fmc);
+    write.register(fmc, shared);
+    if (overrides.clearance) {
+      (await import(new URL(`../../ui/src/pages/datalink-clearance-pages.js?${tag}`, import.meta.url))).register(fmc, shared);
+    }
+  }
+  if (overrides.fpln && !overrides.cfg) {
     (await import(new URL(`../../ui/src/pages/fpln-pages.js?${tag}`, import.meta.url))).register(fmc);
   }
   t.after(async () => {
@@ -1487,7 +1506,7 @@ test('fpln prefiled leg: DATALINK uses it for scope, thread, WX and load sheet, 
   };
 
   await ui.scenario('leg');
-  assert.deepEqual(await scopeLine(), ['LEG 12', '']);
+  assert.deepEqual(await scopeLine(), ['LEG 12', '', 'CLEARANCE>']);
   assert.equal(await ui.lsk('DL-INDEX', 'R1'), false);
   const epochBefore = shell.datalink.thread.epoch;
 
@@ -1497,7 +1516,7 @@ test('fpln prefiled leg: DATALINK uses it for scope, thread, WX and load sheet, 
     await prefileFromFpln();
     await ui.lsk('FPLN-RESULT', 'R5');
     assert.equal(shell.id, 'DL-INDEX');
-    assert.deepEqual([...rows()[1], ...rows()[8], ...rows()[9]], ['PREFILE', 'CLR PREFILE>', 'PREFILED LEG', '4812'], name);
+    assert.deepEqual([...rows()[1], ...rows()[8], ...rows()[9]], ['PREFILE', 'CLR PREFILE>', 'PREFILED LEG', '4812', 'CLEARANCE>'], name);
   }
   assert.ok(shell.datalink.thread.epoch > epochBefore);
 
@@ -1528,7 +1547,7 @@ test('fpln prefiled leg: DATALINK uses it for scope, thread, WX and load sheet, 
   fmc.showPage('DL-INDEX');
   await settle();
   assert.equal(await ui.lsk('DL-INDEX', 'R1'), true);
-  assert.deepEqual([rows()[1], rows()[8], rows()[9], shell.scratchpad], [['LEG 12'], [''], [''], ['PREFILE CLEARED', 'advisory']]);
+  assert.deepEqual([rows()[1], rows()[8], rows()[9], shell.scratchpad], [['LEG 12'], [''], ['', 'CLEARANCE>'], ['PREFILE CLEARED', 'advisory']]);
   assert.equal('prefiledLeg' in shell.datalink, false);
   fmc.showPage('DL-THREAD');
   await settle();
@@ -1541,7 +1560,7 @@ test('fpln prefiled leg: DATALINK uses it for scope, thread, WX and load sheet, 
   assert.deepEqual(rows()[5], ['4812', 'CLR PREFILE>']);
   assert.equal(await ui.lsk('FPLN', 'R3'), true);
   assert.deepEqual([rows()[5], rows()[7], shell.scratchpad], [['NONE'], [''], ['PREFILE CLEARED', 'advisory']]);
-  assert.deepEqual(await scopeLine(), ['LEG 12', '']);
+  assert.deepEqual(await scopeLine(), ['LEG 12', '', 'CLEARANCE>']);
 
   // The other clearing events the mock can produce.
   const events = {
@@ -1551,27 +1570,27 @@ test('fpln prefiled leg: DATALINK uses it for scope, thread, WX and load sheet, 
     'a flight': async () => { gaugeDev.datalinkScenario('flight'); },
     'a rejected token': async () => { gaugeDev.datalinkScenario('invalid-token'); },
   };
-  const own = { 'a flight': ['FLT 92 LEG 12', ''], 'a rejected token': ['----', ''] };
+  const own = { 'a flight': ['FLT 92 LEG 12', '', 'CLEARANCE>'], 'a rejected token': ['----', '', 'CLEARANCE>'] };
   for (const [event, run] of Object.entries(events)) {
     gaugeDev.datalinkScenario('leg');
     gaugeDev.simbriefScenario('configured');
     await prefileFromFpln();
-    assert.deepEqual(await scopeLine(), ['PREFILE', 'CLR PREFILE>', '4812'], event);
+    assert.deepEqual(await scopeLine(), ['PREFILE', 'CLR PREFILE>', '4812', 'CLEARANCE>'], event);
     await run();
     await settle();
-    assert.deepEqual([...rows()[1], ...rows()[9]], own[event] || ['LEG 12', ''], event);
+    assert.deepEqual([...rows()[1], ...rows()[9]], own[event] || ['LEG 12', '', 'CLEARANCE>'], event);
     assert.equal('prefiledLeg' in shell.datalink, false, event);
   }
   // Saving the same server and token keeps it.
   gaugeDev.datalinkScenario('leg');
   await prefileFromFpln();
   await host.setConfig({ serverUrl: 'http://other.invalid', ingestToken: 'another-token', trafficRadiusM: 45000 });
-  assert.deepEqual(await scopeLine(), ['PREFILE', 'CLR PREFILE>', '4812']);
+  assert.deepEqual(await scopeLine(), ['PREFILE', 'CLR PREFILE>', '4812', 'CLEARANCE>']);
 
   // A prefile seen with a flight never takes the scope.
   gaugeDev.datalinkScenario('flight');
   await prefileFromFpln();
-  assert.deepEqual(await scopeLine(), ['FLT 92 LEG 12', '']);
+  assert.deepEqual(await scopeLine(), ['FLT 92 LEG 12', '', 'CLEARANCE>']);
 
   // A clear the host refuses says so, once per press, and the leg stays.
   let refusals = 0;
@@ -1583,7 +1602,7 @@ test('fpln prefiled leg: DATALINK uses it for scope, thread, WX and load sheet, 
   refusing.gaugeDev.simbriefScenario('prefiled');
   refusing.fmc.showPage('DL-INDEX');
   await settle();
-  assert.deepEqual([...refusing.rows()[1], ...refusing.rows()[9]], ['PREFILE', 'CLR PREFILE>', '4812']);
+  assert.deepEqual([...refusing.rows()[1], ...refusing.rows()[9]], ['PREFILE', 'CLR PREFILE>', '4812', 'CLEARANCE>']);
   assert.equal(refusing.pages.get('DL-INDEX').onLsk('R1', {}), true);
   assert.equal(refusing.pages.get('DL-INDEX').onLsk('R1', {}), true);
   await later(40);
@@ -1629,7 +1648,7 @@ test('fpln prefiled leg ids of 5 and 9 digits keep every DL-INDEX, FPLN and resu
     fmc.showPage('DL-INDEX');
     await settle();
     hold();
-    assert.deepEqual([rows()[1], rows()[8], rows()[9]], [['PREFILE', 'CLR PREFILE>'], ['PREFILED LEG'], [String(id)]], `${id} DL-INDEX`);
+    assert.deepEqual([rows()[1], rows()[8], rows()[9]], [['PREFILE', 'CLR PREFILE>'], ['PREFILED LEG'], [String(id), 'CLEARANCE>']], `${id} DL-INDEX`);
     within('DL-INDEX');
     await ui.lsk('DL-INDEX', 'L3');
     hold();
@@ -1769,4 +1788,1063 @@ test('simbrief token sentinel never reaches a result, a state, a recorded call o
     look();
   }
   assert.equal(JSON.stringify({ screens, calls: ui.gaugeDev.calls }).includes(SIMBRIEF_SENTINEL), false);
+});
+
+// ── Clearance ────────────────────────────────────────────────────────────────
+
+const CLEARANCE_SENTINEL = 'SENTINEL-CLEARANCE-TOKEN-0000';
+const SERVER_TEXT_SENTINEL = 'SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW';
+const SHORT_ROUTE = 'GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI UN514 NUMPO BOGNA1H';
+const ROUTE_FIXES = ['GREKI', 'DCT', 'MARTN', 'N251A', 'JOOPY', 'NATW', 'GISTI', 'UN514', 'NUMPO', 'L9', 'KONAN', 'UL607', 'REDFA', '5530N02000W', 'M626', 'SUNOT'];
+/** A route of exactly `n` characters made of real-looking fixes, never ending in a space. */
+function routeOfLength(n) {
+  const parts = [];
+  let length = -1;
+  for (let i = 0; length < n; i += 1) {
+    const fix = ROUTE_FIXES[i % ROUTE_FIXES.length];
+    parts.push(fix);
+    length += fix.length + 1;
+  }
+  const route = parts.join(' ').slice(0, n);
+  return route.endsWith(' ') ? `${route.slice(0, -1)}X` : route;
+}
+const CLEARANCE_RESULT_KEYS = ['created', 'departure', 'destination', 'httpStatus', 'initialAltitudeFt', 'plannedLegId', 'route', 'squawk'];
+const clearanceResult = (changes = {}) => ({
+  plannedLegId: 12, created: true, departure: 'KJFK', destination: 'EGLL', route: SHORT_ROUTE,
+  initialAltitudeFt: 5000, squawk: '4521', httpStatus: 201, ...changes,
+});
+/** The six mock scenarios that issue a clearance, as the mock answers them for leg 12. */
+const CLEARANCE_OK = {
+  created: clearanceResult(),
+  'not-created': clearanceResult({ created: false, httpStatus: 200 }),
+  'long-route': clearanceResult({ route: routeOfLength(1200) }),
+  'null-route-and-icaos': clearanceResult({ departure: null, destination: null, route: null }),
+  'fl-altitude': clearanceResult({ initialAltitudeFt: 18000 }),
+  'ft-altitude': clearanceResult({ initialAltitudeFt: 4500 }),
+};
+/** Scenario → [code, httpStatus, serverCode, CDU text, confirm-page hint]. `host-error` rejects. */
+const CLEARANCE_ERRORS = {
+  'leg-not-found': ['leg-not-found', 404, 'PLANNED_LEG_NOT_FOUND', 'PLANNED LEG NOT FOUND', ''],
+  'no-flight-plan': ['clearance-no-flight-plan', 409, 'NO_FLIGHT_PLAN', 'NO DISPATCH RELEASE ON FILE', 'IMPORT THE PLAN FROM SIMBRIEF'],
+  'invalid-token': ['token-invalid', 401, 'INVALID_INGEST_TOKEN', 'INGEST TOKEN REJECTED', 'CHECK INGEST TOKEN ON CFG NETWORK'],
+  'token-missing': ['token-missing', 401, null, 'CLEARANCE TOKEN NOT RECEIVED', 'TOKEN HEADER LOST IN TRANSIT'],
+  unavailable: ['clearance-unavailable', 401, null, 'CLEARANCE UNAVAILABLE', 'SERVER UPDATE NEEDED'],
+  rejected: ['rejected', 403, 'CROSS_ORIGIN', 'CLEARANCE REJECTED 403', ''],
+  'http-error': ['http-error', 500, null, 'CLEARANCE FAULT 500', 'SAFE TO REQUEST AGAIN'],
+  'unknown-code': ['some-future-code', null, null, 'CLEARANCE FAULT', 'SAFE TO REQUEST AGAIN'],
+  'bad-response': ['bad-response', 201, null, 'CLEARANCE BAD DATA', 'SAFE TO REQUEST AGAIN'],
+  'too-large': ['too-large', null, null, 'CLEARANCE BAD DATA', 'SAFE TO REQUEST AGAIN'],
+  unreachable: ['unreachable', null, null, 'CLEARANCE NO COMM', 'SAFE TO REQUEST AGAIN'],
+  'tls-error': ['tls-error', null, null, 'CLEARANCE CERT FAULT', 'CHECK CERTIFICATE PATH'],
+  'client-timeout': ['timeout', null, null, 'CLEARANCE RESULT UNKNOWN', 'SAFE TO REQUEST AGAIN'],
+  'relay-timeout': ['shell-timeout', null, null, 'CLEARANCE RESULT UNKNOWN', 'SAFE TO REQUEST AGAIN'],
+  busy: ['busy', null, null, 'DATALINK BUSY', ''],
+  'in-progress': ['clearance-in-progress', null, null, 'CLEARANCE IN PROGRESS', ''],
+  'no-config': ['no-config', null, null, 'DATALINK NO CONFIG', 'COMPLETE CFG NETWORK'],
+  'sidecar-exited': ['sidecar-exited', null, null, 'DATALINK OFFLINE', 'SAFE TO REQUEST AGAIN'],
+  'sidecar-unavailable': ['sidecar-unavailable', null, null, 'DATALINK OFFLINE', ''],
+  'sidecar-outdated': ['sidecar-outdated', null, null, 'SIDECAR UPDATE REQUIRED', 'REBUILD SIDECAR THEN RESTART APP'],
+  'not-supported': ['host-unsupported', null, null, 'CLEARANCE NOT SUPPORTED', ''],
+  'host-error': ['host-error', null, null, 'CLEARANCE HOST FAULT', 'SAFE TO REQUEST AGAIN'],
+};
+const CLEARANCE_SCENARIOS = [...Object.keys(CLEARANCE_OK), ...Object.keys(CLEARANCE_ERRORS)];
+/** Every clearance string at its widest placeholder, and the column count it was frozen at. */
+const CLEARANCE_STRINGS = [
+  ['index.prompt', 'CLEARANCE>', 10],
+  ['refusal.noFlightPlan', 'NO FLIGHT PLAN', 14],
+  ['refusal.noLinkedLeg', 'NO LINKED LEG', 13],
+  ['refusal.scopePending', 'SCOPE UPDATE PENDING', 20],
+  ['refusal.tokenRejected', 'INGEST TOKEN REJECTED', 21],
+  ['refusal.noConfig', 'DATALINK NO CONFIG', 18],
+  ['refusal.legChanged', 'CLEARANCE LEG CHANGED', 21],
+  ['text.confirmTitle', 'REQUEST CLEARANCE', 17],
+  ['text.confirmHeading', 'CLEARANCE REQUEST', 17],
+  ['text.simulatedPdc', 'SIMULATED PDC', 13],
+  ['text.to', 'TO', 2],
+  ['text.noPending', 'NO PENDING REQUEST', 18],
+  ['text.lastRequest', 'LAST REQUEST', 12],
+  ['text.cancel', '<CANCEL', 7],
+  ['text.send', 'SEND*', 5],
+  ['text.sending', 'SENDING', 7],
+  ['text.return', '<RETURN', 7],
+  ['text.resultTitle', 'CLEARANCE', 9],
+  ['text.marker', 'SIMULATED CLEARANCE', 19],
+  ['text.notReal', 'NOT FOR REAL WORLD USE', 22],
+  ['text.alreadyIssued', 'ALREADY ISSUED', 14],
+  ['text.unknownIcao', '----', 4],
+  ['text.initialAlt', 'INITIAL ALT', 11],
+  ['text.squawk', 'SQUAWK', 6],
+  ['text.clearedVia', 'CLEARED VIA', 11],
+  ['text.noRoute', 'NO ROUTE ON FILE', 16],
+  ['text.noResult', 'NO CLEARANCE RECEIVED', 21],
+  ['text.messages', 'MESSAGES>', 9],
+  ['text.noAltitude', '-----', 5],
+  ['text.leg', 'LEG 9007199254740991', 20],
+  ['text.pair', 'ABCDEFGH TO ABCDEFGH', 20],
+  ['text.altitudeFt', '17999FT', 7],
+  ['text.altitudeFl', 'FL1000', 6],
+  ['text.squawkValue', '7777', 4],
+  ['advisory.created', 'CLEARANCE RECEIVED', 18],
+  ['advisory.onFile', 'CLEARANCE ON FILE', 17],
+  ['hint.unknown', 'SAFE TO REQUEST AGAIN', 21],
+  ['error.leg-not-found', 'PLANNED LEG NOT FOUND', 21],
+  ['error.clearance-no-flight-plan', 'NO DISPATCH RELEASE ON FILE', 27],
+  ['hint.clearance-no-flight-plan', 'IMPORT THE PLAN FROM SIMBRIEF', 29],
+  ['error.clearance-unavailable', 'CLEARANCE UNAVAILABLE', 21],
+  ['hint.clearance-unavailable', 'SERVER UPDATE NEEDED', 20],
+  ['error.token-invalid', 'INGEST TOKEN REJECTED', 21],
+  ['hint.token-invalid', 'CHECK INGEST TOKEN ON CFG NETWORK', 33],
+  ['error.token-missing', 'CLEARANCE TOKEN NOT RECEIVED', 28],
+  ['hint.token-missing', 'TOKEN HEADER LOST IN TRANSIT', 28],
+  ['error.rejected', 'CLEARANCE REJECTED 403', 22],
+  ['error.http-error', 'CLEARANCE FAULT 599', 19],
+  ['error.bad-response', 'CLEARANCE BAD DATA', 18],
+  ['error.too-large', 'CLEARANCE BAD DATA', 18],
+  ['error.unreachable', 'CLEARANCE NO COMM', 17],
+  ['error.tls-error', 'CLEARANCE CERT FAULT', 20],
+  ['hint.tls-error', 'CHECK CERTIFICATE PATH', 22],
+  ['error.timeout', 'CLEARANCE RESULT UNKNOWN', 24],
+  ['error.shell-timeout', 'CLEARANCE RESULT UNKNOWN', 24],
+  ['error.no-config', 'DATALINK NO CONFIG', 18],
+  ['hint.no-config', 'COMPLETE CFG NETWORK', 20],
+  ['error.bad-request', 'INVALID ENTRY', 13],
+  ['error.clearance-in-progress', 'CLEARANCE IN PROGRESS', 21],
+  ['error.busy', 'DATALINK BUSY', 13],
+  ['error.sidecar-exited', 'DATALINK OFFLINE', 16],
+  ['error.sidecar-unavailable', 'DATALINK OFFLINE', 16],
+  ['error.sidecar-outdated', 'SIDECAR UPDATE REQUIRED', 23],
+  ['hint.sidecar-outdated', 'REBUILD SIDECAR THEN RESTART APP', 32],
+  ['error.host-unsupported', 'CLEARANCE NOT SUPPORTED', 23],
+  ['error.host-error', 'CLEARANCE HOST FAULT', 20],
+  ['error.unknown', 'CLEARANCE FAULT', 15],
+];
+const CELL_MAX = 48;
+const ROW_MAX = 47;
+
+/** One cell within 48 columns, and two cells sharing a row within 47. */
+function assertClearanceWidths(screen, where) {
+  for (const line of screen) {
+    for (const cell of line) assert.ok(cell.length <= CELL_MAX, `${where}: ${JSON.stringify(cell)}`);
+    if (line.length === 2) assert.ok(line[0].length + line[1].length <= ROW_MAX, `${where}: ${JSON.stringify(line)}`);
+  }
+}
+
+const importBridgeWith = async (window, tag) => {
+  globalThis.window = window;
+  try {
+    return (await import(new URL(`../../ui/src/bridge.js?${tag}`, import.meta.url))).default;
+  } finally {
+    delete globalThis.window;
+  }
+};
+
+/** Put a datalink state on screen as if the shell had just received it. */
+function showState(ui, state) {
+  ui.shell.datalink = state;
+  const page = ui.pages.get(ui.shell.id);
+  if (page && page.onDatalink) page.onDatalink(state);
+}
+
+/** `ui.shell.datalink` with its scope and held prefiled leg replaced. */
+function withScope(ui, scope, heldLegId = null, changes = {}) {
+  const { prefiledLeg, ...rest } = ui.shell.datalink;
+  const state = { ...rest, scope, ...changes };
+  if (heldLegId !== null) state.prefiledLeg = { plannedLegId: heldLegId, label: SAMPLE_LABEL };
+  return state;
+}
+
+test('clearance mock: requestClearance answers every scenario with the host contract shape', async () => {
+  const { host, gaugeDev } = await loadMock();
+  assert.equal(typeof host.requestClearance, 'function');
+  assert.equal(CLEARANCE_SCENARIOS.length, 28);
+  assert.throws(() => gaugeDev.clearanceScenario('nope'), { message: 'Unknown clearance scenario: nope' });
+  assert.throws(() => gaugeDev.clearanceScenario('_default'), { message: 'Unknown clearance scenario: _default' });
+  assert.deepEqual([gaugeDev.setClearanceDelay('x'), gaugeDev.setClearanceDelay(-5), gaugeDev.setClearanceDelay(0)], [0, 0, 0]);
+
+  // Default scenario: created.
+  gaugeDev.datalinkScenario('flight');
+  assert.deepEqual(plain(await host.requestClearance({ plannedLegId: 77 })), { ok: true, result: { ...CLEARANCE_OK.created, plannedLegId: 77 } });
+
+  for (const name of CLEARANCE_SCENARIOS) {
+    gaugeDev.datalinkScenario('flight');
+    const before = withoutClock(await host.getDatalinkState());
+    const callsBefore = callsOf(gaugeDev, 'requestClearance').length;
+    assert.equal(gaugeDev.clearanceScenario(name), name);
+    if (name === 'host-error') {
+      await assert.rejects(host.requestClearance({ plannedLegId: 77 }), { message: 'mock host fault' });
+    } else {
+      const response = plain(await host.requestClearance({ plannedLegId: 77 }));
+      if (CLEARANCE_OK[name]) {
+        assert.deepEqual(Object.keys(response.result).sort(), CLEARANCE_RESULT_KEYS, name);
+        assert.deepEqual(response, { ok: true, result: { ...CLEARANCE_OK[name], plannedLegId: 77 } }, name);
+      } else {
+        const [code, httpStatus, serverCode] = CLEARANCE_ERRORS[name];
+        if (name === 'leg-not-found' || name === 'no-flight-plan') {
+          assert.ok(response.error.serverError.startsWith(SERVER_TEXT_SENTINEL), name);
+          delete response.error.serverError;
+        }
+        assert.deepEqual(response, { ok: false, error: { code, httpStatus, serverCode } }, name);
+      }
+    }
+    const calls = callsOf(gaugeDev, 'requestClearance');
+    assert.equal(calls.length, callsBefore + 1, name);
+    assert.deepEqual(Object.keys(calls.at(-1)).sort(), ['args', 'at', 'method']);
+    assert.deepEqual(calls.at(-1).args, [{ plannedLegId: 77 }], name);
+    // Leg 77 is not the thread's leg, so only the token latch may change anything.
+    const after = withoutClock(await host.getDatalinkState());
+    if (name === 'invalid-token') assert.deepEqual([after.state, after.scope, after.thread], ['dl.token-invalid', null, null]);
+    else assert.deepEqual(after, before, name);
+  }
+
+  // The token latch happens once per selection, and drops a held prefiled leg.
+  gaugeDev.datalinkScenario('leg');
+  gaugeDev.simbriefScenario('prefiled');
+  gaugeDev.clearanceScenario('invalid-token');
+  assert.equal(plain(await host.requestClearance({ plannedLegId: 4812 })).error.code, 'token-invalid');
+  let state = plain(await host.getDatalinkState());
+  assert.deepEqual([state.state, 'prefiledLeg' in state, state.scope], ['dl.token-invalid', false, null]);
+  gaugeDev.datalinkScenario('leg');
+  await host.requestClearance({ plannedLegId: 12 });
+  assert.equal(plain(await host.getDatalinkState()).state, 'dl.ok');
+
+  // Not found drops the held leg only when it is the leg asked for.
+  gaugeDev.datalinkScenario('leg');
+  gaugeDev.simbriefScenario('prefiled');
+  gaugeDev.clearanceScenario('leg-not-found');
+  await host.requestClearance({ plannedLegId: 12 });
+  assert.equal(plain(await host.getDatalinkState()).prefiledLeg.plannedLegId, 4812);
+  await host.requestClearance({ plannedLegId: 4812 });
+  state = plain(await host.getDatalinkState());
+  assert.deepEqual(['prefiledLeg' in state, state.scope], [false, LEG]);
+
+  // Malformed requests are refused and still recorded.
+  gaugeDev.clearanceScenario('created');
+  const malformed = [undefined, null, {}, [], 'x', { plannedLegId: 0 }, { plannedLegId: '12' }, { plannedLegId: 12.5 }, { plannedLegId: 2 ** 53 }];
+  for (const req of malformed) {
+    assert.deepEqual(plain(await host.requestClearance(req)), localError('bad-request'), JSON.stringify(req));
+  }
+
+  // The first clearance for the thread's leg adds the request and the PDC reply, once.
+  gaugeDev.datalinkScenario('leg');
+  const epoch = plain(await host.getDatalinkState()).thread.epoch;
+  const heard = [];
+  host.onDatalink((next) => heard.push(plain(next)));
+  await host.requestClearance({ plannedLegId: 12 });
+  const thread = [...(await readWholeThread(host, epoch, 5)).values()];
+  assert.deepEqual(thread.slice(3).map((m) => [m.seq, m.direction, m.category, m.label, m.correlationId]), [
+    [3, 'downlink', 'pdc', 'REQUEST CLEARANCE', null], [4, 'uplink', 'pdc', 'PDC', thread[3].id],
+  ]);
+  assert.equal(thread[3].body, 'REQUEST CLEARANCE');
+  assert.equal(thread[4].body, ['PDC', 'KJFK TO EGLL', `CLEARED VIA ${SHORT_ROUTE}`, 'CLIMB AND MAINTAIN 5000FT', 'SQUAWK 4521',
+    'SIMULATED CLEARANCE - NOT FOR REAL WORLD USE'].join('\n'));
+  assert.equal(heard.length, 1);
+  await host.requestClearance({ plannedLegId: 12 });
+  await host.requestClearance({ plannedLegId: 77 });
+  assert.deepEqual([plain(await host.getDatalinkState()).thread.total, heard.length], [5, 1]);
+
+  gaugeDev.setClearanceDelay(40);
+  const started = Date.now();
+  await host.requestClearance({ plannedLegId: 77 });
+  assert.ok(Date.now() - started >= 30);
+  gaugeDev.setClearanceDelay(0);
+
+  // The preview offers every scenario and applies the selection on change and on load.
+  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const select = /<label>Clearance <select id="clearance-scenario">([\s\S]*?)<\/select><\/label>/.exec(html);
+  assert.ok(select);
+  assert.deepEqual([...select[1].matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]).sort(), [...CLEARANCE_SCENARIOS].sort());
+  const preview = await readFile(new URL('./preview.js', import.meta.url), 'utf8');
+  assert.match(preview, /getElementById\('clearance-scenario'\)/);
+  assert.match(preview, /gaugeDev\.clearanceScenario\(clearanceScenario\.value\)/);
+  assert.match(preview, /frame\.addEventListener\('load', applyClearanceScenario\)/);
+  assert.match(preview, /clearanceScenario\.addEventListener\('change', applyClearanceScenario\)/);
+});
+
+test('clearance vocab: the target-leg table, altitude and route rules, and every string within the column bound', async () => {
+  const vocab = await pageModule('clearance-vocab.js');
+  const { loadsheetLeg } = await pageModule('datalink-vocab.js');
+  const { normaliseText } = await pageModule('datalink-text.js');
+  const st = (scope, heldId) => (heldId
+    ? { state: 'dl.ok', scope, prefiledLeg: { plannedLegId: heldId, label: SAMPLE_LABEL } }
+    : { state: 'dl.ok', scope });
+  const ground = (id, source = 'status') => ({ kind: 'leg', plannedLegId: id, source });
+  const prefile = (id) => ({ kind: 'leg', plannedLegId: id, source: 'prefile' });
+  const flight = (legId) => ({ kind: 'flight', flightId: 92, plannedLegId: legId });
+  const rows = [
+    ['T1', st(flight(12)), 12],
+    ['T2', st(flight(null)), 'NO LINKED LEG'],
+    ['T3', st(ground(12)), 12],
+    ['T4', st(ground(12, 'ground-session')), 12],
+    ['T5', st(prefile(4812), 4812), 4812],
+    ['T6', st({ kind: 'none' }, 4812), 'SCOPE UPDATE PENDING'],
+    ['T7', st(null, 4812), 'SCOPE UPDATE PENDING'],
+    ['T8', st(ground(12), 4812), 'SCOPE UPDATE PENDING'],
+    ['T8 fault', { state: 'dl.unreachable', scope: ground(12), prefiledLeg: { plannedLegId: 4812, label: SAMPLE_LABEL } }, 'SCOPE UPDATE PENDING'],
+    ['T9', st(prefile(4812), 4813), 'SCOPE UPDATE PENDING'],
+    ['T10', st(flight(12), 4812), 12],
+    ['T11', st(flight(null), 4812), 'NO LINKED LEG'],
+    ['T12', st(prefile(4812)), 'SCOPE UPDATE PENDING'],
+    ['T12 fault', { state: 'dl.timeout', scope: prefile(4812) }, 'SCOPE UPDATE PENDING'],
+    ['T13', st({ kind: 'none' }), 'NO FLIGHT PLAN'],
+    ['T14', { state: 'dl.idle', scope: null }, 'NO FLIGHT PLAN'],
+    ['T14 pending', { state: 'dl.pending', scope: null }, 'NO FLIGHT PLAN'],
+    ['T15', null, 'NO FLIGHT PLAN'],
+    ['T16', { state: 'dl.token-invalid', scope: ground(12) }, 'INGEST TOKEN REJECTED'],
+    ['T17', { state: 'dl.no-config', scope: ground(12) }, 'DATALINK NO CONFIG'],
+    ['T18', { state: 'dl.unavailable', scope: null }, 'NO FLIGHT PLAN'],
+    ['T19', { state: 'dl.unreachable', scope: ground(12) }, 12],
+    ['T19 timeout', { state: 'dl.timeout', scope: ground(12) }, 12],
+    ['T20', { state: 'dl.sidecar-outdated', scope: null }, 'NO FLIGHT PLAN'],
+    ['T20 unavailable', { state: 'dl.sidecar-unavailable', scope: null }, 'NO FLIGHT PLAN'],
+    ['T21', { state: 'dl.ok', scope: ground(12), prefiledLeg: { plannedLegId: 4812 } }, 12],
+    ['T22', st(ground(0)), 'NO FLIGHT PLAN'],
+    ['T23', st({ kind: 'airport', plannedLegId: 12 }), 'NO FLIGHT PLAN'],
+  ];
+  // Where the clearance rule refuses a leg the load sheet rule would take, or says why differently.
+  const differs = new Set(['T6', 'T7', 'T8', 'T8 fault', 'T9', 'T12', 'T12 fault', 'T16', 'T17', 'T22']);
+  for (const [id, state, expected] of rows) {
+    const got = vocab.clearanceLeg(state);
+    assert.deepEqual(got, typeof expected === 'number' ? { ok: true, plannedLegId: expected } : { ok: false, text: expected }, id);
+    const sheet = loadsheetLeg(state ? state.scope : null);
+    assert.equal(JSON.stringify(sheet) === JSON.stringify(got), !differs.has(id), `${id} against loadsheetLeg`);
+  }
+  assert.deepEqual(vocab.clearanceLeg('dl.ok'), { ok: false, text: 'NO FLIGHT PLAN' });
+
+  for (const [ft, text] of [[0, '0FT'], [4500, '4500FT'], [5000, '5000FT'], [17999, '17999FT'], [18000, 'FL180'], [18049, 'FL180'],
+    [18050, 'FL181'], [35000, 'FL350'], [99999, 'FL1000'], [-1, '-----'], [4500.5, '-----'], ['5000', '-----'], [null, '-----'], [NaN, '-----']]) {
+    assert.equal(vocab.formatAltitude(ft), text, String(ft));
+  }
+  assert.equal(vocab.formatPair(clearanceResult()), 'KJFK TO EGLL');
+  assert.equal(vocab.formatPair(clearanceResult({ departure: null, destination: '' })), '---- TO ----');
+
+  for (const [route, pages] of [[SHORT_ROUTE, 1], [routeOfLength(1200), 4], [routeOfLength(4096), 11], ['X'.repeat(200), 1], ['GREKI DCT\r\nMARTN\tDCT', 1]]) {
+    const m = vocab.routePageCount(route);
+    assert.equal(m, pages, `${route.length} characters`);
+    let rejoined = '';
+    for (let p = 1; p <= m; p += 1) {
+      const lines = vocab.routeLinesOnPage(route, p);
+      assert.ok(lines.length > 0 && lines.length <= (p === 1 ? 5 : 9), `${route.length} page ${p}`);
+      for (const line of lines) {
+        assert.ok(line.text.length <= CELL_MAX);
+        rejoined += line.text + line.join;
+      }
+    }
+    assert.equal(rejoined, normaliseText(route), `${route.length} characters reassemble`);
+    assert.deepEqual(vocab.routeLines(route), Array.from({ length: m }, (_, i) => vocab.routeLinesOnPage(route, i + 1)).flat());
+  }
+  assert.equal(routeOfLength(4096).length, 4096);
+  assert.equal(vocab.routePageCount(null), 1);
+
+  for (const [name, [code, httpStatus, serverCode, text, hint]] of Object.entries(CLEARANCE_ERRORS)) {
+    const error = { code, httpStatus, serverCode, serverError: SERVER_TEXT_SENTINEL, message: SERVER_TEXT_SENTINEL };
+    assert.deepEqual([vocab.errorText(error), vocab.errorHint(error)], [text, hint], name);
+    assert.equal(vocab.isUnknownOutcome(code), hint === 'SAFE TO REQUEST AGAIN', name);
+  }
+  for (const status of [99, 600, null, '500', 500.5]) {
+    assert.equal(vocab.errorText({ code: 'http-error', httpStatus: status }), 'CLEARANCE FAULT', String(status));
+  }
+  assert.equal(vocab.errorText({ code: 'http-error', httpStatus: 599 }), 'CLEARANCE FAULT 599');
+  assert.deepEqual([vocab.errorText(undefined), vocab.errorHint(undefined)], ['CLEARANCE HOST FAULT', 'SAFE TO REQUEST AGAIN']);
+  for (const malformed of [{}, [], { code: 7 }, { code: null }, { httpStatus: 500 }, 'text']) {
+    assert.deepEqual([vocab.errorText(malformed), vocab.errorHint(malformed)], ['CLEARANCE HOST FAULT', 'SAFE TO REQUEST AGAIN'], JSON.stringify(malformed));
+  }
+  assert.deepEqual([vocab.errorText({ code: 'some-future-code' }), vocab.errorHint({ code: 'some-future-code' })], ['CLEARANCE FAULT', 'SAFE TO REQUEST AGAIN']);
+  assert.deepEqual([vocab.errorText({ code: 'toString' }), vocab.errorText({ code: 'bad-request' }), vocab.errorHint({ code: 'bad-request' })],
+    ['CLEARANCE FAULT', 'INVALID ENTRY', '']);
+
+  const good = clearanceResult();
+  assert.equal(vocab.isClearanceResult(good, 12), true);
+  for (const [what, result, id] of [
+    ['other leg', good, 13], ['null', null, 12], ['array', [good], 12], ['created string', { ...good, created: 'true' }, 12],
+    ['squawk 8', { ...good, squawk: '4581' }, 12], ['squawk short', { ...good, squawk: '452' }, 12], ['squawk number', { ...good, squawk: 4521 }, 12],
+    ['altitude negative', { ...good, initialAltitudeFt: -1 }, 12], ['altitude over', { ...good, initialAltitudeFt: 100000 }, 12],
+    ['altitude fraction', { ...good, initialAltitudeFt: 5000.5 }, 12], ['icao 9', { ...good, departure: 'ABCDEFGHI' }, 12],
+    ['icao number', { ...good, destination: 7 }, 12], ['route over', { ...good, route: 'X'.repeat(4097) }, 12], ['route missing', { ...good, route: undefined }, 12],
+  ]) assert.equal(vocab.isClearanceResult(result, id), false, what);
+  for (const result of [{ ...good, route: routeOfLength(4096) }, { ...good, departure: null, destination: null, route: null }, { ...good, initialAltitudeFt: 99999, squawk: '0000' }]) {
+    assert.equal(vocab.isClearanceResult(result, 12), true);
+  }
+
+  // The string table is the whole vocabulary: nothing in it is too wide, and nothing outside it is shown.
+  assert.equal(CLEARANCE_STRINGS.length, 67);
+  for (const [id, text, columns] of CLEARANCE_STRINGS) {
+    assert.equal(text.length, columns, id);
+    assert.ok(text.length <= CELL_MAX, id);
+  }
+  const table = new Set(CLEARANCE_STRINGS.map(([, text]) => text));
+  const produced = new Set([
+    ...Object.values(vocab.REFUSAL), ...Object.values(vocab.TEXT), ...Object.values(vocab.ADVISORY),
+    ...Object.values(vocab.ERRORS).flatMap((entry) => [entry.text, entry.hint]).filter(Boolean),
+    vocab.SAFE_TO_REQUEST_AGAIN, vocab.UNKNOWN_CODE_TEXT,
+    vocab.formatLeg(Number.MAX_SAFE_INTEGER), vocab.formatPair({ departure: 'ABCDEFGH', destination: 'ABCDEFGH' }),
+    vocab.formatAltitude(17999), vocab.formatAltitude(99999), '7777', vocab.errorText({ code: 'http-error', httpStatus: 599 }),
+  ]);
+  assert.deepEqual([...produced].filter((text) => !table.has(text)), []);
+  assert.deepEqual([...table].filter((text) => !produced.has(text)), []);
+  const T = vocab.TEXT;
+  const widestLeg = vocab.formatLeg(Number.MAX_SAFE_INTEGER);
+  for (const [where, left, right] of [
+    ['DL-INDEX row 10', String(Number.MAX_SAFE_INTEGER), T.indexPrompt],
+    ['result row 1', T.marker, widestLeg],
+    ['result row 2', vocab.formatPair({ departure: 'ABCDEFGH', destination: 'ABCDEFGH' }), T.alreadyIssued],
+    ['result row 3', T.initialAlt, T.squawk],
+    ['result row 4', vocab.formatAltitude(17999), '7777'],
+    ['result row 12', T.return, T.messages],
+    ['confirm row 12', T.cancel, T.send],
+    ['confirm row 12 sending', '', T.sending],
+    ['confirm row 12 no request', T.return, ''],
+  ]) assert.ok(left.length + right.length <= ROW_MAX, where);
+});
+
+test('clearance DL-INDEX: R5 CLEARANCE> joins row 10 and every other row keeps its text and place', async (t) => {
+  const bare = await mountDatalinkPages(t, 'clearance-unregistered');
+  await bare.scenario('leg');
+  bare.fmc.showPage('DL-INDEX');
+  await settle();
+  assert.deepEqual(bare.rows()[9], ['', 'CLEARANCE>']);
+  assert.equal(await bare.lsk('DL-INDEX', 'R5'), false, 'no action until the clearance pages register one');
+
+  const ui = await mountDatalinkPages(t, 'clearance-index', { clearance: true, fpln: true });
+  const { shell, fmc, gaugeDev, rows, pages } = ui;
+  assert.deepEqual([...pages.values()].map((page) => [page.id, page.title]).slice(8), [
+    ['DL-CLEARANCE-CONFIRM', 'REQUEST CLEARANCE'], ['DL-CLEARANCE', 'CLEARANCE'], ['FPLN', 'FLIGHT PLAN'], ['FPLN-CONFIRM', 'PREFILE SIMBRIEF'], ['FPLN-RESULT', 'PREFILE'],
+  ]);
+  await ui.scenario('leg');
+  fmc.showPage('DL-INDEX');
+  await settle();
+  const updated = () => rows()[0][1];
+  assert.match(updated(), /^UPD \d{4}Z$/);
+  assert.deepEqual(rows(), [
+    ['SCOPE', updated()], ['LEG 12'], ['DATALINK'], ['DATALINK ONLINE'], [''], ['<MESSAGES', 'WX REQUEST>'],
+    [''], ['<DOWNLINK', 'LOADSHEET>'], [''], ['', 'CLEARANCE>'], [''], ['<INDEX', 'REFRESH>'],
+  ]);
+  assert.equal(shell.view.children[9].children[1].className, 'cell-r prompt');
+
+  gaugeDev.simbriefScenario('prefiled');
+  await settle();
+  assert.deepEqual(rows(), [
+    ['SCOPE', updated()], ['PREFILE', 'CLR PREFILE>'], ['DATALINK'], ['DATALINK ONLINE'], [''], ['<MESSAGES', 'WX REQUEST>'],
+    [''], ['<DOWNLINK', 'LOADSHEET>'], ['PREFILED LEG'], ['4812', 'CLEARANCE>'], [''], ['<INDEX', 'REFRESH>'],
+  ]);
+
+  // A 16-digit prefiled id and the prompt share row 10 with a gap to spare.
+  const widest = Number.MAX_SAFE_INTEGER;
+  showState(ui, withScope(ui, { kind: 'leg', plannedLegId: widest, source: 'prefile' }, widest));
+  assert.deepEqual(rows()[9], ['9007199254740991', 'CLEARANCE>']);
+  assert.equal(rows()[9].join('').length, 26);
+  assertClearanceWidths(rows(), 'DL-INDEX 16-digit id');
+  assert.equal(pages.get('DL-INDEX').onLsk('R5', {}), true);
+  assert.deepEqual([shell.id, rows()[3]], ['DL-CLEARANCE-CONFIRM', ['LEG 9007199254740991']]);
+  assertClearanceWidths(rows(), 'confirm 16-digit id');
+  assert.equal(await ui.lsk('DL-CLEARANCE-CONFIRM', 'L6'), true);
+
+  // The prompts that were there before still do what they did.
+  await ui.scenario('leg');
+  for (const [key, id] of [['L3', 'DL-THREAD'], ['L4', 'DL-CANNED'], ['R3', 'DL-WX'], ['R4', 'DL-LOADSHEET'], ['L6', 'MENU']]) {
+    fmc.showPage('DL-INDEX');
+    await settle();
+    assert.equal(await ui.lsk('DL-INDEX', key), true, key);
+    assert.equal(shell.id, id, key);
+  }
+  assert.equal(callsOf(gaugeDev, 'requestClearance').length, 0);
+});
+
+test('clearance request: nothing asks for one but the confirm key, once per press, and the thread then holds the PDC pair', async (t) => {
+  const ui = await mountDatalinkPages(t, 'clearance-calls', { clearance: true });
+  const { shell, fmc, gaugeDev, rows, pages } = ui;
+  const clearances = () => callsOf(gaugeDev, 'requestClearance');
+  await ui.scenario('leg');
+  fmc.showPage('DL-INDEX');
+  await later(30);
+  assert.equal(clearances().length, 0, 'opening DL-INDEX');
+  assert.equal(await ui.lsk('DL-INDEX', 'R5'), true);
+  assert.deepEqual([shell.id, shell.title, shell.number, shell.scratchpad], ['DL-CLEARANCE-CONFIRM', 'REQUEST CLEARANCE', '', null]);
+  assert.deepEqual(rows(), [['CLEARANCE REQUEST'], ['SIMULATED PDC'], ['TO'], ['LEG 12'], [''], [''], [''], [''], [''], [''], [''], ['<CANCEL', 'SEND*']]);
+  await later(30);
+  assert.equal(clearances().length, 0, 'R5 only opens the confirm page');
+  assert.equal(await ui.lsk('DL-CLEARANCE-CONFIRM', 'L6'), true);
+  assert.deepEqual([shell.id, clearances().length], ['DL-INDEX', 0]);
+  fmc.showPage('DL-CLEARANCE-CONFIRM');
+  assert.deepEqual(rows(), [[''], ['NO PENDING REQUEST'], [''], [''], [''], [''], [''], [''], [''], [''], [''], ['<RETURN', '']]);
+  assert.equal(await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6'), false, 'nothing pending after CANCEL');
+  assert.equal(await ui.lsk('DL-CLEARANCE-CONFIRM', 'L6'), true);
+  fmc.showPage('DL-CLEARANCE');
+  assert.deepEqual([shell.title, rows()], ['CLEARANCE', [[''], ['NO CLEARANCE RECEIVED'], [''], [''], [''], [''], [''], [''], [''], [''], [''], ['<RETURN', '']]]);
+  assert.equal(await ui.lsk('DL-CLEARANCE', 'R6'), false);
+  assert.equal(await ui.lsk('DL-CLEARANCE', 'L6'), true);
+  assert.equal(clearances().length, 0);
+
+  // In flight: SEND again, CANCEL and R5 from DL-INDEX do nothing more.
+  await ui.lsk('DL-INDEX', 'R5');
+  gaugeDev.setClearanceDelay(50);
+  const confirm = pages.get('DL-CLEARANCE-CONFIRM');
+  assert.equal(confirm.onLsk('R6', {}), true);
+  assert.deepEqual([rows()[3], rows()[11]], [['LEG 12'], ['', 'SENDING']]);
+  assert.equal(confirm.onLsk('R6', {}), true);
+  assert.equal(confirm.onLsk('L6', {}), true);
+  await settle();
+  assert.deepEqual([shell.id, clearances().map((call) => call.args)], ['DL-CLEARANCE-CONFIRM', [[{ plannedLegId: 12 }]]]);
+  fmc.showPage('DL-INDEX');
+  await settle();
+  assert.equal(await ui.lsk('DL-INDEX', 'R5'), true);
+  assert.deepEqual([shell.id, rows()[3], rows()[11], clearances().length], ['DL-CLEARANCE-CONFIRM', ['LEG 12'], ['', 'SENDING'], 1]);
+  await later(100);
+  assert.deepEqual([shell.id, shell.title, shell.scratchpad, clearances().length], ['DL-CLEARANCE', 'CLEARANCE', ['CLEARANCE RECEIVED', 'advisory'], 1]);
+  gaugeDev.setClearanceDelay(0);
+
+  // The result, the thread and the message open without another request.
+  assert.deepEqual(rows()[0], ['SIMULATED CLEARANCE', 'LEG 12']);
+  assert.equal(await ui.lsk('DL-CLEARANCE', 'R6'), true);
+  assert.equal(shell.id, 'DL-THREAD');
+  assert.match(rows()[6][0], /^DN \d{4}Z REQUEST CLEARANCE$/);
+  assert.match(rows()[8][0], /^UP \d{4}Z PDC$/);
+  assert.deepEqual([rows()[7], rows()[9]], [['<REQUEST CLEARANCE'], ['<PDC']]);
+  assert.equal(await ui.lsk('DL-THREAD', 'L5'), true);
+  assert.equal(shell.id, 'DL-MSG');
+  const body = rows().slice(1, 11).map((line) => line[0]);
+  for (const line of ['PDC', 'KJFK TO EGLL', 'SQUAWK 4521', 'CLIMB AND MAINTAIN 5000FT', 'SIMULATED CLEARANCE - NOT FOR REAL WORLD USE']) {
+    assert.ok(body.includes(line), line);
+  }
+  await ui.lsk('DL-MSG', 'L6');
+  await ui.lsk('DL-THREAD', 'L6');
+  assert.equal(shell.id, 'DL-INDEX');
+  assert.equal(await ui.lsk('DL-INDEX', 'R5'), true);
+  assert.deepEqual([shell.id, rows()[0]], ['DL-CLEARANCE', ['SIMULATED CLEARANCE', 'LEG 12']], 'R5 reopens the kept clearance');
+  fmc.showPage('DL-THREAD');
+  fmc.showPage('DL-MSG');
+  fmc.showPage('DL-CLEARANCE');
+  fmc.showPage('DL-INDEX');
+  await later(100);
+  assert.equal(clearances().length, 1);
+});
+
+test('clearance errors: every reachable answer shows its text and hint, never the server text, and nothing is sent again', async (t) => {
+  const ui = await mountDatalinkPages(t, 'clearance-errors', { clearance: true });
+  const { shell, fmc, gaugeDev, rows } = ui;
+  const clearances = () => callsOf(gaugeDev, 'requestClearance').length;
+  const screens = [];
+  for (const [name, [, , , text, hint]] of Object.entries(CLEARANCE_ERRORS)) {
+    await ui.scenario('leg');
+    gaugeDev.clearanceScenario(name);
+    fmc.showPage('DL-INDEX');
+    await settle();
+    await ui.lsk('DL-INDEX', 'R5');
+    assert.equal(shell.id, 'DL-CLEARANCE-CONFIRM', name);
+    const before = clearances();
+    await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+    assert.deepEqual([shell.id, shell.scratchpad, clearances()], ['DL-INDEX', [text, 'error'], before + 1], name);
+    screens.push(rows(), shell.scratchpad);
+    await later(100);
+    assert.equal(clearances(), before + 1, `${name} is never sent again`);
+    if (name === 'invalid-token') {
+      // The latch comes back as the datalink state, and the rule then refuses locally.
+      assert.equal(rows()[3][0], 'INGEST TOKEN REJECTED');
+      assert.equal(await ui.lsk('DL-INDEX', 'R5'), true);
+      assert.deepEqual([shell.id, shell.scratchpad, clearances()], ['DL-INDEX', ['INGEST TOKEN REJECTED', 'error'], before + 1]);
+      await ui.scenario('leg');
+    }
+    await ui.lsk('DL-INDEX', 'R5');
+    assert.equal(shell.id, 'DL-CLEARANCE-CONFIRM', name);
+    assert.deepEqual(rows().slice(3, 9), [['LEG 12'], [''], [''], ['LAST REQUEST'], [text], [hint]], name);
+    assert.deepEqual(rows()[11], ['<CANCEL', 'SEND*']);
+    screens.push(rows());
+    await ui.lsk('DL-CLEARANCE-CONFIRM', 'L6');
+    assert.equal(clearances(), before + 1, name);
+  }
+
+  // Answers the mock never gives: a non-envelope, a rejected call, results that are not a clearance for the leg.
+  const odd = [
+    [async () => 'not an envelope', 'CLEARANCE HOST FAULT'],
+    [async () => { throw new Error('transport'); }, 'CLEARANCE HOST FAULT'],
+    [async () => ({ ok: true, result: clearanceResult({ plannedLegId: 13 }) }), 'CLEARANCE BAD DATA'],
+    [async () => ({ ok: true, result: clearanceResult({ squawk: '7800' }) }), 'CLEARANCE BAD DATA'],
+    [async () => ({ ok: true }), 'CLEARANCE BAD DATA'],
+    [async () => ({ ok: false, error: { code: 'http-error', httpStatus: 502, serverCode: null } }), 'CLEARANCE FAULT 502'],
+    [async () => ({ ok: false, error: 'text' }), 'CLEARANCE HOST FAULT'],
+    [async () => ({ ok: false, error: {} }), 'CLEARANCE HOST FAULT'],
+    [async () => ({ ok: false }), 'CLEARANCE HOST FAULT'],
+  ];
+  for (const [index, [override, text]] of odd.entries()) {
+    let asked = 0;
+    const other = await mountDatalinkPages(t, `clearance-odd-${index}`, { clearance: true, requestClearance: (req) => { asked += 1; return override(req); } });
+    await other.scenario('leg');
+    other.fmc.showPage('DL-INDEX');
+    await settle();
+    await other.lsk('DL-INDEX', 'R5');
+    await other.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+    assert.deepEqual([other.shell.id, other.shell.scratchpad], ['DL-INDEX', [text, 'error']], String(index));
+    await other.lsk('DL-INDEX', 'R5');
+    assert.deepEqual(other.rows().slice(6, 9), [['LAST REQUEST'], [text], ['SAFE TO REQUEST AGAIN']], String(index));
+    screens.push(other.rows());
+    await later(50);
+    assert.equal(asked, 1, String(index));
+  }
+
+  for (const [index, screen] of screens.entries()) {
+    if (Array.isArray(screen[0])) assertClearanceWidths(screen, `screen ${index}`);
+  }
+  const shown = JSON.stringify(screens);
+  for (const hidden of [SERVER_TEXT_SENTINEL, 'PLANNED_LEG_NOT_FOUND', 'NO_FLIGHT_PLAN', 'INVALID_INGEST_TOKEN', 'CROSS_ORIGIN', 'some-future-code']) {
+    assert.equal(shown.includes(hidden), false, hidden);
+  }
+});
+
+test('clearance results: pair, route pages, altitude, squawk and markers as issued, and the PDC pair in the thread', async (t) => {
+  const line1 = 'GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI';
+  const line2 = 'UN514 NUMPO BOGNA1H';
+  const page1 = (pair, marker, altitude, route) => [
+    ['SIMULATED CLEARANCE', 'LEG 12'], [pair, marker], ['INITIAL ALT', 'SQUAWK'], [altitude, '4521'], ['CLEARED VIA'],
+    ...route, ['NOT FOR REAL WORLD USE'], ['<RETURN', 'MESSAGES>'],
+  ];
+  const shortRoute = [[line1], [line2], [''], [''], ['']];
+  const expected = {
+    created: [page1('KJFK TO EGLL', '', '5000FT', shortRoute), 'CLEARANCE RECEIVED'],
+    'not-created': [page1('KJFK TO EGLL', 'ALREADY ISSUED', '5000FT', shortRoute), 'CLEARANCE ON FILE'],
+    'null-route-and-icaos': [page1('---- TO ----', '', '5000FT', [['NO ROUTE ON FILE'], [''], [''], [''], ['']]), 'CLEARANCE RECEIVED'],
+    'fl-altitude': [page1('KJFK TO EGLL', '', 'FL180', shortRoute), 'CLEARANCE RECEIVED'],
+    'ft-altitude': [page1('KJFK TO EGLL', '', '4500FT', shortRoute), 'CLEARANCE RECEIVED'],
+  };
+  assert.equal(`${line1} ${line2}`, SHORT_ROUTE);
+  /** Every route line on every page, in order, with the blank rows after the last one dropped. */
+  const readRoute = (ui, pages) => {
+    const lines = [];
+    for (let p = 1; p <= pages; p += 1) {
+      assert.equal(ui.shell.number, pages > 1 ? `${p}/${pages}` : '');
+      const screen = ui.rows();
+      assertClearanceWidths(screen, `route page ${p}`);
+      assert.deepEqual([screen[0], screen[10], screen[11]], [['SIMULATED CLEARANCE', 'LEG 12'], ['NOT FOR REAL WORLD USE'], ['<RETURN', 'MESSAGES>']]);
+      lines.push(...(p === 1 ? screen.slice(5, 10) : screen.slice(1, 10)).map((line) => line[0]));
+      assert.equal(ui.pages.get('DL-CLEARANCE').onPageKey(1), true);
+    }
+    assert.equal(ui.shell.number, pages > 1 ? `1/${pages}` : '', 'NEXT wraps to page 1');
+    while (lines.length && lines.at(-1) === '') lines.pop();
+    return lines;
+  };
+
+  for (const name of Object.keys(CLEARANCE_OK)) {
+    const ui = await mountDatalinkPages(t, `clearance-result-${name}`, { clearance: true });
+    const { shell, fmc, gaugeDev, rows, pages } = ui;
+    await ui.scenario('leg');
+    gaugeDev.clearanceScenario(name);
+    fmc.showPage('DL-INDEX');
+    await settle();
+    await ui.lsk('DL-INDEX', 'R5');
+    await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+    assert.equal(shell.id, 'DL-CLEARANCE', name);
+    assertClearanceWidths(rows(), name);
+    assert.equal(rows().flat().includes('ALREADY ISSUED'), name === 'not-created', name);
+    assert.equal(rows().flat().includes('SIMULATED CLEARANCE'), true, name);
+    if (name === 'long-route') {
+      const route = CLEARANCE_OK[name].route;
+      assert.deepEqual(rows().slice(0, 5), [['SIMULATED CLEARANCE', 'LEG 12'], ['KJFK TO EGLL', ''], ['INITIAL ALT', 'SQUAWK'], ['5000FT', '4521'], ['CLEARED VIA']]);
+      assert.deepEqual(shell.scratchpad, ['CLEARANCE RECEIVED', 'advisory']);
+      const lines = readRoute(ui, 4);
+      assert.ok(lines.every((line) => line.length > 0 && line.length <= CELL_MAX));
+      assert.equal(lines.join(' '), route, 'every route character, in order');
+      assert.equal(pages.get('DL-CLEARANCE').onPageKey(-1), true);
+      assert.equal(shell.number, '4/4', 'PREV wraps to the last page');
+      assert.deepEqual(rows()[0], ['SIMULATED CLEARANCE', 'LEG 12']);
+    } else {
+      assert.deepEqual([rows(), shell.scratchpad, shell.number], [expected[name][0], [expected[name][1], 'advisory'], ''], name);
+      assert.equal(pages.get('DL-CLEARANCE').onPageKey(1), true);
+      assert.deepEqual(rows(), expected[name][0]);
+    }
+    assert.equal(await ui.lsk('DL-CLEARANCE', 'R6'), true);
+    assert.equal(shell.id, 'DL-THREAD', name);
+    assert.match(rows()[6][0], /^DN \d{4}Z REQUEST CLEARANCE$/, name);
+    assert.match(rows()[8][0], /^UP \d{4}Z PDC$/, name);
+    assert.equal(callsOf(gaugeDev, 'requestClearance').length, 1, name);
+  }
+
+  // The longest route the sidecar passes on pages to eleven screens with nothing lost.
+  const longest = routeOfLength(4096);
+  const ui = await mountDatalinkPages(t, 'clearance-result-4096', {
+    clearance: true,
+    requestClearance: async (req) => ({ ok: true, result: clearanceResult({ plannedLegId: req.plannedLegId, route: longest, created: false, httpStatus: 200, departure: 'ABCDEFGH', destination: 'ABCDEFGH' }) }),
+  });
+  await ui.scenario('leg');
+  ui.fmc.showPage('DL-INDEX');
+  await settle();
+  await ui.lsk('DL-INDEX', 'R5');
+  await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+  assert.deepEqual([ui.shell.id, ui.rows()[1], ui.shell.scratchpad], ['DL-CLEARANCE', ['ABCDEFGH TO ABCDEFGH', 'ALREADY ISSUED'], ['CLEARANCE ON FILE', 'advisory']]);
+  assert.equal(readRoute(ui, 11).join(' '), longest);
+});
+
+test('clearance refusals: each refusing scope shows its text on DL-INDEX and asks the host for nothing', async (t) => {
+  const ui = await mountDatalinkPages(t, 'clearance-refusals', { clearance: true, fpln: true });
+  const { shell, fmc, gaugeDev, pages } = ui;
+  const press = (text, where) => {
+    shell.scratchpad = null;
+    assert.equal(pages.get('DL-INDEX').onLsk('R5', {}), true, where);
+    assert.deepEqual([shell.id, shell.scratchpad], ['DL-INDEX', [text, 'error']], where);
+  };
+  fmc.showPage('DL-INDEX');
+  await settle();
+
+  // Through the mock.
+  await ui.scenario('no-flight-plan');
+  press('NO FLIGHT PLAN', 'T13 scope none');
+  await ui.scenario('invalid-token');
+  press('INGEST TOKEN REJECTED', 'T16 token latched');
+  await ui.scenario('unreachable');
+  gaugeDev.simbriefScenario('prefiled');
+  await settle();
+  assert.deepEqual([shell.datalink.scope, shell.datalink.prefiledLeg.plannedLegId], [null, 4812]);
+  press('SCOPE UPDATE PENDING', 'T7 a held leg the faulted datalink has not applied');
+  await ui.scenario('sidecar-outdated');
+  press('NO FLIGHT PLAN', 'T20 sidecar outdated');
+
+  // States the mock cannot publish, put on screen directly.
+  await ui.scenario('leg');
+  const flight = (legId) => ({ kind: 'flight', flightId: 92, plannedLegId: legId });
+  for (const [where, state, text] of [
+    ['T2 flight without a linked leg', withScope(ui, flight(null)), 'NO LINKED LEG'],
+    ['T6 held leg, scope none', withScope(ui, { kind: 'none' }, 4812), 'SCOPE UPDATE PENDING'],
+    ['T8 held leg, ground scope', withScope(ui, { kind: 'leg', plannedLegId: 12, source: 'status' }, 4812), 'SCOPE UPDATE PENDING'],
+    ['T9 new prefile held', withScope(ui, { kind: 'leg', plannedLegId: 4812, source: 'prefile' }, 4813), 'SCOPE UPDATE PENDING'],
+    ['T11 flight without a leg, held leg', withScope(ui, flight(null), 4812), 'NO LINKED LEG'],
+    ['T12 prefile scope, nothing held', withScope(ui, { kind: 'leg', plannedLegId: 4812, source: 'prefile' }), 'SCOPE UPDATE PENDING'],
+    ['T17 no config', withScope(ui, { kind: 'leg', plannedLegId: 12, source: 'status' }, null, { state: 'dl.no-config' }), 'DATALINK NO CONFIG'],
+    ['T22 leg 0', withScope(ui, { kind: 'leg', plannedLegId: 0, source: 'status' }), 'NO FLIGHT PLAN'],
+    ['T23 unknown kind', withScope(ui, { kind: 'airport', plannedLegId: 12 }), 'NO FLIGHT PLAN'],
+  ]) {
+    showState(ui, state);
+    press(text, where);
+  }
+  await later(50);
+  assert.equal(callsOf(gaugeDev, 'requestClearance').length, 0);
+});
+
+test('clearance stale target: the confirm key checks the shown leg against the rule again and never sends another', async (t) => {
+  const flight = (flightId, legId) => ({ kind: 'flight', flightId, plannedLegId: legId });
+  const groundSetup = async (ui) => { await ui.scenario('leg'); };
+  const prefileSetup = async (ui) => {
+    await ui.scenario('leg');
+    ui.gaugeDev.simbriefScenario('prefiled');
+    await settle();
+  };
+  const cases = [
+    ['C-a prefile cleared, scope null', prefileSetup, 'LEG 4812', async (ui) => showState(ui, withScope(ui, null)), 'NO FLIGHT PLAN'],
+    ['prefile cleared back to the ground leg', prefileSetup, 'LEG 4812', async (ui) => { await ui.host.clearPrefiledLeg(); await settle(); }, 'CLEARANCE LEG CHANGED'],
+    ['prefile cleared with no ground leg', async (ui) => { await ui.scenario('no-flight-plan'); ui.gaugeDev.simbriefScenario('prefiled'); await settle(); },
+      'LEG 4812', async (ui) => { await ui.host.clearPrefiledLeg(); await settle(); }, 'NO FLIGHT PLAN'],
+    ['flight starts over a prefiled leg', prefileSetup, 'LEG 4812', async (ui) => { ui.gaugeDev.datalinkScenario('flight'); await settle(); }, 'CLEARANCE LEG CHANGED'],
+    ['C-b flight starts, linked leg 77', groundSetup, 'LEG 12', async (ui) => showState(ui, withScope(ui, flight(93, 77))), 'CLEARANCE LEG CHANGED'],
+    ['C-c flight starts, same linked leg', groundSetup, 'LEG 12', async (ui) => { ui.gaugeDev.datalinkScenario('flight'); await settle(); }, 12],
+    ['C-d flight starts without a linked leg', prefileSetup, 'LEG 4812', async (ui) => showState(ui, withScope(ui, flight(93, null))), 'NO LINKED LEG'],
+    ['C-e scope becomes none', groundSetup, 'LEG 12', async (ui) => { ui.gaugeDev.datalinkScenario('no-flight-plan'); await settle(); }, 'NO FLIGHT PLAN'],
+    ['C-f token latch', prefileSetup, 'LEG 4812', async (ui) => { ui.gaugeDev.datalinkScenario('invalid-token'); await settle(); }, 'INGEST TOKEN REJECTED'],
+    ['C-g new prefile held, not applied', prefileSetup, 'LEG 4812',
+      async (ui) => showState(ui, withScope(ui, { kind: 'leg', plannedLegId: 4812, source: 'prefile' }, 4813)), 'SCOPE UPDATE PENDING'],
+    ['C-h prefile applied over the ground leg', groundSetup, 'LEG 12',
+      async (ui) => { ui.gaugeDev.simbriefScenario('prefiled'); await settle(); }, 'CLEARANCE LEG CHANGED'],
+    ['C-i no change', prefileSetup, 'LEG 4812', async () => {}, 4812],
+    ['C-j status failing, scope kept', groundSetup, 'LEG 12',
+      async (ui) => showState(ui, withScope(ui, ui.shell.datalink.scope, null, { state: 'dl.unreachable' })), 12],
+  ];
+  const { clearanceLeg } = await pageModule('clearance-vocab.js');
+  for (const [index, [what, setup, shown, change, outcome]] of cases.entries()) {
+    const ui = await mountDatalinkPages(t, `clearance-stale-${index}`, { clearance: true, fpln: true });
+    await setup(ui);
+    ui.fmc.showPage('DL-INDEX');
+    await settle();
+    assert.equal(await ui.lsk('DL-INDEX', 'R5'), true, what);
+    assert.deepEqual([ui.shell.id, ui.rows()[3]], ['DL-CLEARANCE-CONFIRM', [shown]], what);
+    await change(ui);
+    assert.deepEqual([ui.shell.id, ui.rows()[3]], ['DL-CLEARANCE-CONFIRM', [shown]], `${what}: the shown leg does not follow the scope`);
+    const rule = clearanceLeg(ui.shell.datalink);
+    assert.equal(ui.pages.get('DL-CLEARANCE-CONFIRM').onLsk('R6', {}), true, what);
+    await later(20);
+    const sent = callsOf(ui.gaugeDev, 'requestClearance').map((call) => call.args);
+    if (typeof outcome === 'number') {
+      assert.deepEqual(sent, [[{ plannedLegId: outcome }]], what);
+      assert.deepEqual([shown, rule], [`LEG ${outcome}`, { ok: true, plannedLegId: outcome }], `${what}: sent leg is shown and current`);
+      assert.equal(ui.shell.id, 'DL-CLEARANCE', what);
+    } else {
+      assert.deepEqual([sent, ui.shell.id, ui.shell.scratchpad], [[], 'DL-INDEX', [outcome, 'error']], what);
+      assert.equal(await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6'), false, `${what}: nothing left pending`);
+    }
+  }
+});
+
+test('clearance unavailable: the datalink state, DL-INDEX, the thread and the other DATALINK pages are unchanged', async (t) => {
+  const ui = await mountDatalinkPages(t, 'clearance-unavailable', { clearance: true });
+  const { shell, fmc, gaugeDev, host, rows } = ui;
+  await ui.scenario('leg');
+  gaugeDev.clearanceScenario('unavailable');
+  fmc.showPage('DL-INDEX');
+  await settle();
+  const index = () => [rows()[0][0], ...rows().slice(1)];
+  const indexBefore = index();
+  const stateBefore = withoutClock(await host.getDatalinkState());
+  await ui.lsk('DL-INDEX', 'L3');
+  const threadBefore = rows();
+  await ui.lsk('DL-THREAD', 'L6');
+
+  await ui.lsk('DL-INDEX', 'R5');
+  await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+  await later(30);
+  assert.deepEqual([shell.id, shell.scratchpad], ['DL-INDEX', ['CLEARANCE UNAVAILABLE', 'error']]);
+  assert.deepEqual(index(), indexBefore);
+  assert.deepEqual(withoutClock(await host.getDatalinkState()), stateBefore);
+  assert.equal(rows()[3][0], 'DATALINK ONLINE');
+  await ui.lsk('DL-INDEX', 'L3');
+  assert.deepEqual([shell.id, rows()], ['DL-THREAD', threadBefore]);
+  for (const [key, id] of [['L3', 'DL-THREAD'], ['R3', 'DL-WX'], ['R4', 'DL-LOADSHEET'], ['L4', 'DL-CANNED']]) {
+    fmc.showPage('DL-INDEX');
+    await settle();
+    assert.equal(await ui.lsk('DL-INDEX', key), true, key);
+    assert.deepEqual([shell.id, shell.scratchpad], [id, null], key);
+  }
+  assert.deepEqual(rows()[1], ['<WX REQUEST']);
+  assert.equal(callsOf(gaugeDev, 'requestClearance').length, 1);
+});
+
+test('clearance on an older host: still adopted, the clearance says NOT SUPPORTED, and DATALINK and FPLN work as before', async (t) => {
+  const legacy = { hostLabel: 'LEGACY' };
+  for (const name of ['getConfig', 'setConfig', 'getConfigPath', 'startUplink', 'stopUplink', 'restartSidecar', 'getStatus', 'onStatus', 'onLog', 'onExit']) {
+    legacy[name] = async () => null;
+  }
+  const bare = await importBridgeWith({ __FMC_HOST__: legacy }, 'clearance-legacy');
+  assert.equal(bare.hostLabel, 'LEGACY');
+  assert.deepEqual(await bare.requestClearance({ plannedLegId: 12 }), localError('host-unsupported'));
+
+  // A host that has it gets the leg id and nothing else.
+  const seen = [];
+  const modern = { ...legacy, hostLabel: 'MODERN', requestClearance: async (...args) => { seen.push(args); return { ok: true, result: {} }; } };
+  const adoptedModern = await importBridgeWith({ __FMC_HOST__: modern }, 'clearance-modern');
+  await adoptedModern.requestClearance({ plannedLegId: 12, ingestToken: CLEARANCE_SENTINEL, tripId: 3 });
+  await adoptedModern.requestClearance('12');
+  assert.deepEqual(plain(seen), [[{ plannedLegId: 12 }], [{}]]);
+  assert.deepEqual(Object.keys(seen[1][0]), ['plannedLegId']);
+
+  // Tauri: one command name, the leg id alone, and a malformed request never invoked.
+  const invoked = [];
+  const tauri = await importBridgeWith({ __TAURI__: { core: { invoke: async (cmd, args) => { invoked.push([cmd, args]); return { ok: true, result: {} }; } } } }, 'clearance-tauri');
+  await tauri.requestClearance({ plannedLegId: 12, ingestToken: CLEARANCE_SENTINEL });
+  for (const req of [undefined, null, {}, [], { plannedLegId: -1 }, { plannedLegId: '12' }, { plannedLegId: 1.5 }]) {
+    assert.deepEqual(await tauri.requestClearance(req), localError('bad-request'), JSON.stringify(req));
+  }
+  assert.deepEqual(invoked, [['datalink_clearance', { plannedLegId: 12 }]]);
+
+  // Stub: recorded, and unsupported until a result is set.
+  const stubWindow = {};
+  const stubBridge = await importBridgeWith(stubWindow, 'clearance-stub');
+  const stub = stubWindow.__FMC_STUB__;
+  assert.deepEqual(await stubBridge.requestClearance({ plannedLegId: 12 }), localError('host-unsupported'));
+  stub.datalinkResults.requestClearance = { ok: true, result: clearanceResult() };
+  assert.deepEqual(await stubBridge.requestClearance({ plannedLegId: 12 }), { ok: true, result: clearanceResult() });
+  assert.deepEqual(stub.calls.slice(-2).map((call) => [call.method, call.args]), [['requestClearance', [{ plannedLegId: 12 }]], ['requestClearance', [{ plannedLegId: 12 }]]]);
+
+  // The preview mock without the method, through the adopted host, on the pages.
+  const mock = await loadMock();
+  delete mock.host.requestClearance;
+  const adopted = await importBridgeWith({ __FMC_HOST__: mock.host }, 'clearance-old-mock');
+  assert.equal(adopted.hostLabel, 'GAUGE MOCK');
+  const ui = await mountDatalinkPages(t, 'clearance-old-host', { clearance: true, fpln: true, mock, via: adopted });
+  const { shell, fmc, rows } = ui;
+  await ui.scenario('leg');
+  fmc.showPage('DL-INDEX');
+  await settle();
+  const indexBefore = rows().slice(1);
+  await ui.lsk('DL-INDEX', 'R5');
+  assert.deepEqual([shell.id, rows()[3]], ['DL-CLEARANCE-CONFIRM', ['LEG 12']]);
+  await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+  assert.deepEqual([shell.id, shell.scratchpad, rows().slice(1)], ['DL-INDEX', ['CLEARANCE NOT SUPPORTED', 'error'], indexBefore]);
+  await ui.lsk('DL-INDEX', 'R5');
+  assert.deepEqual(rows().slice(6, 9), [['LAST REQUEST'], ['CLEARANCE NOT SUPPORTED'], ['']]);
+  await ui.lsk('DL-CLEARANCE-CONFIRM', 'L6');
+  assert.deepEqual([rows()[1], rows()[3], rows()[5], rows()[7], rows()[11]], [['LEG 12'], ['DATALINK ONLINE'], ['<MESSAGES', 'WX REQUEST>'], ['<DOWNLINK', 'LOADSHEET>'], ['<INDEX', 'REFRESH>']]);
+  await ui.lsk('DL-INDEX', 'L3');
+  assert.deepEqual([shell.id, rows()[0]], ['DL-THREAD', ['UP 1220Z DISPATCH RELEASE']]);
+  await ui.lsk('DL-THREAD', 'L6');
+  await ui.lsk('DL-INDEX', 'R4');
+  await ui.lsk('DL-LOADSHEET', 'R6');
+  await ui.lsk('DL-CONFIRM', 'R6');
+  assert.deepEqual([shell.id, shell.scratchpad], ['DL-LOADSHEET', ['LOADSHEET RECEIVED', 'advisory']]);
+  fmc.showPage('FPLN');
+  await settle();
+  assert.deepEqual([rows()[1], rows()[11]], [['CONFIGURED'], ['<MENU', 'PREFILE>']]);
+  await ui.lsk('FPLN', 'R6');
+  await ui.lsk('FPLN-CONFIRM', 'R6');
+  assert.deepEqual([shell.id, shell.scratchpad], ['FPLN-RESULT', ['SIMBRIEF PLAN PREFILED', 'advisory']]);
+  assert.equal(callsOf(mock.gaugeDev, 'requestClearance').length, 0);
+});
+
+test('clearance before START: the same text and the same calls whether the uplink is stopped or running', async (t) => {
+  const run = async (status) => {
+    const ui = await mountDatalinkPages(t, `clearance-${status}`, { clearance: true });
+    const { fmc, gaugeDev, rows, shell } = ui;
+    gaugeDev.scenario(status);
+    await ui.scenario('leg');
+    const screens = [];
+    const look = () => screens.push(shell.id, rows().map((line) => line.map((cell) => cell.replace(/^UPD \d{4}Z$/, 'UPD'))), shell.scratchpad);
+    fmc.showPage('DL-INDEX');
+    await settle();
+    look();
+    gaugeDev.clearanceScenario('unreachable');
+    await ui.lsk('DL-INDEX', 'R5');
+    look();
+    await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+    look();
+    gaugeDev.clearanceScenario('created');
+    await ui.lsk('DL-INDEX', 'R5');
+    look();
+    await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+    look();
+    await ui.lsk('DL-CLEARANCE', 'L6');
+    await ui.scenario('no-flight-plan');
+    await ui.lsk('DL-INDEX', 'R5');
+    look();
+    const calls = plain(gaugeDev.calls)
+      .filter((call) => ['requestClearance', 'startUplink', 'stopUplink', 'restartSidecar'].includes(call.method))
+      .map((call) => [call.method, call.args]);
+    return { screens, calls };
+  };
+  const stopped = await run('stopped');
+  const online = await run('online');
+  assert.deepEqual(stopped, online);
+  assert.deepEqual(stopped.calls, [['requestClearance', [{ plannedLegId: 12 }]], ['requestClearance', [{ plannedLegId: 12 }]]]);
+  assert.deepEqual(stopped.screens.slice(6, 9), ['DL-INDEX', stopped.screens[1], ['CLEARANCE NO COMM', 'error']]);
+  assert.deepEqual(stopped.screens.slice(12, 15).map((item, i) => (i === 1 ? item[0] : item)), ['DL-CLEARANCE', ['SIMULATED CLEARANCE', 'LEG 12'], ['CLEARANCE RECEIVED', 'advisory']]);
+  assert.deepEqual(stopped.screens.slice(15, 18).map((item, i) => (i === 1 ? item[1] : item)), ['DL-INDEX', ['NO FLIGHT PLAN'], ['NO FLIGHT PLAN', 'error']]);
+});
+
+test('clearance token sentinel never reaches a result, a state, a recorded call or the screen', async (t) => {
+  const { host, gaugeDev } = await loadMock();
+  const seen = [];
+  host.onDatalink((state) => seen.push(plain(state)));
+  await host.setConfig({ ingestToken: CLEARANCE_SENTINEL });
+  const adopted = await importBridgeWith({ __FMC_HOST__: host }, 'clearance-sentinel');
+  for (const datalink of ['leg', 'flight', 'no-flight-plan']) {
+    for (const name of CLEARANCE_SCENARIOS) {
+      seen.push(plain(gaugeDev.datalinkScenario(datalink)));
+      seen.push(gaugeDev.clearanceScenario(name));
+      for (const call of [() => host.requestClearance({ plannedLegId: 12 }), () => adopted.requestClearance({ plannedLegId: 12, ingestToken: CLEARANCE_SENTINEL })]) {
+        try {
+          seen.push(plain(await call()));
+        } catch (error) {
+          seen.push(String(error && error.message));
+        }
+      }
+      seen.push(plain(await host.getDatalinkState()));
+    }
+  }
+  assert.ok(seen.length > 28 * 3 * 4);
+  assert.equal(JSON.stringify({ seen, calls: gaugeDev.calls }).includes(CLEARANCE_SENTINEL), false);
+
+  const screens = [];
+  const drive = async (ui, name) => {
+    const look = () => screens.push(ui.shell.title, ui.rows(), ui.shell.scratchpad);
+    await ui.scenario('leg');
+    ui.gaugeDev.clearanceScenario(name);
+    ui.fmc.showPage('DL-INDEX');
+    await settle();
+    await ui.lsk('DL-INDEX', 'R5');
+    look();
+    await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+    look();
+    if (ui.shell.id === 'DL-CLEARANCE') {
+      await ui.lsk('DL-CLEARANCE', 'R6');
+      look();
+    } else {
+      await ui.lsk('DL-INDEX', 'R5');
+      look();
+    }
+  };
+  const failing = await mountDatalinkPages(t, 'clearance-sentinel-errors', { clearance: true });
+  await failing.host.setConfig({ ingestToken: CLEARANCE_SENTINEL });
+  for (const name of Object.keys(CLEARANCE_ERRORS)) await drive(failing, name);
+  const calls = [failing.gaugeDev.calls];
+  for (const name of Object.keys(CLEARANCE_OK)) {
+    const ui = await mountDatalinkPages(t, `clearance-sentinel-${name}`, { clearance: true });
+    await ui.host.setConfig({ ingestToken: CLEARANCE_SENTINEL });
+    await drive(ui, name);
+    calls.push(ui.gaugeDev.calls);
+  }
+  assert.ok(screens.length >= 28 * 9);
+  assert.equal(JSON.stringify({ screens, calls }).includes(CLEARANCE_SENTINEL), false);
+  assert.equal(JSON.stringify(screens).includes(SERVER_TEXT_SENTINEL), false);
+});
+
+test('clearance kept results are forgotten when CFG NETWORK saves another server URL or token, and kept on an unchanged save', async (t) => {
+  const ui = await mountDatalinkPages(t, 'clearance-cfg', { cfg: true });
+  const { shell, fmc, host, gaugeDev, pages, rows } = ui;
+  await host.setConfig({ ingestToken: 'first-token' });
+  await fmc.refreshConfig();
+  await ui.scenario('leg');
+  const clearances = () => callsOf(gaugeDev, 'requestClearance').length;
+  const request = async () => {
+    fmc.showPage('DL-INDEX');
+    await settle();
+    await ui.lsk('DL-INDEX', 'R5');
+    assert.equal(shell.id, 'DL-CLEARANCE-CONFIRM');
+    await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+    assert.deepEqual([shell.id, rows()[0]], ['DL-CLEARANCE', ['SIMULATED CLEARANCE', 'LEG 12']]);
+  };
+  /** Where R5 on DL-INDEX lands; a kept clearance opens DL-CLEARANCE without a request. */
+  const pressR5 = async () => {
+    fmc.showPage('DL-INDEX');
+    await settle();
+    await ui.lsk('DL-INDEX', 'R5');
+    const landed = shell.id;
+    if (landed === 'DL-CLEARANCE-CONFIRM') await ui.lsk('DL-CLEARANCE-CONFIRM', 'L6');
+    return landed;
+  };
+  // CFG NETWORK as the pilot uses it: an optional entry on L1 (URL) or L2 (token), then EXEC.
+  const save = async (lsk, entry) => {
+    const network = pages.get('NETWORK');
+    if (lsk) {
+      ui.type(entry);
+      assert.equal(network.onLsk(lsk, {}), true);
+    }
+    assert.equal(network.onKey('EXEC'), true);
+    await settle();
+    assert.deepEqual(shell.scratchpad, ['CONFIG SAVED', 'advisory'], `save ${lsk || 'unchanged'}`);
+  };
+
+  await request();
+  assert.deepEqual([await pressR5(), clearances()], ['DL-CLEARANCE', 1]);
+
+  await save();
+  assert.deepEqual([await pressR5(), clearances()], ['DL-CLEARANCE', 1], 'an unchanged save keeps the clearance');
+
+  await save('L1', 'http://other.invalid');
+  assert.equal(shell.config.serverUrl, 'http://other.invalid');
+  assert.deepEqual([await pressR5(), clearances()], ['DL-CLEARANCE-CONFIRM', 1], 'another server URL forgets it and sends nothing');
+  fmc.showPage('DL-CLEARANCE');
+  assert.deepEqual(rows()[1], ['NO CLEARANCE RECEIVED']);
+  await request();
+  assert.equal(clearances(), 2);
+
+  await save('L2', 'another-token');
+  assert.deepEqual([await pressR5(), clearances()], ['DL-CLEARANCE-CONFIRM', 2], 'a new token forgets it and sends nothing');
+  await request();
+  assert.equal(clearances(), 3);
+  await save();
+  assert.deepEqual([await pressR5(), clearances()], ['DL-CLEARANCE', 3]);
+
+  // A failure's last-request line is forgotten too.
+  await save('L1', 'http://third.invalid');
+  gaugeDev.clearanceScenario('unreachable');
+  fmc.showPage('DL-INDEX');
+  await settle();
+  await ui.lsk('DL-INDEX', 'R5');
+  await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+  assert.deepEqual([shell.id, shell.scratchpad, clearances()], ['DL-INDEX', ['CLEARANCE NO COMM', 'error'], 4]);
+  await save('L2', 'fourth-token');
+  fmc.showPage('DL-INDEX');
+  await ui.lsk('DL-INDEX', 'R5');
+  assert.deepEqual([shell.id, rows()[6], rows()[7]], ['DL-CLEARANCE-CONFIRM', [''], ['']]);
+
+  // An answer that lands after a change is shown but not kept.
+  gaugeDev.clearanceScenario('created');
+  gaugeDev.setClearanceDelay(50);
+  assert.equal(pages.get('DL-CLEARANCE-CONFIRM').onLsk('R6', {}), true);
+  await save('L1', 'http://fifth.invalid');
+  await later(100);
+  assert.deepEqual([shell.id, shell.scratchpad, clearances()], ['DL-INDEX', ['CLEARANCE RECEIVED', 'advisory'], 5]);
+  gaugeDev.setClearanceDelay(0);
+  assert.deepEqual([await pressR5(), clearances()], ['DL-CLEARANCE-CONFIRM', 5]);
 });

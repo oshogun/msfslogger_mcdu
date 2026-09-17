@@ -1,0 +1,37 @@
+{
+  "_sample": "post-401-invalid-token-no-header",
+  "_why": "The code wins over a missing header.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW",
+      "code": "INVALID_INGEST_TOKEN"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "token-invalid",
+    "httpStatus": 401,
+    "serverCode": "INVALID_INGEST_TOKEN",
+    "latch": true,
+    "datalinkState": "dl.token-invalid, emitted",
+    "heldPrefiledLeg": "dropped (latch)",
+    "cycleSoon": false,
+    "outcome": "not-issued",
+    "cdu": "INGEST TOKEN REJECTED",
+    "hint": "CHECK INGEST TOKEN ON CFG NETWORK"
+  }
+}

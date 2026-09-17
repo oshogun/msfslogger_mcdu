@@ -1,0 +1,37 @@
+{
+  "_sample": "post-409-code-status-mismatch",
+  "_why": "A known code on the wrong status is a fault.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW",
+      "code": "PLANNED_LEG_NOT_FOUND"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 409,
+    "serverCode": "PLANNED_LEG_NOT_FOUND",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": false,
+    "outcome": "unknown",
+    "cdu": "CLEARANCE FAULT 409",
+    "hint": "SAFE TO REQUEST AGAIN"
+  }
+}

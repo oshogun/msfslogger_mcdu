@@ -17,6 +17,11 @@ import {
 import type { DatalinkOutcome, DatalinkRequestMessage, DatalinkStateMessage } from '../src/protocol';
 import { Uplink } from '../src/uplink';
 import {
+  CLEARANCE_SENTINEL_TOKEN,
+  CLEARANCE_SERVER_TEXT,
+  clearanceFixture,
+  clearanceFixtureNames,
+  clearanceReply,
   fixture,
   reply,
   scratchConfig,
@@ -1366,6 +1371,541 @@ describe('the prefile against a scratch server through the real client', () => {
       expect(server.requests).toHaveLength(1);
     } finally {
       vi.useRealTimers();
+      service.shutdown();
+      await uplink.close();
+      await server.close();
+    }
+  });
+});
+
+// ── clearance ─────────────────────────────────────────────────────────────────
+
+function fromClearance(name: string, legId?: number): HttpOutcome {
+  const { response } = clearanceFixture(name);
+  let body = response.body;
+  // Only a sample aimed at leg 12 is re-aimed, so a mismatch sample stays a mismatch.
+  if (legId !== undefined && typeof body === 'object' && body !== null && (body as { planned_leg_id?: unknown }).planned_leg_id === 12) {
+    body = { ...(body as Record<string, unknown>), planned_leg_id: legId };
+  }
+  const scope = Object.entries(response.headers).find(([k]) => k.toLowerCase() === 'x-ingest-token-scope');
+  return {
+    kind: 'response',
+    status: response.status,
+    scopeHeader: scope ? scope[1] : null,
+    bodyText: typeof body === 'string' ? body : JSON.stringify(body),
+    bodyTooLarge: false,
+  };
+}
+
+/** `base`, with the clearance POST answered by `clearance` and a leg WX answered as available. */
+function withClearance(
+  base: Responder,
+  clearance: (id: number) => HttpOutcome | Promise<HttpOutcome>,
+): Responder {
+  return (route) => {
+    if (route.key === 'leg-clearance') return clearance(route.id);
+    if (route.key === 'leg-wx') return fromFixture('08-post-leg-wx');
+    return base(route);
+  };
+}
+
+const CLEARANCE_PATH = (id: number) => `POST /api/planned-legs/${id}/acars-messages/clearance`;
+const CLEARANCE_LOG = /^(info|warn) (Datalink dl\.\S+ \(HTTP [^)]*\)( on .*)?|Clearance [a-z-]+ \(HTTP (\d{3}|---)\)|SimBrief (prefile|settings) [a-z-]+ \(HTTP (\d{3}|---)\))$/;
+
+function expectedClearance(name: string, legId = 12) {
+  return { ...clearanceFixture(name).expect.result, plannedLegId: legId };
+}
+
+describe('clearance: one POST, then only the GETs of the refresh that follows', () => {
+  beforeEach(() => {
+    config = { token: CLEARANCE_SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  it.each([
+    ['post-201-created', 'created', 201],
+    ['post-200-not-created', 'on-file', 200],
+  ])('%s on the ground leg: POST, status, leg thread; then nothing until the poll, which only GETs', async (sample, described, httpStatus) => {
+    const client = new ScriptedClient(withClearance(
+      groundServer({ status: () => fromFixture('01b-get-status-ground-leg') }),
+      () => fromClearance(sample),
+    ));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    expect(paths(client)).toEqual(['GET /api/status', 'GET /api/planned-legs/12/acars-messages']);
+    const made = client.routes.length;
+    const emitted = states.length;
+
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toEqual({
+      ok: true, result: expectedClearance(sample),
+    });
+    await flush();
+    expect(paths(client, made)).toEqual([
+      CLEARANCE_PATH(12),
+      'GET /api/status',
+      'GET /api/planned-legs/12/acars-messages',
+    ]);
+    // The only emit is the refresh cycle's own.
+    expect(states.length).toBe(emitted + 1);
+    expect(logs).toContain(`info Clearance ${described} (HTTP ${httpStatus})`);
+
+    await vi.advanceTimersByTimeAsync(DATALINK_POLL_INTERVAL_MS - 1);
+    expect(paths(client, made)).toHaveLength(3);
+    await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+    expect(client.count('status')).toBeGreaterThanOrEqual(5);
+    expect(client.count('leg-clearance')).toBe(1);
+    expect(paths(client, made).slice(1).every((line) => line.startsWith('GET '))).toBe(true);
+    for (const line of logs) expect(line).toMatch(CLEARANCE_LOG);
+  });
+
+  it('flying: the refresh reads the flight thread, which carries the linked leg', async () => {
+    const client = new ScriptedClient(withClearance(
+      groundServer({ status: () => fromFixture('01a-get-status-flying') }),
+      () => fromClearance('post-201-created'),
+    ));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    const made = client.routes.length;
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({ ok: true });
+    await flush();
+    expect(paths(client, made)).toEqual([CLEARANCE_PATH(12), 'GET /api/status', 'GET /api/flights/92/acars-messages']);
+  });
+
+  it('a held prefiled leg: POST and thread on that leg, and no ground-session GET', async () => {
+    const client = new ScriptedClient(withClearance(groundServer(), (id) => fromClearance('post-200-not-created', id)));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    expect(last()).toMatchObject({ scope: { kind: 'leg', plannedLegId: 123, source: 'prefile' } });
+    const made = client.routes.length;
+    expect(await service.handle(req('clearance', { plannedLegId: 123 }))).toEqual({
+      ok: true, result: expectedClearance('post-200-not-created', 123),
+    });
+    await flush();
+    expect(paths(client, made)).toEqual([CLEARANCE_PATH(123), 'GET /api/status', 'GET /api/planned-legs/123/acars-messages']);
+    expect(last()).toMatchObject({ prefiledLeg: { plannedLegId: 123 } });
+  });
+
+  it('a success while a cycle is in flight gives exactly one rerun after it, and no second POST', async () => {
+    let releaseThread: (() => void) | null = null;
+    const base = withClearance(
+      groundServer({ status: () => fromFixture('01b-get-status-ground-leg') }),
+      () => fromClearance('post-201-created'),
+    );
+    let holdThread = false;
+    const client = new ScriptedClient(async (route) => {
+      if (holdThread && route.key === 'leg-thread') {
+        holdThread = false;
+        await new Promise<void>((resolve) => { releaseThread = resolve; });
+      }
+      return base(route);
+    });
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    const made = client.routes.length;
+    holdThread = true;
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(releaseThread).not.toBeNull();
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({ ok: true });
+    await flush();
+    expect(paths(client, made)).toEqual(['GET /api/status', 'GET /api/planned-legs/12/acars-messages', CLEARANCE_PATH(12)]);
+    releaseThread!();
+    await flush();
+    expect(paths(client, made)).toEqual([
+      'GET /api/status',
+      'GET /api/planned-legs/12/acars-messages',
+      CLEARANCE_PATH(12),
+      'GET /api/status',
+      'GET /api/planned-legs/12/acars-messages',
+    ]);
+    await vi.advanceTimersByTimeAsync(DATALINK_POLL_INTERVAL_MS - 1);
+    expect(paths(client, made)).toHaveLength(5);
+    expect(client.count('leg-clearance')).toBe(1);
+  });
+
+  it('not watching: the POST is the only request, now and later', async () => {
+    const client = new ScriptedClient(withClearance(groundServer(), () => fromClearance('post-201-created')));
+    const service = makePrefileService(client);
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(5 * DATALINK_POLL_INTERVAL_MS);
+    expect(paths(client)).toEqual([CLEARANCE_PATH(12)]);
+    expect(states).toEqual([]);
+  });
+
+  const POST_ONLY = clearanceFixtureNames().filter((name) => {
+    const e = clearanceFixture(name).expect;
+    return !e.ok && e.cycleSoon === false && e.latch === false;
+  });
+
+  it('the rows that start no refresh are 409, 401 token-missing, both header-less 401s, 403 and the http-errors', () => {
+    expect(POST_ONLY.map((name) => clearanceFixture(name).expect.code).sort()).toEqual([
+      'clearance-no-flight-plan', 'clearance-unavailable', 'clearance-unavailable', 'http-error', 'http-error',
+      'http-error', 'http-error', 'rejected', 'token-missing',
+    ]);
+  });
+
+  it.each(POST_ONLY)('%s: the POST only, and still one POST after three poll intervals', async (name) => {
+    const sample = clearanceFixture(name);
+    config.token = sample.configToken ?? CLEARANCE_SENTINEL_TOKEN;
+    const client = new ScriptedClient(withClearance(
+      groundServer({ status: () => fromFixture('01b-get-status-ground-leg') }),
+      () => fromClearance(name),
+    ));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    const made = client.routes.length;
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toEqual({
+      ok: false,
+      error: { code: sample.expect.code, httpStatus: sample.expect.httpStatus, serverCode: sample.expect.serverCode },
+    });
+    await flush();
+    expect(paths(client, made)).toEqual([CLEARANCE_PATH(12)]);
+    await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+    expect(client.count('leg-clearance')).toBe(1);
+    expect(client.count('status')).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('clearance: never automatic, never retried, never doubled', () => {
+  beforeEach(() => {
+    config = { token: CLEARANCE_SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  it('page open, three poll cycles, a manual refresh, a thread op and other writes make no clearance request', async () => {
+    const client = new ScriptedClient(withClearance(
+      groundServer({ status: () => fromFixture('01b-get-status-ground-leg') }),
+      () => fromClearance('post-201-created'),
+    ));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+    await service.handle(req('refresh', {}));
+    await flush();
+    expect(await service.handle(req('thread', { epoch: last().thread!.epoch, endSeq: 1 }))).toMatchObject({ ok: true });
+    await service.handle(req('wx', { target: { kind: 'leg', id: 12 }, icao: 'LFPG' }));
+    await service.handle(req('simbrief-settings', {}));
+    await service.handle(req('prefile-clear', {}));
+    await watchFor(service, 2 * DATALINK_POLL_INTERVAL_MS);
+    expect(client.count('status')).toBeGreaterThanOrEqual(6);
+    expect(paths(client).filter((line) => line.includes('/acars-messages/clearance'))).toEqual([]);
+    expect(client.count('leg-clearance')).toBe(0);
+  });
+
+  it.each([
+    ['500', fromClearance('post-500-internal-no-code'), 'http-error'],
+    ['502', ok({ error: 'Bad gateway' }, 502), 'http-error'],
+    ['504', ok({ error: 'Gateway timeout' }, 504), 'http-error'],
+    ['reset', RESET, 'unreachable'],
+    ['client timeout', TIMED_OUT, 'timeout'],
+  ])('%s: one POST, and three poll intervals later still one', async (_name, outcome, code) => {
+    const client = new ScriptedClient(withClearance(groundServer(), () => outcome));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({ ok: false, error: { code } });
+    await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+    expect(client.count('leg-clearance')).toBe(1);
+    expect(client.count('status')).toBeGreaterThanOrEqual(4);
+  });
+
+  it('a second clearance while the first is in flight is clearance-in-progress and sends nothing; after it settles one is accepted', async () => {
+    let release: ((outcome: HttpOutcome) => void) | null = null;
+    const client = new ScriptedClient(withClearance(groundServer(), () =>
+      new Promise<HttpOutcome>((resolve) => { release = resolve; })));
+    const service = makePrefileService(client);
+    const first = service.handle(req('clearance', { plannedLegId: 12 }));
+    await flush();
+    expect(client.count('leg-clearance')).toBe(1);
+    const inProgress = { ok: false, error: { code: 'clearance-in-progress', httpStatus: null, serverCode: null } };
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toEqual(inProgress);
+    expect(await service.handle(req('clearance', { plannedLegId: 13 }))).toEqual(inProgress);
+    // Checked before the config, so it answers the same with no config.
+    hasConfig = false;
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toEqual(inProgress);
+    hasConfig = true;
+    // A prefile uses another route and another guard.
+    expect(await service.handle(req('simbrief-prefile', {}))).toMatchObject({ ok: true });
+    expect(client.count('leg-clearance')).toBe(1);
+    expect(logs.filter((line) => line.includes('Clearance'))).toEqual([]);
+    release!(fromClearance('post-500-internal-no-code'));
+    expect(await first).toMatchObject({ ok: false, error: { code: 'http-error' } });
+    await vi.advanceTimersByTimeAsync(100000);
+    expect(client.count('leg-clearance')).toBe(1);
+
+    const again = service.handle(req('clearance', { plannedLegId: 12 }));
+    await flush();
+    expect(client.count('leg-clearance')).toBe(2);
+    release!(fromClearance('post-201-created'));
+    expect(await again).toMatchObject({ ok: true, result: { plannedLegId: 12 } });
+  });
+
+  it('no config: refused locally with no request, and the in-flight flag is released', async () => {
+    const client = new ScriptedClient(withClearance(groundServer(), () => fromClearance('post-201-created')));
+    const service = makePrefileService(client);
+    hasConfig = false;
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toEqual({
+      ok: false, error: { code: 'no-config', httpStatus: null, serverCode: null },
+    });
+    expect(client.routes).toEqual([]);
+    expect(logs).toEqual([]);
+    hasConfig = true;
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({ ok: true });
+  });
+
+  it('shutdown while the POST is in flight answers sidecar-unavailable and emits nothing', async () => {
+    let release: ((outcome: HttpOutcome) => void) | null = null;
+    const client = new ScriptedClient(withClearance(groundServer(), () =>
+      new Promise<HttpOutcome>((resolve) => { release = resolve; })));
+    const service = makePrefileService(client);
+    const pending = service.handle(req('clearance', { plannedLegId: 12 }));
+    await flush();
+    service.shutdown();
+    release!(fromClearance('post-401-invalid-token'));
+    expect(await pending).toEqual({ ok: false, error: { code: 'sidecar-unavailable', httpStatus: null, serverCode: null } });
+    expect(states).toEqual([]);
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({ error: { code: 'sidecar-unavailable' } });
+    expect(client.count('leg-clearance')).toBe(1);
+  });
+});
+
+describe('clearance failures and the datalink state', () => {
+  beforeEach(() => {
+    config = { token: CLEARANCE_SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  /** Watching, prefiled leg 123 shown with its thread, the clearance answering with `clearance`. */
+  async function shownPrefile(clearance: (id: number) => HttpOutcome) {
+    const client = new ScriptedClient(withClearance(groundServer(), clearance));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(last()).toMatchObject({
+      state: 'dl.ok', scope: { kind: 'leg', plannedLegId: 123, source: 'prefile' }, prefiledLeg: { plannedLegId: 123 },
+    });
+    return { client, service };
+  }
+
+  const UNCHANGED = clearanceFixtureNames().filter((name) => {
+    const e = clearanceFixture(name).expect;
+    return !e.ok && e.cycleSoon === false && e.latch === false;
+  });
+
+  it.each(UNCHANGED)('%s leaves availability, schedule, scope, thread cache and the held leg identical, with no emit', async (name) => {
+    const sample = clearanceFixture(name);
+    config.token = sample.configToken ?? CLEARANCE_SENTINEL_TOKEN;
+    const { client, service } = await shownPrefile(() => fromClearance(name));
+    const before = withoutAt(service.buildState());
+    const epoch = before.thread!.epoch;
+    const emitted = states.length;
+    const made = client.routes.length;
+
+    expect(await service.handle(req('clearance', { plannedLegId: 123 }))).toMatchObject({
+      ok: false, error: { code: sample.expect.code },
+    });
+    await flush();
+    expect(withoutAt(service.buildState())).toEqual(before);
+    expect(states.length).toBe(emitted);
+    expect(paths(client, made)).toEqual([CLEARANCE_PATH(123)]);
+    expect(logs[logs.length - 1]).toBe(`warn Clearance ${sample.expect.code} (HTTP ${sample.response.status})`);
+    for (const line of logs) {
+      expect(line).toMatch(CLEARANCE_LOG);
+      expect(line).not.toContain(CLEARANCE_SERVER_TEXT);
+    }
+
+    // The rest of the datalink carries on as before.
+    expect(await service.handle(req('thread', { epoch, endSeq: 1 }))).toMatchObject({ ok: true });
+    expect(await service.handle(req('wx', { target: { kind: 'leg', id: 123 }, icao: 'LFPG' }))).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(DATALINK_POLL_INTERVAL_MS);
+    expect(last()).toMatchObject({ state: 'dl.ok', prefiledLeg: { plannedLegId: 123 } });
+  });
+
+  const REFRESHED: [string, () => HttpOutcome][] = [
+    ...clearanceFixtureNames()
+      .filter((name) => {
+        const e = clearanceFixture(name).expect;
+        return !e.ok && e.cycleSoon === true && e.code === 'bad-response';
+      })
+      .map((name): [string, () => HttpOutcome] => [name, () => fromClearance(name, 123)]),
+    ['body-too-large', () => ({ kind: 'response', status: 201, scopeHeader: 'accepted', bodyText: null, bodyTooLarge: true })],
+    ['transport-unreachable', () => UNREACHABLE],
+    ['transport-reset', () => RESET],
+    ['transport-client-timeout', () => TIMED_OUT],
+    ['transport-tls', () => ({ kind: 'transport', errorName: 'TypeError', errorCode: 'SELF_SIGNED_CERT_IN_CHAIN' })],
+  ];
+
+  it.each(REFRESHED)('%s: availability untouched (never dl.bad-response), and one refresh cycle follows', async (_name, outcome) => {
+    const { client, service } = await shownPrefile(outcome);
+    const before = withoutAt(service.buildState());
+    const made = client.routes.length;
+    expect(await service.handle(req('clearance', { plannedLegId: 123 }))).toMatchObject({ ok: false });
+    await flush();
+    expect(paths(client, made)).toEqual([CLEARANCE_PATH(123), 'GET /api/status', 'GET /api/planned-legs/123/acars-messages']);
+    const after = withoutAt(service.buildState());
+    expect(after.state).toBe('dl.ok');
+    expect(after.scope).toEqual(before.scope);
+    expect(after.prefiledLeg).toEqual(before.prefiledLeg);
+    expect(after.thread!.epoch).toBe(before.thread!.epoch);
+    expect(states.map((state) => state.state)).not.toContain('dl.bad-response');
+    await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS);
+    expect(client.count('leg-clearance')).toBe(1);
+  });
+
+  it.each(['post-401-invalid-token', 'post-401-invalid-token-no-header'])('%s latches: held leg dropped, no request of any kind until a valid reload', async (name) => {
+    let refuse = true;
+    const { client, service } = await shownPrefile(() => (refuse ? fromClearance(name) : fromClearance('post-201-created')));
+    expect(await service.handle(req('clearance', { plannedLegId: 123 }))).toEqual({
+      ok: false, error: { code: 'token-invalid', httpStatus: 401, serverCode: 'INVALID_INGEST_TOKEN' },
+    });
+    expect(last()).toMatchObject({ state: 'dl.token-invalid', httpStatus: 401, nextPollAt: null, scope: null, thread: null });
+    expect(last()).not.toHaveProperty('prefiledLeg');
+    expect(last().lastErrorAt).toBe(Date.now());
+    expect(logs).toContain('warn Clearance token-invalid (HTTP 401)');
+    const made = client.routes.length;
+    const refused = { ok: false, error: { code: 'token-invalid', httpStatus: 401, serverCode: 'INVALID_INGEST_TOKEN' } };
+    await watchFor(service, 300000);
+    expect(await service.handle(req('clearance', { plannedLegId: 123 }))).toEqual(refused);
+    expect(await service.handle(req('refresh', {}))).toEqual(refused);
+    service.onConfigApplied(false);
+    await watchFor(service, 60000);
+    expect(client.routes.length).toBe(made);
+    refuse = false;
+    service.onConfigApplied(true);
+    await flush();
+    expect(paths(client, made)).toEqual(['GET /api/status', 'GET /api/ground-sessions/current']);
+  });
+
+  it('404 on the held prefiled leg drops it, and the next cycle resolves a scope without it', async () => {
+    const { client, service } = await shownPrefile(() => fromClearance('post-404-leg-not-found'));
+    const made = client.routes.length;
+    expect(await service.handle(req('clearance', { plannedLegId: 123 }))).toEqual({
+      ok: false, error: { code: 'leg-not-found', httpStatus: 404, serverCode: 'PLANNED_LEG_NOT_FOUND' },
+    });
+    await flush();
+    expect(paths(client, made)).toEqual([CLEARANCE_PATH(123), 'GET /api/status', 'GET /api/ground-sessions/current']);
+    expect(last()).toMatchObject({ state: 'dl.ok', scope: { kind: 'none' }, thread: null });
+    expect(last()).not.toHaveProperty('prefiledLeg');
+    expect(states.some((state) => state.scope === null && !('prefiledLeg' in state))).toBe(true);
+    expect(logs).toContain('warn Clearance leg-not-found (HTTP 404)');
+    for (const line of logs) expect(line).not.toContain(CLEARANCE_SERVER_TEXT);
+  });
+
+  it('404 on another leg keeps the held leg, and the next cycle still uses it', async () => {
+    const { client, service } = await shownPrefile(() => fromClearance('post-404-leg-not-found'));
+    const emitted = states.length;
+    const made = client.routes.length;
+    expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({ ok: false, error: { code: 'leg-not-found' } });
+    await flush();
+    expect(paths(client, made)).toEqual([CLEARANCE_PATH(12), 'GET /api/status', 'GET /api/planned-legs/123/acars-messages']);
+    // Only the cycle emitted.
+    expect(states.length).toBe(emitted + 1);
+    expect(last()).toMatchObject({
+      state: 'dl.ok', scope: { kind: 'leg', plannedLegId: 123, source: 'prefile' }, prefiledLeg: { plannedLegId: 123 },
+    });
+  });
+});
+
+describe('clearance against a scratch server through the real client', () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    config = { token: SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  it.each([
+    ['500', () => clearanceReply('post-500-internal-no-code')],
+    ['502', () => () => ({ status: 502, body: { error: 'Bad gateway' } })],
+    ['504', () => () => ({ status: 504, body: { error: 'Gateway timeout' } })],
+    ['reset', () => () => ({ destroy: true as const })],
+    ['client timeout', () => () => 'hang' as const],
+  ])('%s: the server records exactly one POST, while a second press is refused and through three poll intervals', async (_name, handler) => {
+    const server = await startScratchServer({ 'POST /api/planned-legs/12/acars-messages/clearance': handler() as never });
+    const uplink = new Uplink(scratchConfig(server.baseUrl));
+    const real = new DatalinkClient(() => uplink, { timeoutMs: 300 });
+    // The clearance goes to the scratch server; the poll GETs are scripted so
+    // fake time can drive the schedule without real sockets under it.
+    const polls = new ScriptedClient(groundServer());
+    const service = makePrefileService({
+      request: (route, abort) => (route.key === 'leg-clearance' ? real.request(route, abort) : polls.request(route)),
+    });
+    try {
+      const first = service.handle(req('clearance', { plannedLegId: 12 }));
+      expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({
+        ok: false, error: { code: 'clearance-in-progress' },
+      });
+      expect(await first).toMatchObject({ ok: false });
+      expect(server.requests.map((r) => `${r.method} ${r.path}`)).toEqual([CLEARANCE_PATH(12)]);
+      expect(server.requests[0].body).toBe('');
+      expect(server.requests[0].headers['x-ingest-token']).toBe(SENTINEL_TOKEN);
+
+      vi.useFakeTimers();
+      await service.handle(req('watch', { on: true }));
+      await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+      expect(polls.count('status')).toBeGreaterThanOrEqual(4);
+      vi.useRealTimers();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(server.requests).toHaveLength(1);
+
+      // Settled: a new press is accepted and makes its own single POST.
+      expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({ ok: false });
+      expect(server.requests).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+      service.shutdown();
+      await uplink.close();
+      await server.close();
+    }
+  });
+
+  it.each(['post-401-no-scope-header', 'post-401-token-missing'])('%s: nothing moves, and a thread GET and a WX op still succeed on the same server', async (name) => {
+    const server = await startScratchServer({
+      'GET /api/status': reply('01b-get-status-ground-leg'),
+      'GET /api/planned-legs/12/acars-messages': reply('06-get-leg-thread'),
+      'POST /api/planned-legs/12/acars-messages/wx': reply('08-post-leg-wx'),
+      'POST /api/planned-legs/12/acars-messages/clearance': clearanceReply(name),
+    });
+    const uplink = new Uplink(scratchConfig(server.baseUrl));
+    const service = makePrefileService(new DatalinkClient(() => uplink));
+    const settle = async (predicate: () => boolean) => {
+      for (let i = 0; i < 100 && !predicate(); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(predicate()).toBe(true);
+    };
+    try {
+      await service.handle(req('watch', { on: true }));
+      await settle(() => states.length > 0 && last().state === 'dl.ok');
+      const before = withoutAt(service.buildState());
+      const emitted = states.length;
+      expect(await service.handle(req('clearance', { plannedLegId: 12 }))).toMatchObject({
+        ok: false, error: { code: clearanceFixture(name).expect.code, httpStatus: 401 },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(withoutAt(service.buildState())).toEqual(before);
+      expect(states.length).toBe(emitted);
+
+      expect(await service.handle(req('thread', { epoch: before.thread!.epoch, endSeq: 1 }))).toMatchObject({ ok: true });
+      expect(await service.handle(req('wx', { target: { kind: 'leg', id: 12 }, icao: 'LFPG' }))).toMatchObject({
+        ok: true, result: { icao: 'LFPG' },
+      });
+      // The WX write refreshes: the thread GET succeeds on the same server.
+      await settle(() => server.requests.filter((r) => r.path === '/api/planned-legs/12/acars-messages').length === 2);
+      await settle(() => states.length > emitted && last().state === 'dl.ok');
+      expect(server.requests.map((r) => `${r.method} ${r.path}`)).toEqual([
+        'GET /api/status',
+        'GET /api/planned-legs/12/acars-messages',
+        CLEARANCE_PATH(12),
+        'POST /api/planned-legs/12/acars-messages/wx',
+        'GET /api/status',
+        'GET /api/planned-legs/12/acars-messages',
+      ]);
+    } finally {
       service.shutdown();
       await uplink.close();
       await server.close();

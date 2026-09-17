@@ -1,0 +1,36 @@
+{
+  "_sample": "post-422-unknown-code",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 422,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW",
+      "code": "SOMETHING_NEW"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 422,
+    "serverCode": "SOMETHING_NEW",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": false,
+    "outcome": "unknown",
+    "cdu": "CLEARANCE FAULT 422",
+    "hint": "SAFE TO REQUEST AGAIN"
+  }
+}

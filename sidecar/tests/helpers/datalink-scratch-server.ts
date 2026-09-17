@@ -168,6 +168,64 @@ export function simbriefReply(name: string): ScratchHandler {
   return () => ({ status: response.status, headers: response.headers, body: response.body });
 }
 
+export const CLEARANCE_SENTINEL_TOKEN = 'SENTINEL-CLEARANCE-TOKEN-0000';
+/** Upper-case letters and digits only, so it is itself a well-formed server code. */
+export const CLEARANCE_CODE_TOKEN = 'SENTINELCLEARANCETOKEN0000';
+/** The `error` text some clearance samples carry; it must never be forwarded or logged. */
+export const CLEARANCE_SERVER_TEXT = 'SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW';
+
+/** A clearance server sample: what was sent, what came back, and what it must classify as. */
+export interface ClearanceFixture extends Fixture {
+  _sample: string;
+  /** Replaces the sentinel token as the configured token, for this sample only. */
+  configToken?: string;
+  expect: {
+    ok: boolean;
+    code?: string;
+    httpStatus?: number | null;
+    serverCode?: string | null;
+    latch?: boolean;
+    cycleSoon?: boolean;
+    result?: Record<string, unknown>;
+  };
+}
+
+const CLEARANCE_FIXTURE_DIR = path.join(__dirname, '..', 'fixtures', 'clearance');
+
+export function clearanceFixture(name: string): ClearanceFixture {
+  return JSON.parse(fs.readFileSync(path.join(CLEARANCE_FIXTURE_DIR, `${name}.json`), 'utf8')) as ClearanceFixture;
+}
+
+/** Every clearance server sample, by name; the local outcomes are not among them. */
+export function clearanceFixtureNames(): string[] {
+  return fs
+    .readdirSync(CLEARANCE_FIXTURE_DIR)
+    .filter((file) => file.endsWith('.json') && file !== 'local-outcomes.json')
+    .map((file) => file.slice(0, -'.json'.length))
+    .sort();
+}
+
+export interface ClearanceLocalExpect {
+  ok: false;
+  code: string;
+  httpStatus: number | null;
+  serverCode: string | null;
+  latch: boolean | 'stays';
+  cycleSoon: boolean;
+}
+
+export function clearanceLocalOutcomes(): Record<string, { expect: ClearanceLocalExpect }> {
+  return JSON.parse(fs.readFileSync(path.join(CLEARANCE_FIXTURE_DIR, 'local-outcomes.json'), 'utf8')) as Record<
+    string,
+    { expect: ClearanceLocalExpect }
+  >;
+}
+
+export function clearanceReply(name: string): ScratchHandler {
+  const { response } = clearanceFixture(name);
+  return () => ({ status: response.status, headers: response.headers, body: response.body });
+}
+
 /** The fixture's response, served as recorded. */
 export function reply(name: string): ScratchHandler {
   const { response } = fixture(name);

@@ -245,11 +245,12 @@ line and its own vocabulary, separate from the `STATUS` page's Backend axis.
 
 - **`DL-INDEX`** (`ACARS DATALINK`) — current scope and the DATALINK state
   line. `L3` `<MESSAGES` → `DL-THREAD`; `L4` `<DOWNLINK` → `DL-CANNED`; `R3`
-  `WX REQUEST>` → `DL-WX`; `R4` `LOADSHEET>` → `DL-LOADSHEET`; `R6`
-  `REFRESH>` polls immediately; `L6` `<INDEX` → `MENU`. If a leg prefiled from
-  `FPLN` (below) is held, the scope line instead reads `PREFILE` and `R1`
-  shows `CLR PREFILE>` to drop it; the leg's id then shows on its own row
-  below, under `PREFILED LEG`.
+  `WX REQUEST>` → `DL-WX`; `R4` `LOADSHEET>` → `DL-LOADSHEET`; `R5`
+  `CLEARANCE>` requests a simulated PDC for the current leg (see "REQUEST
+  CLEARANCE" below); `R6` `REFRESH>` polls immediately; `L6` `<INDEX` →
+  `MENU`. If a leg prefiled from `FPLN` (below) is held, the scope line
+  instead reads `PREFILE` and `R1` shows `CLR PREFILE>` to drop it; the leg's
+  id then shows on its own row below, under `PREFILED LEG`.
 - **`DL-THREAD`** (`ACARS MSGS`) — the message thread for the current scope,
   five messages per page, oldest first, opening on the newest page. `L1`–`L5`
   open a message; `L6` `<RETURN`; `R6` `REFRESH>`.
@@ -270,6 +271,73 @@ line and its own vocabulary, separate from the `STATUS` page's Backend axis.
   single key press anywhere in DATALINK sends a message by itself. Row 2
   reads `NO PENDING REQUEST` if this page is ever reached with nothing
   staged — not expected through normal navigation.
+
+### REQUEST CLEARANCE (simulated PDC)
+
+`DL-INDEX` `R5` `CLEARANCE>` is always shown, and requests a simulated
+pre-departure clearance for whichever leg is the current scope: the flight's
+linked leg, the ground-session leg, or a held `FPLN` prefiled leg. With no
+leg resolved yet, or a newly held prefiled leg the scope hasn't caught up
+with, `R5` refuses locally and sends nothing — `NO FLIGHT PLAN`,
+`NO LINKED LEG`, or `SCOPE UPDATE PENDING`; the usual `INGEST TOKEN REJECTED`
+/ `DATALINK NO CONFIG` refusals apply here too.
+
+`R5` opens `DL-CLEARANCE-CONFIRM` (`REQUEST CLEARANCE`), showing the leg as
+`LEG <id>`. `R6` `SEND*` is the one press that actually sends the request; it
+re-checks the leg against the current scope first, and if it has changed
+since the page opened, nothing is sent and the scratchpad reads
+`CLEARANCE LEG CHANGED`. While the request is in flight the page reads
+`SENDING`: pressing `R5` again from `DL-INDEX` reopens the confirm page
+instead of starting a second request, and a second `R6` press on the confirm
+page itself makes no call either — at most one clearance request is ever in
+flight. `L6` `<CANCEL` discards a staged request without sending anything.
+
+On success, `DL-CLEARANCE` shows the marker `SIMULATED CLEARANCE`,
+`<DEP> TO <DEST>`, the initial altitude, the squawk, and the cleared route
+(paged); the last line always reads `NOT FOR REAL WORLD USE` — this is a
+simulated exchange, never a real clearance. The app refreshes the message
+thread right away after any successful send, so `R6` `MESSAGES>` normally
+already finds the request/reply pair (a downlink `REQUEST CLEARANCE` and its
+uplink `PDC` reply) without you needing to press `REFRESH>` yourself. The app
+keeps the last result for up to four legs in its own memory for the rest of
+the session: pressing `R5` again for one of those legs reopens its kept
+result with no new request, until the app is restarted, the page reloaded, or
+`CFG NETWORK` saves a different server URL or a newly entered token (which
+drops every kept result).
+A genuine repeat request for a leg that already has a clearance (after a
+restart, for example) is answered by the server with the same rows and shows
+`ALREADY ISSUED` next to the pair, with the same squawk — a repeat never
+issues a second clearance and never writes a second logbook row.
+
+Requesting a clearance needs a msfslogger server build that has the
+clearance route — later than DATALINK's own floor above. Until that build is
+running, `SEND*` fails and `DL-INDEX`'s scratchpad reads
+`CLEARANCE UNAVAILABLE` (no hint shown there); pressing `R5` again reopens
+`DL-CLEARANCE-CONFIRM`, whose `LAST REQUEST` rows then show the hint,
+`SERVER UPDATE NEEDED` — every clearance hint below works the same way, on
+the reopened confirm page, never on `DL-INDEX` itself. Every other DATALINK
+page and the flight-data uplink keep working normally. The same distinction
+applies if this build's own sidecar or shell predates the clearance feature:
+an outdated **sidecar** (whose hello lacks the clearance capability, with an
+up-to-date shell) shows the existing `SIDECAR UPDATE REQUIRED` (hint
+`REBUILD SIDECAR THEN RESTART APP`) — the same code DATALINK already uses
+for an outdated sidecar in general; an outdated **shell exe** instead shows
+`CLEARANCE HOST FAULT`, because its call to the (missing) command fails
+outright — restarting `cargo tauri dev` fixes this, and also rebuilds the
+sidecar first through its `beforeDevCommand`
+(`src-tauri/tauri.conf.json:8`). `CLEARANCE NOT SUPPORTED` is a different
+case again: it only appears if an *installed custom host*
+(`window.__FMC_HOST__`, as the browser preview harness installs) lacks the
+clearance method; that host lives outside this app's shell, so restarting
+`cargo tauri dev` does not change it. Like the rest of DATALINK, a clearance
+request uses the existing ingest token with no extra
+login, is never shown on the CDU, the sidecar log, or an event sent to the
+webview, and is never retried automatically by this app. A leg with no
+SimBrief dispatch release on file — for example one imported only from
+Little Navmap, with no SimBrief import run for it — cannot be cleared: the
+server answers `409`, and `DL-INDEX`'s scratchpad reads
+`NO DISPATCH RELEASE ON FILE` (hint `IMPORT THE PLAN FROM SIMBRIEF`, again
+only on the reopened confirm page).
 
 ### Polling
 
@@ -315,6 +383,42 @@ cached yet):
 | `LOADSHEET ON FILE` | A loadsheet request returned the same figures already on file |
 | `NOT A CANNED MESSAGE` / `UNKNOWN CANNED MESSAGE` / `FLIGHT NOT FOUND` / `PLANNED LEG NOT FOUND` / `DATALINK INVALID ID` | Server-side or scope-staleness faults; not expected from normal use of this app's own pages |
 | `DATALINK BUSY` / `DATALINK OFFLINE` / `DATALINK NOT SUPPORTED` / `DATALINK HOST FAULT` | A local fault in the relay between the webview and the sidecar, not a server response |
+
+**Clearance page text** (`DL-CLEARANCE-CONFIRM`, `DL-CLEARANCE`):
+
+| CDU text | When |
+|---|---|
+| `CLEARANCE>` | `DL-INDEX` R5 prompt; always shown |
+| `REQUEST CLEARANCE` | `DL-CLEARANCE-CONFIRM` title |
+| `LEG <id>` | The leg a pending or in-flight request targets |
+| `SENDING` | The request is in flight |
+| `CLEARANCE LEG CHANGED` | `SEND*` was pressed but the scope moved to a different leg since the confirm page opened; nothing was sent |
+| `SIMULATED CLEARANCE` | Result page marker |
+| `ALREADY ISSUED` | Shown next to the pair when the server answers `200` — a clearance already existed for this leg |
+| `NOT FOR REAL WORLD USE` | Fixed last line of every clearance result |
+| `CLEARANCE RECEIVED` / `CLEARANCE ON FILE` | Advisory after a successful send — a new clearance, or one already on file |
+| `NO CLEARANCE RECEIVED` | `DL-CLEARANCE` reached with nothing kept for the shown leg; not expected through normal navigation |
+| `MESSAGES>` | `DL-CLEARANCE` R6 — opens the thread |
+
+**Clearance-specific errors:** the CDU text appears on `DL-INDEX`'s
+scratchpad right after a failed `SEND*`. The Hint column is **not** shown
+there — press `R5` again for the same leg to reopen `DL-CLEARANCE-CONFIRM`,
+whose `LAST REQUEST` rows then show it.
+
+| CDU text | Hint | Meaning |
+|---|---|---|
+| `SCOPE UPDATE PENDING` | | `R5` was pressed while the scope hadn't yet caught up with a newly held prefiled leg; local refusal, nothing sent |
+| `NO DISPATCH RELEASE ON FILE` | `IMPORT THE PLAN FROM SIMBRIEF` | The leg has no parseable dispatch release on the server — for example a Little Navmap import with no SimBrief import run for it |
+| `CLEARANCE UNAVAILABLE` | `SERVER UPDATE NEEDED` | The server answered, but not on a clearance-aware route — normal before the server has the clearance route. Only the clearance flow is affected; every other DATALINK page and the flight-data uplink keep working |
+| `SIDECAR UPDATE REQUIRED` | `REBUILD SIDECAR THEN RESTART APP` | This build's **sidecar** predates the clearance feature — the same code and fix DATALINK already uses for an outdated sidecar in general |
+| `CLEARANCE HOST FAULT` | `SAFE TO REQUEST AGAIN` | This build's own **shell exe** predates the clearance feature; its call to the (missing) command fails outright. Fix: restart `cargo tauri dev`, which also rebuilds the sidecar first |
+| `CLEARANCE NOT SUPPORTED` | | An *installed custom host* (`window.__FMC_HOST__`, for example the browser preview harness) lacks the clearance method — not this app's own shell, and restarting it does not change this |
+| `CLEARANCE RESULT UNKNOWN` | `SAFE TO REQUEST AGAIN` | A sidecar or shell timeout on the request specifically — outcome unknown. Pressing `SEND*` again is safe: the server answers a repeat idempotently |
+| `CLEARANCE IN PROGRESS` | | The shell or sidecar refused a concurrent clearance request underneath the app |
+
+Every other fault the clearance flow can show reuses the same underlying
+codes as DATALINK, worded for clearance — see `ERRORS` in
+`ui/src/pages/clearance-vocab.js`.
 
 ## FPLN (SimBrief prefile)
 
@@ -459,6 +563,10 @@ log line.
 | Server predates DATALINK support | N/A | Any `DATALINK` page reads `DATALINK UNAVAILABLE` with hint `SERVER MAY PREDATE DATALINK`. The flight-data uplink (`STATUS` page) is unaffected. Fix: restart the server onto commit `9a52d2d` or later, when you choose to |
 | Wrong ingest token, DATALINK specifically | N/A | Any `DATALINK` page reads `INGEST TOKEN REJECTED` with hint `CHECK INGEST TOKEN ON CFG NETWORK`, and DATALINK stops polling until the token is corrected. Fix: re-enter the token on `CFG NETWORK`, L2, and save |
 | Server has DATALINK but predates SimBrief prefile | N/A | `FPLN` reads `SIMBRIEF UNAVAILABLE` with hint `SERVER UPDATE NEEDED`, and `PREFILE>` stays hidden. DATALINK itself is unaffected. Fix: restart the server onto commit `92fa6f6` or later, when you choose to |
+| Server predates the clearance route | N/A | After `DL-CLEARANCE-CONFIRM` `SEND*`, `DL-INDEX`'s scratchpad reads `CLEARANCE UNAVAILABLE`; press `R5` again to see the hint, `SERVER UPDATE NEEDED`, on the reopened confirm page. Every other DATALINK page and the flight-data uplink are unaffected. Fix: restart the server onto a build with the clearance route, when you choose to |
+| Sidecar predates the clearance feature | N/A | After `SEND*`, `DL-INDEX` reads `SIDECAR UPDATE REQUIRED` — the same text and fix as the "Sidecar rebuilt/updated…" row above |
+| This app's own shell exe predates the clearance feature | N/A | After `SEND*`, `DL-INDEX` reads `CLEARANCE HOST FAULT` — the webview's call to the missing command fails outright. Fix: restart `cargo tauri dev` (or reinstall/relaunch a built app); this also rebuilds the sidecar first, through `beforeDevCommand` |
+| An installed custom host lacks the clearance method | N/A | After `SEND*`, `DL-INDEX` reads `CLEARANCE NOT SUPPORTED`, with no hint. Only relevant with a non-Tauri host installed (`window.__FMC_HOST__`, for example the browser preview harness) — not expected in this app's own shell, and restarting it does not fix this |
 
 ## Manual test plan (run this on the Windows box)
 

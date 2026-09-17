@@ -13,6 +13,8 @@ use std::{
 pub const FEATURE: &str = "datalink";
 /// The SimBrief ops; a sidecar without it would leave them unanswered.
 pub const SIMBRIEF_FEATURE: &str = "simbrief-prefile";
+/// The clearance op; a sidecar without it would leave the request unanswered.
+pub const CLEARANCE_FEATURE: &str = "pdc-clearance";
 // Longer than the sidecar's own 8 s HTTP timeout, so a slow server is reported
 // by the sidecar with its real cause before the shell gives up on the answer.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_millis(12_000);
@@ -38,7 +40,7 @@ pub const STATE_OUTDATED: &str = "dl.sidecar-outdated";
 pub const STATE_UNAVAILABLE: &str = "dl.sidecar-unavailable";
 const SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
 const REQUEST_LINE_MAX: usize = 4096;
-pub const OPS: [&str; 10] = [
+pub const OPS: [&str; 11] = [
     "watch",
     "refresh",
     "thread",
@@ -49,8 +51,10 @@ pub const OPS: [&str; 10] = [
     "simbrief-settings",
     "simbrief-prefile",
     "prefile-clear",
+    "clearance",
 ];
 pub const SIMBRIEF_OPS: [&str; 3] = ["simbrief-settings", "simbrief-prefile", "prefile-clear"];
+pub const CLEARANCE_OPS: [&str; 1] = ["clearance"];
 
 /// How long the relay waits for an answer. Only the prefile, which can take
 /// the server 20 s, waits longer than every other op.
@@ -101,6 +105,14 @@ pub fn supports_simbrief(hello: &Value) -> bool {
     hello["features"]
         .as_array()
         .is_some_and(|features| features.iter().any(|feature| feature == SIMBRIEF_FEATURE))
+}
+
+/// A sidecar that predates the clearance op would leave it unanswered, so it is
+/// only sent to one that announced this feature.
+pub fn supports_clearance(hello: &Value) -> bool {
+    hello["features"]
+        .as_array()
+        .is_some_and(|features| features.iter().any(|feature| feature == CLEARANCE_FEATURE))
 }
 
 fn has_exact_keys(value: &Value, keys: &[&str]) -> Option<Map<String, Value>> {
@@ -160,6 +172,10 @@ pub fn valid_params(op: &str, params: &Value) -> bool {
         "wx" => has_exact_keys(params, &["target", "icao"])
             .is_some_and(|p| valid_target(&p["target"]) && valid_icao(&p["icao"])),
         "loadsheet" => has_exact_keys(params, &["plannedLegId"])
+            .is_some_and(|p| safe_integer(&p["plannedLegId"], 1)),
+        // Only the leg: a trip or flight id beside it could aim the request at
+        // something other than the leg the CDU confirmed.
+        "clearance" => has_exact_keys(params, &["plannedLegId"])
             .is_some_and(|p| safe_integer(&p["plannedLegId"], 1)),
         _ => false,
     }
@@ -470,7 +486,8 @@ mod tests {
                 "loadsheet",
                 "simbrief-settings",
                 "simbrief-prefile",
-                "prefile-clear"
+                "prefile-clear",
+                "clearance"
             ]
         );
         for op in SIMBRIEF_OPS {
@@ -514,6 +531,56 @@ mod tests {
             assert_eq!(RelayTimeouts::PRODUCTION.for_op(op), expected, "{op}");
         }
         assert_eq!(RelayTimeouts::PRODUCTION.for_op("unknown"), REQUEST_TIMEOUT);
+    }
+
+    #[test]
+    fn clearance_takes_exactly_a_safe_integer_leg_id() {
+        assert!(CLEARANCE_OPS.iter().all(|op| OPS.contains(op)));
+        assert_eq!(OPS.last(), Some(&"clearance"));
+        for id in [json!(1), json!(12), json!(SAFE_INTEGER_MAX)] {
+            let params = json!({"plannedLegId": id});
+            assert!(valid_params("clearance", &params), "{params}");
+            let line = request_line("dl-9", "clearance", &params).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap(),
+                json!({"v":1, "type":"datalink-request", "id":"dl-9", "op":"clearance", "params":params})
+            );
+        }
+        for params in [
+            json!({"plannedLegId":0}),
+            json!({"plannedLegId":-1}),
+            json!({"plannedLegId":"12"}),
+            json!({"plannedLegId":12.5}),
+            json!({"plannedLegId":SAFE_INTEGER_MAX + 1}),
+            json!({"plannedLegId":null}),
+            json!({"plannedLegId":12, "tripId":1}),
+            json!({"plannedLegId":12, "flightId":92}),
+            json!({"plannedLegId":12, "body":"x"}),
+            json!({"tripId":12}),
+            json!({"legId":12}),
+            json!({}),
+            json!(null),
+            json!([12]),
+            json!("x"),
+        ] {
+            assert!(!valid_params("clearance", &params), "{params}");
+        }
+    }
+
+    #[test]
+    fn clearance_support_needs_its_own_feature() {
+        assert!(supports_clearance(
+            &json!({"features":["datalink", "simbrief-prefile", "pdc-clearance"]})
+        ));
+        assert!(!supports_clearance(
+            &json!({"features":["datalink", "simbrief-prefile"]})
+        ));
+        assert!(!supports_clearance(&json!({"features":"pdc-clearance"})));
+        assert!(!supports_clearance(&json!({})));
+        assert_eq!(
+            RelayTimeouts::PRODUCTION.for_op("clearance"),
+            REQUEST_TIMEOUT
+        );
     }
 
     #[test]

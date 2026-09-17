@@ -24,6 +24,7 @@ import {
   type EffectiveConfig,
 } from './config';
 import {
+  CLEARANCE_FEATURE,
   DATALINK_FEATURE,
   decodeControlMessage,
   describeDecodeError,
@@ -206,7 +207,7 @@ class Sidecar {
       sidecarVersion: SIDECAR_VERSION,
       nodeVersion: process.version,
       configPath: this.configPath,
-      features: [DATALINK_FEATURE, SIMBRIEF_FEATURE],
+      features: [DATALINK_FEATURE, SIMBRIEF_FEATURE, CLEARANCE_FEATURE],
     });
     this.send(this.datalink.buildState());
 

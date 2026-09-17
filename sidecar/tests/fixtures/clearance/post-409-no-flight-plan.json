@@ -1,0 +1,38 @@
+{
+  "_sample": "post-409-no-flight-plan",
+  "_why": "No parseable dispatch release on file (for example a Little Navmap leg). Error text is a sentinel.",
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/12/acars-messages/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-CLEARANCE-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW NO FLIGHT PLAN ON FILE",
+      "code": "NO_FLIGHT_PLAN"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "clearance-no-flight-plan",
+    "httpStatus": 409,
+    "serverCode": "NO_FLIGHT_PLAN",
+    "latch": false,
+    "datalinkState": "unchanged",
+    "heldPrefiledLeg": "unchanged",
+    "cycleSoon": false,
+    "outcome": "not-issued",
+    "cdu": "NO DISPATCH RELEASE ON FILE",
+    "hint": "IMPORT THE PLAN FROM SIMBRIEF"
+  }
+}

@@ -1,11 +1,12 @@
 // ── Datalink HTTP client ──────────────────────────────────────────────────────
 //
-// The only datalink code that talks to the network. It can build exactly twelve
-// requests, one per server route in the table below, and nothing else: paths
-// are assembled from validated integer ids, so no user text, query string or
-// trailing slash can reach a URL. The two SimBrief routes take no parameter at
-// all: the prefile POST has no body, so it can never ask the server to import
-// a duplicate plan.
+// The only datalink code that talks to the network. It can build exactly
+// thirteen requests, one per server route in the table below, and nothing
+// else: paths are assembled from validated integer ids, so no user text, query
+// string or trailing slash can reach a URL. The two SimBrief routes take no
+// parameter at all: the prefile POST has no body, so it can never ask the
+// server to import a duplicate plan. The clearance POST has no body either;
+// the leg id in its path is the whole request.
 //
 // What the server's token check expects shapes the rest:
 //
@@ -48,6 +49,7 @@ export type DatalinkRoute =
   | { key: 'flight-wx'; id: number; icao: string }
   | { key: 'leg-wx'; id: number; icao: string }
   | { key: 'leg-loadsheet'; id: number }
+  | { key: 'leg-clearance'; id: number }
   | { key: 'simbrief-settings' }
   | { key: 'simbrief-prefile' };
 
@@ -96,6 +98,7 @@ const ROUTE_TABLE: Readonly<Record<DatalinkRouteKey, { method: 'GET' | 'POST'; t
   'leg-send': { method: 'POST', template: '/api/planned-legs/:id/acars-messages' },
   'leg-wx': { method: 'POST', template: '/api/planned-legs/:id/acars-messages/wx' },
   'leg-loadsheet': { method: 'POST', template: '/api/planned-legs/:id/acars-messages/loadsheet' },
+  'leg-clearance': { method: 'POST', template: '/api/planned-legs/:id/acars-messages/clearance' },
   'ground-session-current': { method: 'GET', template: '/api/ground-sessions/current' },
   'simbrief-settings': { method: 'GET', template: '/api/settings/simbrief' },
   'simbrief-prefile': { method: 'POST', template: '/api/planned-legs/simbrief' },

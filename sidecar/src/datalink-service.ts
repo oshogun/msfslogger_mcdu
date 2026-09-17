@@ -23,9 +23,13 @@
 //   another is in flight. The leg it returns is held in memory as a scope of
 //   its own until a flight starts, the user clears it, the server or token
 //   changes, the token is refused, or the leg turns out to be gone.
+// - A clearance request writes logbook rows the first time, so it follows the
+//   same discipline: one request per op, never retried, never made by a poll,
+//   and refused while another is in flight.
 //
 // Timers go through setTimeout so a fake clock drives the whole schedule.
 
+import { classifyClearanceOutcome, projectClearance } from './clearance-model';
 import {
   classifyOutcome,
   emittedServerCode,
@@ -170,6 +174,7 @@ export class DatalinkService {
 
   private prefiled: PrefiledState | null = null;
   private prefileInFlight = false;
+  private clearanceInFlight = false;
 
   constructor(deps: DatalinkServiceDeps) {
     this.deps = deps;
@@ -558,6 +563,8 @@ export class DatalinkService {
         return this.simbriefPrefile();
       case 'prefile-clear':
         return this.prefileClear();
+      case 'clearance':
+        return this.clearance(request.params);
     }
   }
 
@@ -809,6 +816,67 @@ export class DatalinkService {
     this.emit();
     this.cycleSoon();
     return { ok: true, result: { cleared: true } };
+  }
+
+  // ── clearance ─────────────────────────────────────────────────────────────
+
+  /**
+   * One POST for the leg the CDU confirmed. The sidecar does not re-resolve
+   * the leg: the id it is given is the one the user saw. The only follow-up is
+   * the cycle a write gets, so the thread shows the request and reply pair or
+   * proves the POST did not land. Logs one line naming the outcome and the
+   * HTTP status: never the leg, the clearance or anything the server wrote.
+   */
+  private async clearance(params: DatalinkParams['clearance']): Promise<DatalinkOutcome<'clearance'>> {
+    // Checked before anything else, so a second press can never reach the
+    // server while the first one's fate is still open.
+    if (this.clearanceInFlight) return error('clearance-in-progress');
+    this.clearanceInFlight = true;
+    try {
+      if (!this.deps.hasConfig() || this.latched) return this.localRefusal();
+      const route: DatalinkRoute = { key: 'leg-clearance', id: params.plannedLegId };
+      const outcome = await this.deps.client.request(route, this.abort.signal);
+      if (this.shuttingDown) return error('sidecar-unavailable');
+      this.afterWrite(outcome);
+      const classified = classifyClearanceOutcome(outcome, this.deps.token());
+
+      if (!classified.ok) {
+        if (classified.retry === 'latch') {
+          this.applyFailure(classified, routeTemplate(route.key));
+          this.emit();
+        }
+        if (classified.code === 'leg-not-found') {
+          // The server says the leg is gone, so a prefiled leg with that id is
+          // dropped as it would be for any other write aimed at it.
+          if (this.prefiled?.plannedLegId === params.plannedLegId) {
+            this.dropPrefiled();
+            this.emit();
+          }
+          this.cycleSoon();
+        }
+        const status = classified.httpStatus === null ? '---' : String(classified.httpStatus);
+        this.deps.log('warn', `Clearance ${classified.code} (HTTP ${status})`);
+        return failureOutcome(classified);
+      }
+
+      const projected = projectClearance(
+        classified.json,
+        classified.httpStatus,
+        params.plannedLegId,
+        this.deps.token(),
+      );
+      if (!projected.ok) {
+        // The rows may exist, so the outcome is unknown; the availability
+        // axis is left alone because an op is not a poll.
+        this.deps.log('warn', `Clearance bad-response (HTTP ${classified.httpStatus})`);
+        return error('bad-response', classified.httpStatus);
+      }
+      const described = projected.result.created ? 'created' : 'on-file';
+      this.deps.log('info', `Clearance ${described} (HTTP ${classified.httpStatus})`);
+      return { ok: true, result: projected.result };
+    } finally {
+      this.clearanceInFlight = false;
+    }
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────

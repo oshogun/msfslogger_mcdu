@@ -48,6 +48,22 @@ iframe { display: block; width: 600px; height: 900px; max-width: 100%; border: 0
 <option value="sidecar-unavailable">Sidecar unavailable</option>
 <option value="sidecar-outdated">Sidecar outdated</option><option value="not-supported">Not supported</option>
 </select></label>
+<label>Clearance <select id="clearance-scenario">
+<option value="created">Issued (201)</option><option value="not-created">Already issued (200)</option>
+<option value="long-route">1200-char route</option><option value="null-route-and-icaos">No route or airports</option>
+<option value="fl-altitude">Flight level altitude</option><option value="ft-altitude">Feet altitude</option>
+<option value="leg-not-found">Leg not found (404)</option><option value="no-flight-plan">No dispatch release (409)</option>
+<option value="invalid-token">Invalid token</option><option value="token-missing">Token not received</option>
+<option value="unavailable">Pre-clearance server</option><option value="rejected">Rejected (403)</option>
+<option value="http-error">HTTP error (500)</option><option value="unknown-code">Unknown code</option>
+<option value="bad-response">Bad response</option><option value="too-large">Too large</option>
+<option value="unreachable">Unreachable</option><option value="tls-error">TLS error</option>
+<option value="client-timeout">Sidecar HTTP timeout</option><option value="relay-timeout">Shell relay timeout</option>
+<option value="busy">Sidecar busy</option><option value="in-progress">Clearance in progress</option>
+<option value="no-config">No config</option><option value="sidecar-exited">Sidecar exited</option>
+<option value="sidecar-unavailable">Sidecar unavailable</option><option value="sidecar-outdated">Sidecar outdated</option>
+<option value="not-supported">Not supported</option><option value="host-error">Host fault</option>
+</select></label>
 <label>Viewport <select id="size"><option value="600">600 px</option><option value="480">480 px</option><option value="800">800 px</option></select></label>
 <button id="reload">Reload</button><label><input type="checkbox" id="auto" checked> Reload on save</label>
 <p>F12 opens DevTools. Select the CDU iframe context to inspect <code>window.gaugeDev</code>. <span id="connection"></span></p>

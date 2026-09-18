@@ -3,8 +3,11 @@
 A Tauri desktop client for Windows: it reads Microsoft Flight Simulator over
 SimConnect, shows an FMC-style CDU panel, and uplinks flight data to an
 msfslogger server on another machine. From the same CDU it also drives
-DATALINK (ACARS-style messaging), a SimBrief flight-plan prefile, and a
-simulated PDC clearance request — all proxied through that server.
+DATALINK (ACARS-style messaging), a SimBrief flight-plan prefile, a
+simulated PDC clearance request, and linking a flight to SayIntentions to
+import its comms and push the leg's PDC to a live SayIntentions session as a
+real CPDLC message — all proxied through that server; see
+[docs/usage.md](docs/usage.md) for the SayIntentions walkthrough.
 
 ## Prerequisites
 

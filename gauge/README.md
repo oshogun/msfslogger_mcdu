@@ -36,8 +36,39 @@ response. No source files in `ui/`, `sidecar/`, or `src-tauri/` are modified.
 The adapter implements the existing `window.__FMC_HOST__` contract and the CDU
 annunciates `GAUGE MOCK`. It never connects to the server or simulator.
 
-- Select online, reconnect, server failure, unauthorized, pause, or crash
-  scenarios to exercise the existing status pages.
+- The header has five independent scenario selectors, each wired to its own
+  `gaugeDev.*Scenario()` call and applied on load and on every change:
+  - **Scenario** (`#scenario`) — `stopped`, `online`, `retry`, `offline`,
+    `unauthorized`, `paused`, `active-pause`, `crashed`. Drives the App/Sim/
+    Backend/Pause status axes shown on `STATUS`.
+  - **Datalink** (`#datalink-scenario`) — flight/leg scope, no flight plan, a
+    pre-upgrade server, an invalid token, unreachable, a paging TAF, a
+    900-character route, no dispatch release, four canned messages, WX
+    unavailable, and a sidecar-outdated case. Drives what `DL-INDEX` and the
+    rest of the `DL-*` pages show.
+  - **SimBrief** (`#simbrief-scenario`) — pilot-ID and prefile outcomes for
+    `FPLN`: configured/not configured, duplicate, a long label, an
+    already-prefiled leg, and the full set of SimBrief/relay/sidecar failure
+    codes (bad user id, no OFP, timeouts, bad body, busy, sidecar exited or
+    outdated, not supported, and more).
+  - **Clearance** (`#clearance-scenario`) — outcomes for `REQUEST CLEARANCE`
+    on `DL-INDEX`/`DL-CLEARANCE`: issued, already issued, long or missing
+    routes, flight-level vs. feet altitude, a leg the server has no record of
+    (`PLANNED LEG NOT FOUND`), a leg with no dispatch release on file
+    (`NO DISPATCH RELEASE ON FILE`), and the same family of relay/sidecar/
+    host failure codes as Datalink and SimBrief.
+  - **SayIntentions** (`#sayintentions-scenario`) — outcomes for `DL-SI`,
+    `DL-SI-CONFIRM` and `DL-SI-PDC`: linked with imports, no key configured,
+    key set but not linked, link-from-now, import with and without new rows,
+    a sent PDC push, leg-scope refusal, every `si-*` upstream/validation error
+    (no API key, key rejected, not linked, session changed, no comms, no
+    active session, no PDC on file, upstream unreachable/timeout/error/bad
+    body, flight/leg not found, invalid id), and the same relay/sidecar/host
+    failure codes as the other three.
+
+  Picking an option that doesn't exist in a selector's own list throws
+  `Unknown … scenario: <name>` in the DevTools console rather than silently
+  doing nothing.
 - Operate the CDU buttons and keyboard normally. START/STOP update mock status;
   configuration saves affect memory only. Use dummy credentials.
 - Save a file under `ui/` or `gauge/dev/` to reload the preview automatically.

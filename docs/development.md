@@ -21,7 +21,7 @@ gauge/
 sidecar/
   src/                       the Node/TypeScript sidecar
   tests/                     vitest unit tests
-  tests/fixtures/            recorded server-response fixtures (clearance/, datalink/, simbrief/)
+  tests/fixtures/            recorded server-response fixtures (clearance/, datalink/, sayintentions/, simbrief/)
   samples/config/            good and bad sample config files used by tests and inspect-config
   package.json, tsconfig.json, vitest.config.ts
 src-tauri/
@@ -90,7 +90,8 @@ webview.
   `page-global` (no page references `FMC`), `page-events` (no page subscribes
   to `onLog`/`onExit`/`onDatalink` directly), `adapter-leak` (`app.js` never
   exposes `bridge` as an interface member), `interface-members` (every named
-  interface member is actually present on `app.js`'s built interface).
+  interface member is actually present on `app.js`'s built interface —
+  `npm run check:ui` currently reports all thirty-one present).
 - **Host contract changes**: adding or changing a Tauri command or event
   needs a matching Rust `#[tauri::command]`/emit *and* a matching entry in
   `ui/src/bridge.js`, verified by `node tools/contract-check.mjs` — see
@@ -114,7 +115,7 @@ real one.
 | Check | Covers | Runs where | Prerequisites |
 | --- | --- | --- | --- |
 | `npm --prefix sidecar run typecheck` | Strict TypeScript type-check of `sidecar/src` | Any OS, Node 20 | none |
-| `npm --prefix sidecar test` | Sidecar unit tests: config, protocol, status, SimConnect, traffic, uplink, datalink client/classify/model/scope/service, clearance and SimBrief models, entrypoint | Any OS, Node 20 | TLS tests spawn `openssl`; on Windows it resolves from `C:\Program Files\Git\usr\bin` |
+| `npm --prefix sidecar test` | Sidecar unit tests: config, protocol, status, SimConnect, traffic, uplink, datalink client/classify/model/scope/service, clearance/SimBrief/SayIntentions models, sentinel tests that assert secrets never leak, entrypoint | Any OS, Node 20 | TLS tests spawn `openssl`; on Windows it resolves from `C:\Program Files\Git\usr\bin` |
 | `npm --prefix sidecar run build` | Compiles `sidecar/src` to `sidecar/dist` | Any OS, Node 20 | none |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Rust formatting | Any Rust toolchain | none |
 | `cargo test --manifest-path src-tauri/Cargo.toml --offline` | Rust unit tests plus process-lifecycle tests that spawn `src-tauri/tests/fake-sidecar.py` as a stand-in sidecar | Windows (this project) | `python` on PATH; uses real sleeps, takes roughly ten seconds |
@@ -122,7 +123,7 @@ real one.
 | `supervisor.rs`'s Linux-only test module | Extra process-lifecycle assertions that only compile under `#[cfg(all(test, target_os = "linux"))]` | Linux only | Not exercised by the commands above on Windows |
 | `node tools/contract-check.mjs` | Every Tauri command/event name matches between `src-tauri/` and `ui/src/bridge.js`, and datalink relay timeouts stay ahead of the sidecar's own HTTP timeouts | Any OS, Node | none |
 | `npm run check:ui` | The eight UI ownership-boundary rules above | Any OS, Node | none |
-| `npm run test:gauge` | Preview harness: mock host, dev server, datalink/SimBrief/clearance vocab and session modules, and full CDU page-flow tests | Any OS, Node | none |
+| `npm run test:gauge` | Preview harness: mock host, dev server, datalink/SimBrief/clearance/SayIntentions vocab and session modules, and full CDU page-flow tests | Any OS, Node | none |
 | `node ui/tools/render-check.mjs` | Headless-Chromium screenshot and label check against an independent STATUS-state table | Any OS, Node | Needs `puppeteer`, not installed by default |
 | `node ui/tools/host-swap-check.mjs` | Proves a synthetic `window.__FMC_HOST__` can drive the real panel | Any OS, Node | Needs `puppeteer`, not installed by default |
 | Manual test plan (below) | End-to-end behaviour against a real MSFS session and the real msfslogger server | A Windows box with MSFS and WebView2 | A built app, Node 20, a reachable msfslogger server, and a known ingest token |

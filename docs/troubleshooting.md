@@ -43,23 +43,25 @@ while diagnosing, see [Diagnostics](#diagnostics) at the end of this file and
 | Backend axis reads `ACARS NO COMM` | Can't reach the server at all (refused, timed out, DNS failure) | Check the server is running and the URL/network path is correct |
 | Backend axis stays on `ACARS CONNECTING` for a long time before finally showing `ACARS NO COMM` | **Current limitation**: neither ingest requests (frame/event/traffic posts) nor the 15 s reachability probe set their own request timeout, and ingest requests follow redirects by default, resending the ingest token to wherever the redirect points. A server that accepts the connection and then never answers can hold a request open for up to about 5 minutes — undici's own default headers timeout — before it fails and the Backend axis reports `ACARS NO COMM` | Not user-fixable from the CDU; if the axis is taking minutes to fault, check the server is actually responding, or restart it |
 
-## DATALINK / FPLN / PDC error codes
+## DATALINK / FPLN / PDC / SayIntentions error codes
 
-These relay-level codes can surface from any DATALINK, FPLN or clearance
-request, worded per feature — see [cdu-reference](cdu-reference.md) for the
-exact CDU text per page.
+These relay-level codes can surface from any DATALINK, FPLN, PDC clearance or
+SayIntentions request, worded per feature — see [cdu-reference](cdu-reference.md)
+for the exact CDU text per page. SayIntentions pages (`DL-SI`) also show a
+larger set of upstream-specific error codes; that full vocabulary is not
+repeated here — see [cdu-reference.md](cdu-reference.md) for the table.
 
 | Code | Cause | Fix |
 |---|---|---|
-| `sidecar-outdated` | The running sidecar's `hello` doesn't advertise the feature (`datalink`/`simbrief-prefile`/`pdc-clearance`) this shell expects | `npm --prefix sidecar run build`, then restart the app |
-| `shell-timeout` | No answer from the sidecar within the shell's relay budget (12 s general, 30 s for prefile) | Outcome unknown for a write. Whether a retry is safe depends on the op: **clearance** and **SimBrief prefile** are safe to press again — the server itself deduplicates (a repeat clearance answers with the same rows and `ALREADY ISSUED`; a repeat prefile answers `ALREADY FILED` for the same OFP), so a retry never writes twice. A **canned downlink, WX request or loadsheet request** carries no such dedup id — the server has no way to recognize a resend as the same request, so retrying after a timeout can send or request a second time. For a canned downlink specifically, open `DL-THREAD` first to check whether the message actually went out before pressing `SEND*` again |
+| `sidecar-outdated` | The running sidecar's `hello` doesn't advertise the feature (`datalink`/`simbrief-prefile`/`pdc-clearance`/`sayintentions`) this shell expects | `npm --prefix sidecar run build`, then restart the app |
+| `shell-timeout` | No answer from the sidecar within the shell's relay budget (12 s general, 30 s for prefile, 25 s for the three upstream-touching SayIntentions ops — `si-link`, `si-import`, `si-pdc`; `si-status` and `si-unlink` use the 12 s general budget) | Outcome unknown for a write. After a timeout, a retry is safe for clearance and prefile only — the server itself deduplicates (a repeat clearance answers with the same rows and `ALREADY ISSUED`; a repeat prefile answers `ALREADY FILED` for the same OFP). A canned downlink, WX or loadsheet has no dedup id, so check `DL-THREAD` first before pressing `SEND*` again. The **SayIntentions PDC push is the one action that is never safe to repeat**: a second push files a second CPDLC message into the pilot's live session, and neither the client nor the server can determine afterwards whether the first was sent. The CDU therefore says `PDC MAY HAVE BEEN SENT`, never `SAFE TO PRESS AGAIN`. `si-link`, `si-unlink` and `si-import` are all safe to repeat — import is cursor-driven and dedups server-side |
 | `busy` | The relay already has `PENDING_MAX` (8) datalink/clearance/prefile requests outstanding, so a 9th concurrent request is refused before it reaches the sidecar; the same code also covers the shell's internal operation/stdin queues being full | Wait for an in-flight request to resolve, then retry |
 | `sidecar-exited` | The sidecar died mid-request | The shell restarts it automatically; retry once it's back |
 | `prefile-in-progress` / `clearance-in-progress` | A second press while one request is already outstanding | Refused before reaching the sidecar — no duplicate write; wait for the first to resolve |
 | `host-unsupported` (shown as `…NOT SUPPORTED`) | An installed custom host (not this app's own Tauri shell — e.g. the browser preview harness) lacks the method | Not fixable by restarting this app's own shell |
 | `host-error` (shown as `…HOST FAULT`) | This build's own shell exe predates the feature; its call to the missing command fails outright | Restart `cargo tauri dev` (or relaunch a built app) — this also rebuilds the sidecar first |
 | `token-invalid` (shown as `INGEST TOKEN REJECTED`) | Server confirmed the token is wrong; DATALINK/FPLN/clearance stop polling/retrying until the config is corrected and re-saved | Re-enter the token on `CFG NETWORK`, L2, and save |
-| `unavailable` (shown as `…UNAVAILABLE`) | Server answered, but not on a feature-aware route — the server predates DATALINK/SimBrief prefile/the clearance route | Upgrade the server to a build with the route |
+| `unavailable` (shown as `…UNAVAILABLE`) | Server answered, but not on a feature-aware route — the server predates DATALINK/SimBrief prefile/the clearance route. A SayIntentions request hitting the same server-side gap gets the distinct `sayintentions-unavailable` code instead, not this one — see [cdu-reference](cdu-reference.md) | Upgrade the server to a build with the route |
 
 ## Preview harness
 

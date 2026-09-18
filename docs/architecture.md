@@ -7,8 +7,8 @@ them, and the boundaries the codebase enforces between them.
 ## Component map
 
 ```text
-+-------------------------+        Tauri IPC        +---------------------------+
-|   CDU panel (ui/)       | <----------------------> |  Tauri shell              |
++-------------------------+         Tauri IPC         +---------------------------+
+|   CDU panel (ui/)       | <-----------------------> |  Tauri shell              |
 |   webview, ES modules   |   commands + events       |  (src-tauri/, Rust)       |
 |   host contract:        |                           |  window, sidecar          |
 |   ui/src/bridge.js      |                           |  supervisor, ConfigStore  |
@@ -26,12 +26,12 @@ them, and the boundaries the codebase enforces between them.
                                                               |             |
                                                     SimConnect|             |HTTP(S)
                                                               v             v
-                                                     +----------------+  +----------------------+
-                                                     | MSFS           |  | msfslogger server     |
-                                                     | (node-         |  | (another machine;     |
-                                                     |  simconnect)   |  |  ingest + datalink/    |
-                                                     +----------------+  |  SimBrief/PDC routes)  |
-                                                                          +----------------------+
+                                                     +----------------+  +-----------------------------+
+                                                     | MSFS           |  | msfslogger server           |
+                                                     | (node-         |  | (another machine;           |
+                                                     |  simconnect)   |  | ingest + datalink/SimBrief/ |
+                                                     +----------------+  | PDC/SayIntentions routes)   |
+                                                                         +-----------------------------+
 ```
 
 `gauge/dev/` is a separate, optional fourth piece: a browser preview harness
@@ -44,7 +44,7 @@ UI development with no Rust or MSFS running.
 | --- | --- | --- |
 | CDU panel (`ui/`) | `ui/src/app.js` (page router, scratchpad, key dispatch), `ui/src/bridge.js` (host contract), `ui/src/pages/*` (STATUS, CFG, DATALINK, FPLN pages) | Renders the CDU screen and keys, and talks to whatever host it finds through the host contract only |
 | Tauri shell (`src-tauri/`) | `src-tauri/src/main.rs` (commands/events), `supervisor.rs` (sidecar lifecycle), `config.rs` (`ConfigStore`), `datalink.rs` (relay), `protocol.rs`/`framing.rs` (wire decode), `restart.rs` (restart budget) | Owns the window, spawns and supervises the sidecar process, persists `config.json`, relays datalink requests, and is the only place the ingest token is written to disk |
-| sidecar (`sidecar/`) | `index.ts` (entrypoint), `simconnect.ts` (SimConnect), `uplink.ts` (ingest HTTP), `datalink-client.ts`/`datalink-service.ts` (ACARS/SimBrief/clearance), `config.ts` (config load/validate) | Reads MSFS over SimConnect, uplinks flight data to the msfslogger server, and runs the datalink/SimBrief/clearance poll and request cycle. The only process that ever opens a socket to the server |
+| sidecar (`sidecar/`) | `index.ts` (entrypoint), `simconnect.ts` (SimConnect), `uplink.ts` (ingest HTTP), `datalink-client.ts`/`datalink-service.ts` (ACARS/SimBrief/clearance/SayIntentions), `sayintentions-model.ts` (SayIntentions classification and result projections), `config.ts` (config load/validate) | Reads MSFS over SimConnect, uplinks flight data to the msfslogger server, and runs the datalink/SimBrief/clearance/SayIntentions poll and request cycle. The only process that ever opens a socket to the server |
 | preview harness (`gauge/dev/`) | `gauge/dev/server.mjs`, `gauge/dev/mock-host.js` | Serves the CDU panel in a plain browser against a mock host, for UI iteration without Tauri or MSFS |
 
 ## Runtime flows
@@ -140,10 +140,12 @@ out.
 - **Sidecar -> MSFS**: SimConnect, via `node-simconnect`, local-machine only.
 - **Sidecar -> msfslogger server**: HTTP or HTTPS, per `serverUrl` — the
   config accepts either scheme. For HTTPS against a self-signed certificate,
-  `certPath` supplies the CA to trust. Covers the ingest routes and the 13
-  datalink/SimBrief/clearance routes. This is the only process in the client
-  that ever opens a socket to the server; see [data-model](data-model.md) and
-  [api](api.md) for the wire shapes and route table.
+  `certPath` supplies the CA to trust. Covers the ingest routes and the 20
+  datalink/SimBrief/clearance/SayIntentions routes — seven of which serve the
+  six SayIntentions server routes, because the link route has two literal
+  forms. This is the only process in the client that ever opens a socket to
+  the server; see [data-model](data-model.md) and [api](api.md) for the wire
+  shapes and route table.
 - **Shell -> disk**: the only file the shell writes in normal operation is
   `config.json`, via an atomic write.
 
@@ -152,9 +154,10 @@ out.
 - **MSFS / SimConnect**, reached through `node-simconnect` — local IPC to a
   running simulator, not a network dependency.
 - **msfslogger server** — the one remote host the client talks to, holding the
-  user's logbook and proxying SimBrief and the simulated PDC clearance
-  server-side. The sidecar never contacts SimBrief or any ACARS network
-  directly.
+  user's logbook and proxying SimBrief, the simulated PDC clearance and
+  SayIntentions server-side. The sidecar never contacts SimBrief, any ACARS
+  network or SayIntentions directly, and it never holds a SayIntentions API
+  key: the server holds it, and the CDU reads only whether one is set.
 - **WebView2** — renders the CDU panel; ships with Windows 11 and updated
   Windows 10.
 - **Tauri** (2.x CLI and library) — the shell framework: window, IPC,

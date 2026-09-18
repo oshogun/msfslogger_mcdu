@@ -232,9 +232,50 @@ interface LoadsheetSheet {
 }
 ```
 
+### SayIntentions
+
+```ts
+interface SayIntentionsLink {
+  upstreamFlightId: string; // token-scrubbed, trimmed, 1-64 UTF-16 units
+  sinceId: number | null;
+  baselineCommId: number | null;
+  linkedAt: string;         // ISO-8601, required
+  lastImportAt: string | null;
+  importedCount: number;    // 0 to 999 999
+}
+
+// si-status result — answers one of two questions, picked by the request
+{
+  answered: "link" | "settings";
+  flightId: number | null;  // null when answered === "settings"
+  apiKeySet: boolean;
+  linked: boolean | null;   // null when answered === "settings": not asked, not assumed
+  link: SayIntentionsLink | null;
+  httpStatus: number;
+}
+
+// si-link result
+{ flightId: number; created: boolean; pendingMessages: number; link: SayIntentionsLink; httpStatus: number }
+
+// si-unlink result
+{ flightId: number; unlinked: boolean; httpStatus: number }
+
+// si-import result — imported rows themselves reach the CDU through the
+// thread, never through this shape
+{ flightId: number; imported: number; alreadySeen: number; skipped: number; sinceId: number | null; httpStatus: number }
+
+// si-pdc result — the one-shot CPDLC push; sentText is what actually went upstream
+{ plannedLegId: number; sentText: string; httpStatus: number }
+```
+
+None of these shapes, nor any other SayIntentions message, ever carries the
+pilot's API key or a masked form of it: the server holds the key, and
+`apiKeySet` is the only fact about it the client ever sees.
+
 Every server-supplied string in these shapes (thread bodies, canned labels,
-WX text, loadsheet fields, prefile labels, clearance route/ICAO) is
-token-scrubbed before it leaves the sidecar — see [security](security.md).
+WX text, loadsheet fields, prefile labels, clearance route/ICAO, SayIntentions
+`upstreamFlightId`/`sentText`) is token-scrubbed before it leaves the sidecar
+— see [security](security.md).
 
 ## In-memory state (not persisted)
 
@@ -244,6 +285,7 @@ token-scrubbed before it leaves the sidecar — see [security](security.md).
 | Prefiled-leg state | sidecar | One leg id + label + the server/token it was filed under; dropped on token refusal, a server/token change, flight start, the user's own `prefile-clear` op, a 404 on the prefiled leg's own thread poll, or a `leg-not-found` on any write (send-canned, WX, loadsheet) or clearance request aimed at it |
 | Traffic sweep buffer | sidecar | Accumulated per 2 s sweep, cleared each cycle |
 | Datalink poll lease | sidecar, requested by the CDU panel | A 65-second window a `watch: true` request buys before polling stops on its own if not renewed |
+| SayIntentions in-flight guard | sidecar (`datalink-service.ts`) | One boolean shared by all four SayIntentions writes (link/unlink/import/pdc), not one per op; a second write while it is set answers `sayintentions-in-progress`. No SayIntentions link data is cached: `si-status` always re-fetches from the server |
 | Status/log cache, 200-entry log ring | shell | So a fast crash loop's cause is still visible after the fact |
 
 Nothing but `config.json` survives a process restart. A CDU panel reconnecting

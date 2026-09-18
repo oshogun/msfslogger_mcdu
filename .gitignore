@@ -9,3 +9,4 @@ target/
 # Local coding-agent state and historical run artifacts.
 .claude/
 .codex/
+.agents/

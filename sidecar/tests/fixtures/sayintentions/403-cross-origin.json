@@ -1,0 +1,37 @@
+{
+  "_sample": "403-cross-origin",
+  "_why": "The server refused the origin. The server URL is the thing to check.",
+  "_op": "si-link",
+  "_route": "si-link",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW The request looked cross-origin."
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "rejected",
+    "httpStatus": 403,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS REJECTED 403",
+    "hint": "",
+    "kind": "error"
+  }
+}

@@ -26,6 +26,11 @@
 // - A clearance request writes logbook rows the first time, so it follows the
 //   same discipline: one request per op, never retried, never made by a poll,
 //   and refused while another is in flight.
+// - The SayIntentions actions bind a flight to a live upstream session, import
+//   comms into the thread or send a real message to the pilot's ATC. They
+//   follow the clearance discipline, with one guard across all four of them:
+//   each is one operator press against one upstream session, and interleaving
+//   them is meaningless. The two reads are never polled; a page asks for them.
 //
 // Timers go through setTimeout so a fake clock drives the whole schedule.
 
@@ -59,6 +64,14 @@ import type {
   DatalinkThreadSummary,
   WriteTarget,
 } from './protocol';
+import {
+  classifySayIntentionsOutcome,
+  projectSayIntentionsImport,
+  projectSayIntentionsLink,
+  projectSayIntentionsPdc,
+  projectSayIntentionsStatus,
+  projectSayIntentionsUnlink,
+} from './sayintentions-model';
 import { classifySimbriefOutcome, projectSimbriefPrefile, projectSimbriefSettings } from './simbrief-model';
 import type { LogSink } from './uplink';
 
@@ -175,6 +188,8 @@ export class DatalinkService {
   private prefiled: PrefiledState | null = null;
   private prefileInFlight = false;
   private clearanceInFlight = false;
+  /** One guard for all four SayIntentions writes; see `sayintentionsWrite`. */
+  private sayintentionsInFlight = false;
 
   constructor(deps: DatalinkServiceDeps) {
     this.deps = deps;
@@ -565,6 +580,16 @@ export class DatalinkService {
         return this.prefileClear();
       case 'clearance':
         return this.clearance(request.params);
+      case 'si-status':
+        return this.sayintentionsStatus(request.params);
+      case 'si-link':
+        return this.sayintentionsLink(request.params);
+      case 'si-unlink':
+        return this.sayintentionsUnlink(request.params);
+      case 'si-import':
+        return this.sayintentionsImport(request.params);
+      case 'si-pdc':
+        return this.sayintentionsPdc(request.params);
     }
   }
 
@@ -877,6 +902,162 @@ export class DatalinkService {
     } finally {
       this.clearanceInFlight = false;
     }
+  }
+
+  // ── SayIntentions ─────────────────────────────────────────────────────────
+
+  /**
+   * One request for a SayIntentions op, never retried. The only thing it can
+   * change on the datalink is a refused token, which is applied and emitted
+   * here; an answer that says the flight or the leg has gone re-resolves the
+   * scope, as it does for the other writes. A write is followed by the cycle
+   * every write gets, so the thread shows the imported comms or the sent PDC,
+   * or proves they did not land, before the operator can press again. Logs one
+   * line naming the op, an outcome word and the HTTP status: never a flight, a
+   * leg, a session, a count or anything the server wrote.
+   */
+  private async sayintentions<T>(
+    route: DatalinkRoute,
+    op: 'status' | 'link' | 'unlink' | 'import' | 'pdc',
+    project: (json: unknown, httpStatus: number) => { ok: true; result: T } | { ok: false; detail: string },
+    describe: (result: T) => string,
+  ): Promise<{ ok: true; result: T } | { ok: false; error: DatalinkError } | null> {
+    const outcome = await this.deps.client.request(route, this.abort.signal);
+    if (this.shuttingDown) return null;
+    // A read asks for no refresh: the pages that show it request it themselves.
+    if (op !== 'status') this.afterWrite(outcome);
+    const classified = classifySayIntentionsOutcome(outcome, this.deps.token());
+
+    if (!classified.ok) {
+      if (classified.retry === 'latch') {
+        this.applyFailure(classified, routeTemplate(route.key));
+        this.emit();
+      }
+      if (classified.code === 'flight-not-found' || classified.code === 'leg-not-found') {
+        // The server says the leg is gone, so a prefiled leg with that id is
+        // dropped as it would be for any other request aimed at it.
+        if (classified.code === 'leg-not-found' && route.key === 'si-pdc' && this.prefiled?.plannedLegId === route.id) {
+          this.dropPrefiled();
+          this.emit();
+        }
+        this.cycleSoon();
+      }
+      const status = classified.httpStatus === null ? '---' : String(classified.httpStatus);
+      this.deps.log('warn', `SayIntentions ${op} ${classified.code} (HTTP ${status})`);
+      return failureOutcome(classified);
+    }
+
+    const projected = project(classified.json, classified.httpStatus);
+    if (!projected.ok) {
+      // The action may have taken effect, so the outcome is unknown; the
+      // availability axis is left alone because an op is not a poll.
+      this.deps.log('warn', `SayIntentions ${op} bad-response (HTTP ${classified.httpStatus})`);
+      return error('bad-response', classified.httpStatus);
+    }
+    this.deps.log('info', `SayIntentions ${op} ${describe(projected.result)} (HTTP ${classified.httpStatus})`);
+    return { ok: true, result: projected.result };
+  }
+
+  /**
+   * The in-flight guard, checked before anything else so a second press can
+   * never reach the server while the first one's fate is still open. One guard
+   * covers all four actions: each is one press against one upstream session,
+   * interleaving a link with an import is meaningless, and it also catches a
+   * double press that crosses pages. The read takes no guard.
+   */
+  private async sayintentionsWrite<K extends 'si-link' | 'si-unlink' | 'si-import' | 'si-pdc'>(
+    run: () => Promise<DatalinkOutcome<K>>,
+  ): Promise<DatalinkOutcome<K>> {
+    if (this.sayintentionsInFlight) return error('sayintentions-in-progress');
+    this.sayintentionsInFlight = true;
+    try {
+      return await run();
+    } finally {
+      this.sayintentionsInFlight = false;
+    }
+  }
+
+  /**
+   * The read. Which question it asks is the parameter's to decide: an id asks
+   * this flight's link state, null asks only whether a key is on file, which is
+   * the one SayIntentions problem the operator can still fix before a flight
+   * exists. The sidecar does not re-resolve its scope to choose.
+   */
+  private async sayintentionsStatus(params: DatalinkParams['si-status']): Promise<DatalinkOutcome<'si-status'>> {
+    if (!this.deps.hasConfig() || this.latched) return this.localRefusal();
+    const { flightId } = params;
+    const route: DatalinkRoute = flightId === null ? { key: 'si-settings' } : { key: 'si-link-status', id: flightId };
+    const outcome = await this.sayintentions(
+      route,
+      'status',
+      (json, httpStatus) => projectSayIntentionsStatus(json, httpStatus, flightId, this.deps.token()),
+      () => 'ok',
+    );
+    return outcome ?? error('sidecar-unavailable');
+  }
+
+  /** `from` picks the route key; nothing composes a query string. */
+  private sayintentionsLink(params: DatalinkParams['si-link']): Promise<DatalinkOutcome<'si-link'>> {
+    return this.sayintentionsWrite<'si-link'>(async () => {
+      if (!this.deps.hasConfig() || this.latched) return this.localRefusal();
+      const route: DatalinkRoute =
+        params.from === 'now' ? { key: 'si-link-now', id: params.flightId } : { key: 'si-link', id: params.flightId };
+      const outcome = await this.sayintentions(
+        route,
+        'link',
+        (json, httpStatus) => projectSayIntentionsLink(json, httpStatus, params.flightId, this.deps.token()),
+        (result) => (result.created ? 'created' : 'relinked'),
+      );
+      return outcome ?? error('sidecar-unavailable');
+    });
+  }
+
+  private sayintentionsUnlink(params: DatalinkParams['si-unlink']): Promise<DatalinkOutcome<'si-unlink'>> {
+    return this.sayintentionsWrite<'si-unlink'>(async () => {
+      if (!this.deps.hasConfig() || this.latched) return this.localRefusal();
+      const route: DatalinkRoute = { key: 'si-unlink', id: params.flightId };
+      const outcome = await this.sayintentions(
+        route,
+        'unlink',
+        (json, httpStatus) => projectSayIntentionsUnlink(json, httpStatus, params.flightId),
+        (result) => (result.unlinked ? 'unlinked' : 'nothing-to-remove'),
+      );
+      return outcome ?? error('sidecar-unavailable');
+    });
+  }
+
+  private sayintentionsImport(params: DatalinkParams['si-import']): Promise<DatalinkOutcome<'si-import'>> {
+    return this.sayintentionsWrite<'si-import'>(async () => {
+      if (!this.deps.hasConfig() || this.latched) return this.localRefusal();
+      const route: DatalinkRoute = { key: 'si-import', id: params.flightId };
+      const outcome = await this.sayintentions(
+        route,
+        'import',
+        (json, httpStatus) => projectSayIntentionsImport(json, httpStatus, params.flightId),
+        () => 'ok',
+      );
+      return outcome ?? error('sidecar-unavailable');
+    });
+  }
+
+  /**
+   * One POST for the leg the CDU confirmed. The sidecar does not re-resolve the
+   * leg: the id it is given is the one the user saw. A repeat send files a
+   * second message into a live session, so this is the press that must never be
+   * doubled.
+   */
+  private sayintentionsPdc(params: DatalinkParams['si-pdc']): Promise<DatalinkOutcome<'si-pdc'>> {
+    return this.sayintentionsWrite<'si-pdc'>(async () => {
+      if (!this.deps.hasConfig() || this.latched) return this.localRefusal();
+      const route: DatalinkRoute = { key: 'si-pdc', id: params.plannedLegId };
+      const outcome = await this.sayintentions(
+        route,
+        'pdc',
+        (json, httpStatus) => projectSayIntentionsPdc(json, httpStatus, params.plannedLegId, this.deps.token()),
+        () => 'sent',
+      );
+      return outcome ?? error('sidecar-unavailable');
+    });
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────

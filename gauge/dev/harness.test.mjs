@@ -408,8 +408,9 @@ function fakeDocument() {
  * app.js) and wired to the mock host. Leaving to MENU afterwards releases the
  * lease, so a failing test cannot leave the renew interval holding Node open.
  *
- * `overrides.fpln` also registers the FPLN pages and `overrides.clearance` the
- * clearance pages; `overrides.cfg` registers everything through
+ * `overrides.fpln` also registers the FPLN pages, `overrides.clearance` the
+ * clearance pages and `overrides.sayintentions` the clearance and SayIntentions
+ * pages together; `overrides.cfg` registers everything through
  * ui/src/pages/index.js instead, CFG pages included; `overrides.via` routes
  * every host call through another object (an adopted bridge) instead of the mock.
  */
@@ -456,6 +457,11 @@ async function mountDatalinkPages(t, tag, overrides = {}) {
     prefileSimbrief: () => run(() => (overrides.prefileSimbrief || api.prefileSimbrief)()),
     clearPrefiledLeg: () => run(() => (overrides.clearPrefiledLeg || api.clearPrefiledLeg)()),
     requestClearance: (req) => run(() => (overrides.requestClearance || api.requestClearance)(req)),
+    getSayIntentionsStatus: (req) => run(() => (overrides.getSayIntentionsStatus || api.getSayIntentionsStatus)(req)),
+    linkSayIntentions: (req) => run(() => (overrides.linkSayIntentions || api.linkSayIntentions)(req)),
+    unlinkSayIntentions: (req) => run(() => (overrides.unlinkSayIntentions || api.unlinkSayIntentions)(req)),
+    importSayIntentionsComms: (req) => run(() => (overrides.importSayIntentionsComms || api.importSayIntentionsComms)(req)),
+    sendSayIntentionsPdc: (req) => run(() => (overrides.sendSayIntentionsPdc || api.sendSayIntentionsPdc)(req)),
     getConfigCache: () => shell.config,
     setConfig: (patch) => api.setConfig(patch),
     refreshConfig: async () => {
@@ -474,8 +480,31 @@ async function mountDatalinkPages(t, tag, overrides = {}) {
   } else {
     const shared = register(fmc);
     write.register(fmc, shared);
-    if (overrides.clearance) {
-      (await import(new URL(`../../ui/src/pages/datalink-clearance-pages.js?${tag}`, import.meta.url))).register(fmc, shared);
+    if (overrides.clearance || overrides.sayintentions) {
+      // The SayIntentions module hands DL-CLEARANCE its R5 action through a
+      // static import, so when it is registered both modules have to be the one
+      // module instance that import resolves to — the untagged one. The two
+      // forget exports are what the shell already calls when the server or the
+      // token changes, so each mount starts from the state a fresh app has and
+      // leaves none behind.
+      const clearanceUrl = overrides.sayintentions
+        ? new URL('../../ui/src/pages/datalink-clearance-pages.js', import.meta.url)
+        : new URL(`../../ui/src/pages/datalink-clearance-pages.js?${tag}`, import.meta.url);
+      const clearancePages = await import(clearanceUrl);
+      if (overrides.sayintentions) clearancePages.forgetClearances();
+      clearancePages.register(fmc, shared);
+      if (overrides.sayintentions) {
+        const siPages = await import(new URL(`../../ui/src/pages/datalink-sayintentions-pages.js?${tag}`, import.meta.url));
+        siPages.register(fmc, shared);
+        // The clearance module is the shared untagged instance here, so its PDC
+        // hook has to be released as well: a later mount would otherwise find an
+        // action still bound to this one.
+        t.after(() => {
+          siPages.forgetSayIntentions();
+          clearancePages.forgetClearances();
+          clearancePages.setPdcAction(null);
+        });
+      }
     }
   }
   if (overrides.fpln && !overrides.cfg) {
@@ -2117,13 +2146,17 @@ test('clearance vocab: the target-leg table, altitude and route rules, and every
   assert.equal(vocab.formatPair(clearanceResult()), 'KJFK TO EGLL');
   assert.equal(vocab.formatPair(clearanceResult({ departure: null, destination: '' })), '---- TO ----');
 
-  for (const [route, pages] of [[SHORT_ROUTE, 1], [routeOfLength(1200), 4], [routeOfLength(4096), 11], ['X'.repeat(200), 1], ['GREKI DCT\r\nMARTN\tDCT', 1]]) {
+  // Row 10 is a prompt row on every page, so the route block is four lines on
+  // page 1 and eight after it, and a route of five to nine lines pages once more
+  // than a five-and-nine layout would.
+  assert.deepEqual([vocab.PAGE1_ROUTE_LINES, vocab.MORE_ROUTE_LINES], [4, 8]);
+  for (const [route, pages] of [[SHORT_ROUTE, 1], [routeOfLength(1200), 4], [routeOfLength(4096), 12], ['X'.repeat(200), 2], ['GREKI DCT\r\nMARTN\tDCT', 1]]) {
     const m = vocab.routePageCount(route);
     assert.equal(m, pages, `${route.length} characters`);
     let rejoined = '';
     for (let p = 1; p <= m; p += 1) {
       const lines = vocab.routeLinesOnPage(route, p);
-      assert.ok(lines.length > 0 && lines.length <= (p === 1 ? 5 : 9), `${route.length} page ${p}`);
+      assert.ok(lines.length > 0 && lines.length <= (p === 1 ? 4 : 8), `${route.length} page ${p}`);
       for (const line of lines) {
         assert.ok(line.text.length <= CELL_MAX);
         rejoined += line.text + line.join;
@@ -2392,15 +2425,17 @@ test('clearance errors: every reachable answer shows its text and hint, never th
 test('clearance results: pair, route pages, altitude, squawk and markers as issued, and the PDC pair in the thread', async (t) => {
   const line1 = 'GREKI DCT MARTN DCT EBONY N251A JOOPY NATW GISTI';
   const line2 = 'UN514 NUMPO BOGNA1H';
+  // Row 10 carries the SEND PDC> cell on every page; it is empty here because
+  // nothing has registered the action, and the route block ends at row 9.
   const page1 = (pair, marker, altitude, route) => [
     ['SIMULATED CLEARANCE', 'LEG 12'], [pair, marker], ['INITIAL ALT', 'SQUAWK'], [altitude, '4521'], ['CLEARED VIA'],
-    ...route, ['NOT FOR REAL WORLD USE'], ['<RETURN', 'MESSAGES>'],
+    ...route, ['', ''], ['NOT FOR REAL WORLD USE'], ['<RETURN', 'MESSAGES>'],
   ];
-  const shortRoute = [[line1], [line2], [''], [''], ['']];
+  const shortRoute = [[line1], [line2], [''], ['']];
   const expected = {
     created: [page1('KJFK TO EGLL', '', '5000FT', shortRoute), 'CLEARANCE RECEIVED'],
     'not-created': [page1('KJFK TO EGLL', 'ALREADY ISSUED', '5000FT', shortRoute), 'CLEARANCE ON FILE'],
-    'null-route-and-icaos': [page1('---- TO ----', '', '5000FT', [['NO ROUTE ON FILE'], [''], [''], [''], ['']]), 'CLEARANCE RECEIVED'],
+    'null-route-and-icaos': [page1('---- TO ----', '', '5000FT', [['NO ROUTE ON FILE'], [''], [''], ['']]), 'CLEARANCE RECEIVED'],
     'fl-altitude': [page1('KJFK TO EGLL', '', 'FL180', shortRoute), 'CLEARANCE RECEIVED'],
     'ft-altitude': [page1('KJFK TO EGLL', '', '4500FT', shortRoute), 'CLEARANCE RECEIVED'],
   };
@@ -2412,8 +2447,9 @@ test('clearance results: pair, route pages, altitude, squawk and markers as issu
       assert.equal(ui.shell.number, pages > 1 ? `${p}/${pages}` : '');
       const screen = ui.rows();
       assertClearanceWidths(screen, `route page ${p}`);
-      assert.deepEqual([screen[0], screen[10], screen[11]], [['SIMULATED CLEARANCE', 'LEG 12'], ['NOT FOR REAL WORLD USE'], ['<RETURN', 'MESSAGES>']]);
-      lines.push(...(p === 1 ? screen.slice(5, 10) : screen.slice(1, 10)).map((line) => line[0]));
+      assert.deepEqual([screen[0], screen[9], screen[10], screen[11]],
+        [['SIMULATED CLEARANCE', 'LEG 12'], ['', ''], ['NOT FOR REAL WORLD USE'], ['<RETURN', 'MESSAGES>']]);
+      lines.push(...(p === 1 ? screen.slice(5, 9) : screen.slice(1, 9)).map((line) => line[0]));
       assert.equal(ui.pages.get('DL-CLEARANCE').onPageKey(1), true);
     }
     assert.equal(ui.shell.number, pages > 1 ? `1/${pages}` : '', 'NEXT wraps to page 1');
@@ -2468,7 +2504,7 @@ test('clearance results: pair, route pages, altitude, squawk and markers as issu
   await ui.lsk('DL-INDEX', 'R5');
   await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
   assert.deepEqual([ui.shell.id, ui.rows()[1], ui.shell.scratchpad], ['DL-CLEARANCE', ['ABCDEFGH TO ABCDEFGH', 'ALREADY ISSUED'], ['CLEARANCE ON FILE', 'advisory']]);
-  assert.equal(readRoute(ui, 11).join(' '), longest);
+  assert.equal(readRoute(ui, 12).join(' '), longest);
 });
 
 test('clearance refusals: each refusing scope shows its text on DL-INDEX and asks the host for nothing', async (t) => {
@@ -2847,4 +2883,989 @@ test('clearance kept results are forgotten when CFG NETWORK saves another server
   assert.deepEqual([shell.id, shell.scratchpad, clearances()], ['DL-INDEX', ['CLEARANCE RECEIVED', 'advisory'], 5]);
   gaugeDev.setClearanceDelay(0);
   assert.deepEqual([await pressR5(), clearances()], ['DL-CLEARANCE-CONFIRM', 5]);
+});
+
+// ── SayIntentions ────────────────────────────────────────────────────────────
+
+const SI_SENTINEL = 'SENTINEL-SAYINTENTIONS-TOKEN-0000';
+const SI_SESSION = 'si-7f3a91c4';
+const SI_PDC_TEXT = 'PDC SWA1451 KJFK TO EGLL\nCLEARED VIA GREKI MARTN EBONY JOOPY\nCLIMB AND MAINTAIN 5000FT SQUAWK 4521\nSIMULATED - NOT FOR REAL WORLD USE';
+const SI_PDC_LINES = ['PDC SWA1451 KJFK TO EGLL', 'CLEARED VIA GREKI MARTN EBONY JOOPY',
+  'CLIMB AND MAINTAIN 5000FT SQUAWK 4521', 'SIMULATED - NOT FOR REAL WORLD USE'];
+const SI_METHODS = ['getSayIntentionsStatus', 'linkSayIntentions', 'unlinkSayIntentions',
+  'importSayIntentionsComms', 'sendSayIntentionsPdc'];
+/** The scenarios that answer rather than fail; `leg-scope` refuses on the page. */
+const SI_OK_SCENARIOS = ['no-key', 'key-not-linked', 'linked', 'link-from-now', 'import-none',
+  'import-rows', 'pdc-sent', 'leg-scope'];
+const SI_UNKNOWN_HINT = 'SAFE TO PRESS AGAIN';
+/**
+ * Scenario → [code, httpStatus, serverCode, CDU text, hint, scratchpad kind].
+ * The hint is the one shown for a link, unlink or import; SAFE TO PRESS AGAIN
+ * becomes PDC MAY HAVE BEEN SENT on the PDC page, because that is the one press
+ * that is not safe to repeat. `host-error` rejects instead of answering.
+ */
+const SI_ERRORS = {
+  'no-api-key': ['si-no-api-key', 409, 'NO_API_KEY', 'NO SAYINTENTIONS KEY', 'SET KEY ON WEB PREFILES PAGE', 'error'],
+  'bad-api-key': ['si-bad-api-key', 409, 'BAD_API_KEY', 'SAYINTENTIONS KEY REJECTED', 'CHECK KEY ON WEB PREFILES PAGE', 'error'],
+  'not-linked': ['si-not-linked', 409, 'NOT_LINKED', 'SAYINTENTIONS NOT LINKED', 'LINK THIS FLIGHT ON DL-SI FIRST', 'error'],
+  'session-changed': ['si-session-changed', 409, 'SESSION_CHANGED', 'SAYINTENTIONS SESSION CHANGED', 'UNLINK THEN LINK AGAIN', 'error'],
+  'no-comms': ['si-no-comms', 409, 'NO_COMMS_TO_LINK', 'NO RADIO CALLS YET', 'CALL ATC IN THE SIM THEN LINK', 'advisory'],
+  'no-active-session': ['si-no-session', 409, 'NO_ACTIVE_SESSION', 'SAYINTENTIONS NOT RUNNING', 'START SAYINTENTIONS THEN RETRY', 'advisory'],
+  'no-clearance': ['si-no-clearance', 409, 'NO_CLEARANCE', 'NO PDC ON FILE', 'REQUEST CLEARANCE ON DL-INDEX R5', 'error'],
+  'upstream-unreachable': ['si-upstream-unreachable', 502, 'UPSTREAM_UNREACHABLE', 'SAYINTENTIONS NO COMM', '', 'error'],
+  'upstream-timeout': ['si-upstream-timeout', 504, 'UPSTREAM_TIMEOUT', 'SAYINTENTIONS TIMEOUT', '', 'error'],
+  'upstream-error': ['si-upstream-error', 502, 'UPSTREAM_ERROR', 'SAYINTENTIONS UPSTREAM FAULT', '', 'error'],
+  'upstream-bad-body': ['si-upstream-bad-body', 502, 'UPSTREAM_BAD_BODY', 'SAYINTENTIONS UPSTREAM BAD DATA', '', 'error'],
+  'flight-not-found': ['flight-not-found', 404, 'FLIGHT_NOT_FOUND', 'FLIGHT NOT FOUND', '', 'error'],
+  'leg-not-found': ['leg-not-found', 404, 'PLANNED_LEG_NOT_FOUND', 'PLANNED LEG NOT FOUND', '', 'error'],
+  'invalid-id': ['invalid-id', 400, 'INVALID_ID', 'DATALINK INVALID ID', '', 'error'],
+  'invalid-token': ['token-invalid', 401, 'INVALID_INGEST_TOKEN', 'INGEST TOKEN REJECTED', 'CHECK INGEST TOKEN ON CFG NETWORK', 'error'],
+  'token-missing': ['token-missing', 401, null, 'SAYINTENTIONS TOKEN NOT RECEIVED', 'TOKEN HEADER LOST IN TRANSIT', 'error'],
+  unavailable: ['sayintentions-unavailable', 401, null, 'SAYINTENTIONS UNAVAILABLE', 'SERVER UPDATE NEEDED', 'error'],
+  rejected: ['rejected', 403, 'CROSS_ORIGIN', 'SAYINTENTIONS REJECTED 403', '', 'error'],
+  'http-error': ['http-error', 500, null, 'SAYINTENTIONS FAULT 500', SI_UNKNOWN_HINT, 'error'],
+  'unknown-code': ['some-future-code', null, null, 'SAYINTENTIONS FAULT', SI_UNKNOWN_HINT, 'error'],
+  'bad-response': ['bad-response', 201, null, 'SAYINTENTIONS BAD DATA', SI_UNKNOWN_HINT, 'error'],
+  'too-large': ['too-large', null, null, 'SAYINTENTIONS BAD DATA', SI_UNKNOWN_HINT, 'error'],
+  'client-timeout': ['timeout', null, null, 'SAYINTENTIONS RESULT UNKNOWN', SI_UNKNOWN_HINT, 'error'],
+  'relay-timeout': ['shell-timeout', null, null, 'SAYINTENTIONS RESULT UNKNOWN', SI_UNKNOWN_HINT, 'error'],
+  'tls-error': ['tls-error', null, null, 'DATALINK CERT FAULT', 'CHECK CERTIFICATE PATH', 'error'],
+  unreachable: ['unreachable', null, null, 'DATALINK NO COMM', SI_UNKNOWN_HINT, 'error'],
+  'no-config': ['no-config', null, null, 'DATALINK NO CONFIG', 'COMPLETE CFG NETWORK', 'error'],
+  'in-progress': ['sayintentions-in-progress', null, null, 'SAYINTENTIONS IN PROGRESS', '', 'error'],
+  'bad-params': ['bad-request', null, null, 'INVALID ENTRY', '', 'error'],
+  busy: ['busy', null, null, 'DATALINK BUSY', '', 'error'],
+  'sidecar-exited': ['sidecar-exited', null, null, 'DATALINK OFFLINE', SI_UNKNOWN_HINT, 'error'],
+  'sidecar-unavailable': ['sidecar-unavailable', null, null, 'DATALINK OFFLINE', '', 'error'],
+  'sidecar-outdated': ['sidecar-outdated', null, null, 'SIDECAR UPDATE REQUIRED', 'REBUILD SIDECAR THEN RESTART APP', 'error'],
+  'unsupported-host': ['host-unsupported', null, null, 'SAYINTENTIONS NOT SUPPORTED', '', 'error'],
+  'host-error': ['host-error', null, null, 'SAYINTENTIONS HOST FAULT', SI_UNKNOWN_HINT, 'error'],
+};
+const SI_SCENARIOS = [...SI_OK_SCENARIOS, ...Object.keys(SI_ERRORS)];
+/** The keys each result carries, so a mock answer missing a drawn field fails here. */
+const SI_RESULT_KEYS = {
+  getSayIntentionsStatus: ['answered', 'apiKeySet', 'flightId', 'httpStatus', 'link', 'linked'],
+  linkSayIntentions: ['created', 'flightId', 'httpStatus', 'link', 'pendingMessages'],
+  unlinkSayIntentions: ['flightId', 'httpStatus', 'unlinked'],
+  importSayIntentionsComms: ['alreadySeen', 'flightId', 'httpStatus', 'imported', 'sinceId', 'skipped'],
+  sendSayIntentionsPdc: ['httpStatus', 'plannedLegId', 'sentText'],
+};
+const SI_LINK_KEYS = ['baselineCommId', 'importedCount', 'lastImportAt', 'linkedAt', 'sinceId', 'upstreamFlightId'];
+/** The requests the five methods are called with, in flight 92 and leg 12. */
+const SI_REQUESTS = [
+  ['getSayIntentionsStatus', { flightId: 92 }],
+  ['linkSayIntentions', { flightId: 92, from: 'session-start' }],
+  ['importSayIntentionsComms', { flightId: 92 }],
+  ['unlinkSayIntentions', { flightId: 92 }],
+  ['sendSayIntentionsPdc', { plannedLegId: 12 }],
+];
+const siHint = (hint, action) => (hint === SI_UNKNOWN_HINT && action === 'pdc' ? 'PDC MAY HAVE BEEN SENT' : hint);
+
+test('sayintentions mock: every method answers every scenario with the host contract shape', async () => {
+  const { host, gaugeDev } = await loadMock();
+  const vocab = await pageModule('sayintentions-vocab.js');
+  for (const name of SI_METHODS) assert.equal(typeof host[name], 'function', name);
+  assert.equal(SI_SCENARIOS.length, 43);
+  assert.throws(() => gaugeDev.sayIntentionsScenario('nope'), { message: 'Unknown sayintentions scenario: nope' });
+  assert.throws(() => gaugeDev.sayIntentionsScenario('_default'), { message: 'Unknown sayintentions scenario: _default' });
+  assert.deepEqual([gaugeDev.setSayIntentionsDelay('x'), gaugeDev.setSayIntentionsDelay(-5), gaugeDev.setSayIntentionsDelay(0)], [0, 0, 0]);
+
+  // The default scenario is a linked flight with imports behind it.
+  gaugeDev.datalinkScenario('flight');
+  assert.deepEqual(plain(await host.getSayIntentionsStatus({ flightId: 92 })), {
+    ok: true,
+    result: {
+      answered: 'link', flightId: 92, apiKeySet: true, linked: true, httpStatus: 200,
+      link: {
+        upstreamFlightId: SI_SESSION, sinceId: 4821, baselineCommId: 4800,
+        linkedAt: '2026-09-16T14:05:11.000Z', lastImportAt: '2026-09-16T14:31:52.000Z', importedCount: 12,
+      },
+    },
+  });
+  assert.deepEqual(plain(await host.getSayIntentionsStatus({ flightId: null })), {
+    ok: true,
+    result: { answered: 'settings', flightId: null, apiKeySet: true, linked: null, link: null, httpStatus: 200 },
+  });
+
+  const predicate = {
+    getSayIntentionsStatus: (result) => vocab.isSiStatusResult(result, 92),
+    linkSayIntentions: (result) => vocab.isSiLinkResult(result, 92),
+    unlinkSayIntentions: (result) => vocab.isSiUnlinkResult(result, 92),
+    importSayIntentionsComms: (result) => vocab.isSiImportResult(result, 92),
+    sendSayIntentionsPdc: (result) => vocab.isSiPdcResult(result, 12),
+  };
+  for (const name of SI_SCENARIOS) {
+    gaugeDev.datalinkScenario('flight');
+    assert.equal(gaugeDev.sayIntentionsScenario(name), name);
+    for (const [method, req] of SI_REQUESTS) {
+      const before = callsOf(gaugeDev, method).length;
+      if (name === 'host-error') {
+        await assert.rejects(host[method](req), { message: 'mock host fault' }, `${name} ${method}`);
+      } else {
+        const response = plain(await host[method](req));
+        if (SI_ERRORS[name]) {
+          const [code, httpStatus, serverCode] = SI_ERRORS[name];
+          assert.ok(response.error.serverError.startsWith(SERVER_TEXT_SENTINEL), `${name} ${method}`);
+          delete response.error.serverError;
+          assert.deepEqual(response, { ok: false, error: { code, httpStatus, serverCode } }, `${name} ${method}`);
+        } else if (response.ok) {
+          assert.deepEqual(Object.keys(response.result).sort(), SI_RESULT_KEYS[method], `${name} ${method}`);
+          if (response.result.link) assert.deepEqual(Object.keys(response.result.link).sort(), SI_LINK_KEYS, `${name} ${method}`);
+          // Every field the pages draw is there, or the page would say BAD DATA.
+          assert.equal(predicate[method](response.result), true, `${name} ${method}`);
+        } else {
+          // The only refusals an answering scenario gives are the server's own.
+          assert.deepEqual(Object.keys(response.error).sort(), ['code', 'httpStatus', 'serverCode', 'serverError'], `${name} ${method}`);
+          assert.ok(['si-no-api-key', 'si-not-linked'].includes(response.error.code), `${name} ${method} ${response.error.code}`);
+          assert.ok(response.error.serverError.startsWith(SERVER_TEXT_SENTINEL), `${name} ${method}`);
+        }
+      }
+      const calls = callsOf(gaugeDev, method);
+      assert.equal(calls.length, before + 1, `${name} ${method}`);
+      assert.deepEqual(Object.keys(calls.at(-1)).sort(), ['args', 'at', 'method']);
+      assert.deepEqual(calls.at(-1).args, [req], `${name} ${method}`);
+    }
+  }
+
+  // Without a key on file the server refuses the three that reach upstream, and
+  // an import without a link is the server's NOT_LINKED, not a silent success.
+  gaugeDev.sayIntentionsScenario('no-key');
+  for (const [method, req] of SI_REQUESTS) {
+    const response = plain(await host[method](req));
+    const expected = method === 'getSayIntentionsStatus' || method === 'unlinkSayIntentions' ? null : 'si-no-api-key';
+    assert.equal(response.ok ? null : response.error.code, expected, method);
+  }
+  assert.equal(plain(await host.getSayIntentionsStatus({ flightId: 92 })).result.apiKeySet, false);
+  gaugeDev.sayIntentionsScenario('key-not-linked');
+  assert.equal(plain(await host.importSayIntentionsComms({ flightId: 92 })).error.code, 'si-not-linked');
+
+  // The three actions move the link the next status read answers with.
+  assert.equal(plain(await host.getSayIntentionsStatus({ flightId: 92 })).result.linked, false);
+  const linked = plain(await host.linkSayIntentions({ flightId: 92, from: 'session-start' })).result;
+  assert.deepEqual([linked.created, linked.pendingMessages, linked.httpStatus, linked.link.importedCount], [true, 3, 201, 0]);
+  assert.equal(plain(await host.getSayIntentionsStatus({ flightId: 92 })).result.linked, true);
+  const relinked = plain(await host.linkSayIntentions({ flightId: 92, from: 'now' })).result;
+  assert.deepEqual([relinked.created, relinked.pendingMessages, relinked.httpStatus], [false, 0, 200]);
+  assert.deepEqual(plain(await host.unlinkSayIntentions({ flightId: 92 })).result, { flightId: 92, unlinked: true, httpStatus: 200 });
+  assert.deepEqual(plain(await host.unlinkSayIntentions({ flightId: 92 })).result, { flightId: 92, unlinked: false, httpStatus: 200 });
+
+  // An import files the comms in the flight's own thread, as ATC rows.
+  gaugeDev.datalinkScenario('flight');
+  gaugeDev.sayIntentionsScenario('import-rows');
+  const epoch = plain(await host.getDatalinkState()).thread.epoch;
+  const imported = plain(await host.importSayIntentionsComms({ flightId: 92 })).result;
+  assert.deepEqual([imported.imported, imported.skipped, imported.alreadySeen, imported.httpStatus], [4, 1, 0, 201]);
+  const thread = [...(await readWholeThread(host, epoch, 9)).values()].sort((a, b) => a.seq - b.seq);
+  assert.deepEqual(thread.slice(5).map((m) => [m.direction, m.category, m.label]), Array.from({ length: 4 }, () => ['downlink', 'atc', null]));
+  assert.equal(plain(await host.getSayIntentionsStatus({ flightId: 92 })).result.link.importedCount, 16);
+  gaugeDev.sayIntentionsScenario('import-none');
+  assert.equal(plain(await host.importSayIntentionsComms({ flightId: 92 })).result.httpStatus, 200);
+  assert.equal(plain(await host.getDatalinkState()).thread.total, 9, 'nothing new files nothing');
+
+  // The PDC push is written against the planned leg, so the thread is untouched.
+  gaugeDev.sayIntentionsScenario('pdc-sent');
+  assert.deepEqual(plain(await host.sendSayIntentionsPdc({ plannedLegId: 12 })).result,
+    { plannedLegId: 12, sentText: SI_PDC_TEXT, httpStatus: 201 });
+  assert.equal(plain(await host.getDatalinkState()).thread.total, 9);
+
+  // Malformed requests are refused and still recorded.
+  gaugeDev.sayIntentionsScenario('linked');
+  const badFlights = [undefined, null, {}, [], 'x', { flightId: 0 }, { flightId: -1 }, { flightId: '92' },
+    { flightId: 92.5 }, { flightId: 2 ** 53 }, { flightId: undefined }];
+  for (const req of badFlights) {
+    for (const method of ['unlinkSayIntentions', 'importSayIntentionsComms']) {
+      assert.deepEqual(plain(await host[method](req)), localError('bad-request'), `${method} ${JSON.stringify(req)}`);
+    }
+    const link = req && typeof req === 'object' && !Array.isArray(req) ? { ...req, from: 'now' } : req;
+    assert.deepEqual(plain(await host.linkSayIntentions(link)), localError('bad-request'), `link ${JSON.stringify(req)}`);
+  }
+  for (const from of [undefined, null, '', 'NOW', 'session_start', 'SESSION START', 0]) {
+    assert.deepEqual(plain(await host.linkSayIntentions({ flightId: 92, from })), localError('bad-request'), String(from));
+  }
+  for (const req of [undefined, null, {}, [], 'x', { plannedLegId: 0 }, { plannedLegId: '12' }, { plannedLegId: 12.5 }]) {
+    assert.deepEqual(plain(await host.sendSayIntentionsPdc(req)), localError('bad-request'), JSON.stringify(req));
+  }
+
+  gaugeDev.setSayIntentionsDelay(40);
+  const started = Date.now();
+  await host.getSayIntentionsStatus({ flightId: 92 });
+  assert.ok(Date.now() - started >= 30);
+  gaugeDev.setSayIntentionsDelay(0);
+
+  // The preview offers every scenario and applies the selection on change and on load.
+  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const select = /<label>SayIntentions <select id="sayintentions-scenario">([\s\S]*?)<\/select><\/label>/.exec(html);
+  assert.ok(select);
+  assert.deepEqual([...select[1].matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]).sort(), [...SI_SCENARIOS].sort());
+  const preview = await readFile(new URL('./preview.js', import.meta.url), 'utf8');
+  assert.match(preview, /getElementById\('sayintentions-scenario'\)/);
+  assert.match(preview, /gaugeDev\.sayIntentionsScenario\(sayIntentionsScenario\.value\)/);
+  assert.match(preview, /frame\.addEventListener\('load', applySayIntentionsScenario\)/);
+  assert.match(preview, /sayIntentionsScenario\.addEventListener\('change', applySayIntentionsScenario\)/);
+});
+
+test('sayintentions mock: a missing flightId key is refused, never read as the flight-free question', async () => {
+  // si-status is the one scope-conditional read: a flight id asks whether that
+  // flight is linked, an explicit null asks whether a key is configured at all.
+  // They are different questions with different answers, and an absent argument
+  // cannot be told from an explicit null once it reaches the shell. The Tauri
+  // bridge refuses a missing key for that reason; an installed host is instead
+  // forwarded the key as undefined, so the mock has to apply the same rule
+  // itself — otherwise the harness would pass a page bug the real app refuses.
+  const { host, gaugeDev } = await loadMock();
+  gaugeDev.datalinkScenario('flight');
+  for (const req of [{}, { flightId: undefined }, { other: 1 }]) {
+    assert.deepEqual(plain(await host.getSayIntentionsStatus(req)), localError('bad-request'), JSON.stringify(req));
+  }
+  assert.equal(plain(await host.getSayIntentionsStatus({ flightId: null })).result.answered, 'settings');
+  assert.equal(plain(await host.getSayIntentionsStatus({ flightId: 92 })).result.answered, 'link');
+
+  // Through the adoption path, which forwards the named keys and shape-checks nothing.
+  const adopted = await importBridgeWith({ __FMC_HOST__: host }, 'si-missing-key');
+  assert.deepEqual(plain(await adopted.getSayIntentionsStatus({})), localError('bad-request'));
+  assert.equal(plain(await adopted.getSayIntentionsStatus({ flightId: 92, ingestToken: SI_SENTINEL })).result.answered, 'link');
+  assert.deepEqual(callsOf(gaugeDev, 'getSayIntentionsStatus').slice(-2).map((call) => call.args),
+    [[{}], [{ flightId: 92 }]], 'an omitted key arrives as an undefined one, and the token never arrives at all');
+
+  // The Tauri path refuses it before any command is invoked.
+  const invoked = [];
+  const tauri = await importBridgeWith({ __TAURI__: { core: { invoke: async (cmd, args) => { invoked.push([cmd, args]); return { ok: true, result: {} }; } } } }, 'si-missing-key-tauri');
+  for (const req of [undefined, null, {}, [], { flightId: undefined }, { flightId: '92' }, { flightId: -1 }, { flightId: 1.5 }]) {
+    assert.deepEqual(await tauri.getSayIntentionsStatus(req), localError('bad-request'), JSON.stringify(req));
+  }
+  assert.deepEqual(invoked, []);
+  await tauri.getSayIntentionsStatus({ flightId: null });
+  await tauri.getSayIntentionsStatus({ flightId: 92 });
+  assert.deepEqual(invoked, [['sayintentions_status', { flightId: null }], ['sayintentions_status', { flightId: 92 }]]);
+});
+
+test('sayintentions vocab: every code maps to its frozen text, hint and kind, and one rule decides the PDC leg', async () => {
+  const vocab = await pageModule('sayintentions-vocab.js');
+  const clearance = await pageModule('clearance-vocab.js');
+  for (const [name, [code, httpStatus, serverCode, text, hint, kind]] of Object.entries(SI_ERRORS)) {
+    const error = { code, httpStatus, serverCode, serverError: SERVER_TEXT_SENTINEL, message: SERVER_TEXT_SENTINEL };
+    assert.deepEqual(
+      [vocab.errorText(error), vocab.errorHint(error, 'link'), vocab.errorHint(error, 'pdc'), vocab.errorKind(error)],
+      [text, hint, siHint(hint, 'pdc'), kind], name,
+    );
+    assert.equal(vocab.isUnknownOutcome(code), hint === SI_UNKNOWN_HINT, name);
+  }
+  // The two "not ready yet" answers are the only advisories; everything else is a fault.
+  assert.deepEqual(Object.entries(vocab.ERRORS).filter(([, entry]) => entry.kind === 'advisory').map(([code]) => code),
+    ['si-no-comms', 'si-no-session']);
+
+  // A missing or malformed error is the host's fault, and an unknown code is a fault of its own.
+  assert.deepEqual([vocab.errorText(undefined), vocab.errorHint(undefined, 'link'), vocab.errorHint(undefined, 'pdc')],
+    ['SAYINTENTIONS HOST FAULT', SI_UNKNOWN_HINT, 'PDC MAY HAVE BEEN SENT']);
+  for (const malformed of [{}, [], { code: 7 }, { code: null }, { httpStatus: 500 }, 'text']) {
+    assert.deepEqual([vocab.errorText(malformed), vocab.errorKind(malformed)], ['SAYINTENTIONS HOST FAULT', 'error'], JSON.stringify(malformed));
+  }
+  assert.equal(vocab.errorText({ code: 'toString' }), 'SAYINTENTIONS FAULT');
+  for (const status of [99, 600, null, '500', 500.5]) {
+    assert.equal(vocab.errorText({ code: 'http-error', httpStatus: status }), 'SAYINTENTIONS FAULT', String(status));
+  }
+  assert.equal(vocab.errorText({ code: 'http-error', httpStatus: 599 }), 'SAYINTENTIONS FAULT 599');
+
+  // The leg a PDC goes to is the clearance rule itself, not a second copy of it:
+  // a copy is how the refusal and the write would come to disagree about the leg.
+  assert.equal(vocab.pdcLeg, clearance.clearanceLeg);
+  const source = await readFile(new URL('../../ui/src/pages/sayintentions-vocab.js', import.meta.url), 'utf8');
+  assert.match(source, /export const pdcLeg = clearanceLeg;/);
+  assert.equal(source.match(/pdcLeg/g).length, 1, 'one definition and no second implementation');
+  assert.deepEqual(vocab.pdcLeg({ state: 'dl.ok', scope: { kind: 'flight', flightId: 92, plannedLegId: 12 } }), { ok: true, plannedLegId: 12 });
+
+  // Which flight a link, unlink or import goes to.
+  const flight = (flightId) => ({ state: 'dl.ok', scope: { kind: 'flight', flightId, plannedLegId: 12 } });
+  assert.deepEqual(vocab.sayIntentionsFlight(flight(92)), { ok: true, flightId: 92 });
+  for (const [what, state, text] of [
+    ['ground leg', { state: 'dl.ok', scope: { kind: 'leg', plannedLegId: 12, source: 'status' } }, 'NEEDS ACTIVE FLIGHT'],
+    ['prefiled leg', { state: 'dl.ok', scope: { kind: 'leg', plannedLegId: 4812, source: 'prefile' } }, 'NEEDS ACTIVE FLIGHT'],
+    ['no flight plan', { state: 'dl.ok', scope: { kind: 'none' } }, 'NEEDS ACTIVE FLIGHT'],
+    ['no scope', { state: 'dl.ok', scope: null }, 'NEEDS ACTIVE FLIGHT'],
+    ['unknown kind', { state: 'dl.ok', scope: { kind: 'airport', flightId: 92 } }, 'NEEDS ACTIVE FLIGHT'],
+    ['no state', null, 'NO FLIGHT PLAN'],
+    ['state is a string', 'dl.ok', 'NO FLIGHT PLAN'],
+    ['flight 0', flight(0), 'NO FLIGHT PLAN'],
+    ['flight id not a number', flight('92'), 'NO FLIGHT PLAN'],
+    ['token latched', { state: 'dl.token-invalid', scope: { kind: 'flight', flightId: 92 } }, 'INGEST TOKEN REJECTED'],
+    ['no config', { state: 'dl.no-config', scope: { kind: 'flight', flightId: 92 } }, 'DATALINK NO CONFIG'],
+  ]) assert.deepEqual(vocab.sayIntentionsFlight(state), { ok: false, text }, what);
+
+  // What each success says on the scratchpad.
+  assert.deepEqual([
+    vocab.linkAdvisory({ created: true, pendingMessages: 0 }), vocab.linkAdvisory({ created: true, pendingMessages: 3 }),
+    vocab.linkAdvisory({ created: false, pendingMessages: 0 }), vocab.linkAdvisory({ created: false, pendingMessages: 12 }),
+    vocab.unlinkAdvisory({ unlinked: true }), vocab.unlinkAdvisory({ unlinked: false }),
+    vocab.importAdvisory({ imported: 0, skipped: 0 }), vocab.importAdvisory({ imported: 4, skipped: 0 }),
+    vocab.importAdvisory({ imported: 4, skipped: 1 }),
+  ], ['SESSION LINKED', 'SESSION LINKED 3 PENDING', 'SESSION RELINKED', 'SESSION RELINKED 12 PENDING',
+    'SESSION UNLINKED', 'NO LINK TO REMOVE', 'NO NEW COMMS', 'IMPORTED 4 MSGS', 'IMPORTED 4 MSGS SKIPPED 1']);
+
+  // The formatters, at the edges the server can reach.
+  assert.deepEqual([vocab.formatSession(SI_SESSION), vocab.formatSession('x'.repeat(40)), vocab.formatSession(''), vocab.formatSession(null)],
+    [SI_SESSION, 'x'.repeat(32), '----', '----']);
+  assert.deepEqual([vocab.formatCount(0), vocab.formatCount(999999), vocab.formatCount(1000000), vocab.formatCount(-1), vocab.formatCount(1.5), vocab.formatCount('4')],
+    ['0', '999999', '---', '---', '---', '---']);
+  assert.deepEqual([vocab.formatStamp('2026-09-16T14:05:11.000Z'), vocab.formatStamp(null), vocab.formatStamp('nope')], ['1405Z', '----', '----']);
+  assert.deepEqual([vocab.formatFlight(92), vocab.formatFlight(Number.MAX_SAFE_INTEGER)], ['FLT 92', 'FLT 9007199254740991']);
+  assert.deepEqual(vocab.sentTextLines(SI_PDC_TEXT), SI_PDC_LINES);
+  assert.equal(vocab.sentTextLines('x'.repeat(144)).length, 3);
+
+  // Every field the pages draw has to be in the answer, or the page says BAD DATA
+  // rather than drawing half a row. This is what the mock's answers are held to.
+  const link = { upstreamFlightId: SI_SESSION, sinceId: 4821, baselineCommId: 4800, linkedAt: '2026-09-16T14:05:11.000Z', lastImportAt: null, importedCount: 0 };
+  const status = { answered: 'link', flightId: 92, apiKeySet: true, linked: true, link, httpStatus: 200 };
+  assert.equal(vocab.isSiStatusResult(status, 92), true);
+  for (const field of ['upstreamFlightId', 'linkedAt', 'lastImportAt', 'importedCount']) {
+    const { [field]: dropped, ...rest } = link;
+    assert.equal(vocab.isSiStatusResult({ ...status, link: rest }, 92), false, field);
+  }
+  for (const [what, result] of [
+    ['another flight', { ...status, flightId: 93 }],
+    ['the settings answer for a flight', { ...status, answered: 'settings' }],
+    ['linked without a link', { ...status, link: null }],
+    ['not linked but carrying one', { ...status, linked: false }],
+    ['no key flag', { ...status, apiKeySet: 'yes' }],
+    ['a bad timestamp', { ...status, link: { ...link, linkedAt: 'nope' } }],
+    ['a count out of range', { ...status, link: { ...link, importedCount: -1 } }],
+    ['a blank session id', { ...status, link: { ...link, upstreamFlightId: '' } }],
+  ]) assert.equal(vocab.isSiStatusResult(result, 92), false, what);
+  const settings = { answered: 'settings', flightId: null, apiKeySet: false, linked: null, link: null, httpStatus: 200 };
+  assert.equal(vocab.isSiStatusResult(settings, null), true);
+  assert.equal(vocab.isSiStatusResult({ ...settings, linked: false }, null), false, 'the key question is answered without a link state');
+  assert.equal(vocab.isSiStatusResult(status, null), false);
+
+  assert.equal(vocab.isSiLinkResult({ flightId: 92, created: true, pendingMessages: 0, link, httpStatus: 201 }, 92), true);
+  for (const result of [{ flightId: 93, created: true, pendingMessages: 0, link }, { flightId: 92, created: 'true', pendingMessages: 0, link },
+    { flightId: 92, created: true, pendingMessages: -1, link }, { flightId: 92, created: true, pendingMessages: 0, link: null }]) {
+    assert.equal(vocab.isSiLinkResult(result, 92), false, JSON.stringify(result.flightId + String(result.created)));
+  }
+  assert.equal(vocab.isSiUnlinkResult({ flightId: 92, unlinked: false, httpStatus: 200 }, 92), true);
+  assert.equal(vocab.isSiUnlinkResult({ flightId: 92, httpStatus: 200 }, 92), false);
+  assert.equal(vocab.isSiImportResult({ flightId: 92, imported: 4, skipped: 1, httpStatus: 201 }, 92), true);
+  assert.equal(vocab.isSiImportResult({ flightId: 92, imported: 4, httpStatus: 201 }, 92), false);
+  assert.equal(vocab.isSiPdcResult({ plannedLegId: 12, sentText: SI_PDC_TEXT, httpStatus: 201 }, 12), true);
+  for (const result of [{ plannedLegId: 13, sentText: 'x' }, { plannedLegId: 12, sentText: '' }, { plannedLegId: 12, sentText: 'x'.repeat(145) }, { plannedLegId: 12 }]) {
+    assert.equal(vocab.isSiPdcResult(result, 12), false, JSON.stringify(result).slice(0, 40));
+  }
+
+  // Nothing the vocabulary can draw is too wide for the cell it goes in.
+  const strings = [
+    ...Object.values(vocab.REFUSAL), ...Object.values(vocab.TEXT), ...Object.values(vocab.ADVISORY),
+    ...Object.values(vocab.ERRORS).flatMap((entry) => [entry.text, entry.hint]).filter(Boolean),
+    vocab.SAFE_TO_PRESS_AGAIN, vocab.PDC_MAY_HAVE_BEEN_SENT, vocab.UNKNOWN_CODE_TEXT,
+    vocab.formatFlight(Number.MAX_SAFE_INTEGER), vocab.formatSession('x'.repeat(40)),
+    vocab.errorText({ code: 'http-error', httpStatus: 599 }), ...vocab.sentTextLines(SI_PDC_TEXT),
+    vocab.linkAdvisory({ created: false, pendingMessages: 999999 }), vocab.importAdvisory({ imported: 999999, skipped: 999999 }),
+  ];
+  for (const text of strings) assert.ok(text.length <= CELL_MAX, text);
+  const T = vocab.TEXT;
+  const widest = vocab.formatSession('x'.repeat(40));
+  for (const [where, left, right] of [
+    ['DL-INDEX row 4', 'DATALINK TOKEN NOT RECEIVED', T.indexPrompt],
+    ['DL-SI row 1', T.keyLabel, `FLT ${Number.MAX_SAFE_INTEGER} LEG ${Number.MAX_SAFE_INTEGER}`],
+    ['DL-SI row 2', vocab.ERRORS['token-missing'].text, ''],
+    ['DL-SI row 4', widest, vocab.formatCount(999999)],
+    ['DL-SI row 6', '1405Z', '1431Z'],
+    ['DL-SI row 8', T.link, T.fromSessionStart],
+    ['DL-SI row 10', T.unlink, T.import],
+    ['DL-SI row 11', T.onceFlying, ''],
+    ['DL-SI row 12', T.return, T.refresh],
+    ['confirm row 12', T.cancel, T.send],
+    ['confirm row 12 sending', '', T.sending],
+    ['PDC row 1', T.pdcTitle, `LEG ${Number.MAX_SAFE_INTEGER}`],
+    ['clearance row 10', '', T.clearancePrompt],
+  ]) assert.ok(left.length + right.length <= ROW_MAX, `${where}: ${left.length + right.length}`);
+});
+
+test('sayintentions pages: DL-INDEX R2 opens DL-SI, which draws twelve rows and binds six keys', async (t) => {
+  const bare = await mountDatalinkPages(t, 'si-unregistered');
+  await bare.scenario('flight');
+  bare.fmc.showPage('DL-INDEX');
+  await settle();
+  assert.deepEqual(bare.rows()[3], ['DATALINK ONLINE'], 'no right-hand cell until the pages register the action');
+  assert.equal(await bare.lsk('DL-INDEX', 'R2'), false);
+
+  const ui = await mountDatalinkPages(t, 'si-index', { sayintentions: true });
+  const { shell, fmc, gaugeDev, rows, pages } = ui;
+  assert.deepEqual([...pages.values()].map((page) => [page.id, page.title]).slice(8), [
+    ['DL-CLEARANCE-CONFIRM', 'REQUEST CLEARANCE'], ['DL-CLEARANCE', 'CLEARANCE'],
+    ['DL-SI', 'SAYINTENTIONS'], ['DL-SI-CONFIRM', 'CONFIRM SI ACTION'], ['DL-SI-PDC', 'SEND PDC'],
+  ]);
+  gaugeDev.sayIntentionsScenario('linked');
+  await ui.scenario('flight');
+  fmc.showPage('DL-INDEX');
+  await settle();
+  assert.deepEqual(rows()[3], ['DATALINK ONLINE', 'SAYINTENTIONS>']);
+  assert.equal(shell.view.children[3].children[1].className, 'cell-r prompt');
+  // The longest availability line the panel can draw still leaves a gap.
+  showState(ui, { ...shell.datalink, state: 'dl.token-missing' });
+  assert.deepEqual(rows()[3], ['DATALINK TOKEN NOT RECEIVED', 'SAYINTENTIONS>']);
+  assertClearanceWidths(rows(), 'DL-INDEX with the longest availability line');
+  showState(ui, { ...shell.datalink, state: 'dl.ok' });
+
+  // R2 never refuses: the page is where every one of those states is explained.
+  assert.equal(await ui.lsk('DL-INDEX', 'R2'), true);
+  assert.deepEqual([shell.id, shell.title, shell.number, shell.scratchpad], ['DL-SI', 'SAYINTENTIONS', '', null]);
+  assert.equal(rows().length, 12);
+  assert.deepEqual(rows(), [
+    ['SI KEY', 'FLT 92 LEG 12'], ['KEY ON FILE'], ['SESSION', 'IMPORTED'], [SI_SESSION, '12'],
+    ['LINKED', 'LAST IMPORT'], ['1405Z', '1431Z'], ['', 'LINK FROM'], ['<LINK', 'SESSION START'],
+    ['', ''], ['<UNLINK', 'IMPORT>'], ['', ''], ['<RETURN', 'REFRESH>'],
+  ]);
+  assertClearanceWidths(rows(), 'DL-SI linked');
+  assert.equal(callsOf(gaugeDev, 'getSayIntentionsStatus').length, 1, 'one read on arrival');
+  assert.equal(pages.get('DL-SI').onPageKey(1), true, 'one page');
+  assert.equal(shell.number, '');
+
+  // The six keys that are not bound say so, and nothing is asked of the host.
+  for (const key of ['L1', 'R1', 'L2', 'R2', 'L3', 'R3']) {
+    assert.equal(await ui.lsk('DL-SI', key), false, key);
+  }
+  // R4 chooses which comms a link picks up; it never sends and never refuses.
+  assert.equal(await ui.lsk('DL-SI', 'R4'), true);
+  assert.deepEqual(rows()[7], ['<LINK', 'NOW']);
+  assert.equal(await ui.lsk('DL-SI', 'R4'), true);
+  assert.deepEqual(rows()[7], ['<LINK', 'SESSION START']);
+  // REFRESH re-reads the status, and is not the datalink poll.
+  const refreshes = callsOf(gaugeDev, 'refreshDatalink').length;
+  assert.equal(await ui.lsk('DL-SI', 'R6'), true);
+  assert.deepEqual([callsOf(gaugeDev, 'getSayIntentionsStatus').length, callsOf(gaugeDev, 'refreshDatalink').length], [2, refreshes]);
+  assert.equal(await ui.lsk('DL-SI', 'L6'), true);
+  assert.equal(shell.id, 'DL-INDEX');
+
+  // No key on file: the state line says so, and the hint is the one thing that
+  // can be fixed now. The answer on file is only dropped by REFRESH or a scope
+  // change, so returning to the page alone does not ask again.
+  gaugeDev.sayIntentionsScenario('no-key');
+  fmc.showPage('DL-SI');
+  await settle();
+  assert.deepEqual(rows()[1], ['KEY ON FILE'], 'the answer on file is redrawn, not re-read');
+  await ui.lsk('DL-SI', 'R6');
+  assert.deepEqual([rows()[1], rows()[3], rows()[5], rows()[10]],
+    [['NO KEY ON FILE'], ['----', '---'], ['----', '----'], ['SET KEY ON WEB PREFILES PAGE', '']]);
+  // The three prompts stay painted whatever the state.
+  assert.deepEqual([rows()[7], rows()[9]], [['<LINK', 'SESSION START'], ['<UNLINK', 'IMPORT>']]);
+
+  // A flight that moves under the page drops the answer and asks again.
+  gaugeDev.sayIntentionsScenario('linked');
+  const before = callsOf(gaugeDev, 'getSayIntentionsStatus').length;
+  showState(ui, withScope(ui, { kind: 'flight', flightId: 93, plannedLegId: 12 }));
+  await settle();
+  assert.equal(callsOf(gaugeDev, 'getSayIntentionsStatus').at(-1).args[0].flightId, 93);
+  assert.equal(callsOf(gaugeDev, 'getSayIntentionsStatus').length, before + 1);
+  assert.equal(rows()[0][1], 'FLT 93 LEG 12');
+  assert.deepEqual(ui.writes(), []);
+});
+
+test('sayintentions actions: one press only stages, SEND* sends once, and a double press makes exactly one call', async (t) => {
+  const ui = await mountDatalinkPages(t, 'si-actions', { sayintentions: true });
+  const { shell, fmc, gaugeDev, rows, pages } = ui;
+  const sent = (method) => callsOf(gaugeDev, method).length;
+  gaugeDev.sayIntentionsScenario('key-not-linked');
+  await ui.scenario('flight');
+  fmc.showPage('DL-SI');
+  await settle();
+
+  // L4 stages a link and asks the host for nothing.
+  assert.equal(await ui.lsk('DL-SI', 'L4'), true);
+  assert.deepEqual([shell.id, shell.title, shell.scratchpad], ['DL-SI-CONFIRM', 'CONFIRM LINK', null]);
+  assert.deepEqual(rows(), [['CONFIRM'], ['LINK SESSION'], ['TO'], ['FLT 92'], ['LINK FROM'], ['SESSION START'],
+    [''], [''], [''], [''], [''], ['<CANCEL', 'SEND*']]);
+  assertClearanceWidths(rows(), 'DL-SI-CONFIRM link');
+  await later(30);
+  assert.equal(sent('linkSayIntentions'), 0, 'staging sends nothing');
+  for (const key of ['L1', 'R1', 'L2', 'R2', 'L3', 'R3', 'L4', 'R4', 'L5', 'R5']) {
+    assert.equal(await ui.lsk('DL-SI-CONFIRM', key), false, key);
+  }
+  // CANCEL drops it, and there is then nothing to send.
+  assert.equal(await ui.lsk('DL-SI-CONFIRM', 'L6'), true);
+  assert.equal(shell.id, 'DL-SI');
+  fmc.showPage('DL-SI-CONFIRM');
+  assert.deepEqual([shell.title, rows()], ['CONFIRM SI ACTION',
+    [[''], ['NO PENDING ACTION'], [''], [''], [''], [''], [''], [''], [''], [''], [''], ['<RETURN', '']]]);
+  assert.equal(await ui.lsk('DL-SI-CONFIRM', 'R6'), false, 'nothing pending after CANCEL');
+  assert.equal(await ui.lsk('DL-SI-CONFIRM', 'L6'), true);
+  assert.equal(sent('linkSayIntentions'), 0);
+
+  // A double press on SEND* makes exactly one call: the flag is one for all four
+  // actions, and CANCEL cannot call a request back once it is out either.
+  gaugeDev.setSayIntentionsDelay(50);
+  await ui.lsk('DL-SI', 'L4');
+  const confirm = pages.get('DL-SI-CONFIRM');
+  assert.equal(confirm.onLsk('R6', {}), true);
+  assert.deepEqual([rows()[3], rows()[11]], [['FLT 92'], ['', 'SENDING']]);
+  assert.equal(confirm.onLsk('R6', {}), true);
+  assert.equal(confirm.onLsk('R6', {}), true);
+  assert.equal(confirm.onLsk('L6', {}), true);
+  assert.deepEqual([shell.id, rows()[11]], ['DL-SI-CONFIRM', ['', 'SENDING']]);
+  await later(120);
+  assert.deepEqual([sent('linkSayIntentions'), callsOf(gaugeDev, 'linkSayIntentions').map((call) => call.args)],
+    [1, [[{ flightId: 92, from: 'session-start' }]]]);
+  assert.deepEqual([shell.id, shell.scratchpad], ['DL-SI', ['SESSION LINKED 3 PENDING', 'advisory']]);
+  gaugeDev.setSayIntentionsDelay(0);
+
+  // The link state moved, so the page read it again rather than redrawing the old one.
+  await settle();
+  assert.deepEqual([rows()[1], rows()[3][0]], [['KEY ON FILE'], SI_SESSION]);
+  assert.equal(callsOf(gaugeDev, 'getSayIntentionsStatus').at(-1).args[0].flightId, 92);
+
+  // FROM NOW is carried to the host and shown on the confirm page.
+  await ui.lsk('DL-SI', 'R4');
+  await ui.lsk('DL-SI', 'L4');
+  assert.deepEqual(rows()[5], ['NOW']);
+  await ui.lsk('DL-SI-CONFIRM', 'R6');
+  await later(30);
+  assert.deepEqual(callsOf(gaugeDev, 'linkSayIntentions').at(-1).args, [{ flightId: 92, from: 'now' }]);
+  assert.deepEqual(shell.scratchpad, ['SESSION RELINKED', 'advisory']);
+
+  // IMPORT> and UNLINK stage the same way and send once each.
+  gaugeDev.sayIntentionsScenario('import-rows');
+  fmc.showPage('DL-SI');
+  await settle();
+  assert.equal(await ui.lsk('DL-SI', 'R5'), true);
+  assert.deepEqual([shell.id, shell.title, rows()[1], rows()[4], rows()[5]], ['DL-SI-CONFIRM', 'CONFIRM IMPORT', ['IMPORT COMMS'], [''], ['']]);
+  await later(30);
+  assert.equal(sent('importSayIntentionsComms'), 0);
+  await ui.lsk('DL-SI-CONFIRM', 'R6');
+  await later(30);
+  assert.deepEqual([shell.id, shell.scratchpad, sent('importSayIntentionsComms')], ['DL-SI', ['IMPORTED 4 MSGS SKIPPED 1', 'advisory'], 1]);
+  assert.equal(await ui.lsk('DL-SI', 'L5'), true);
+  assert.deepEqual([shell.id, shell.title, rows()[1]], ['DL-SI-CONFIRM', 'CONFIRM UNLINK', ['UNLINK SESSION']]);
+  await ui.lsk('DL-SI-CONFIRM', 'R6');
+  await later(30);
+  assert.deepEqual([shell.id, shell.scratchpad, sent('unlinkSayIntentions')], ['DL-SI', ['SESSION UNLINKED', 'advisory'], 1]);
+  await ui.lsk('DL-SI', 'L5');
+  await ui.lsk('DL-SI-CONFIRM', 'R6');
+  await later(30);
+  assert.deepEqual([shell.scratchpad, sent('unlinkSayIntentions')], [['NO LINK TO REMOVE', 'advisory'], 2]);
+
+  // A flight that changes between staging and SEND* refuses rather than retargets.
+  gaugeDev.sayIntentionsScenario('linked');
+  fmc.showPage('DL-SI');
+  await settle();
+  await ui.lsk('DL-SI', 'L4');
+  assert.deepEqual(rows()[3], ['FLT 92']);
+  const staged = sent('linkSayIntentions');
+  showState(ui, withScope(ui, { kind: 'flight', flightId: 93, plannedLegId: 12 }));
+  assert.equal(await ui.lsk('DL-SI-CONFIRM', 'R6'), true);
+  await later(30);
+  assert.deepEqual([shell.id, shell.scratchpad, sent('linkSayIntentions')], ['DL-SI', ['SI FLIGHT CHANGED', 'error'], staged]);
+  showState(ui, withScope(ui, { kind: 'leg', plannedLegId: 12, source: 'status' }));
+  await ui.lsk('DL-SI', 'L4');
+  assert.deepEqual([shell.id, shell.scratchpad], ['DL-SI', ['NEEDS ACTIVE FLIGHT', 'error']]);
+  assert.equal(sent('linkSayIntentions'), staged);
+});
+
+test('sayintentions PDC: SEND PDC> sits on row 10 of every clearance page, stages, and sends once', async (t) => {
+  const ui = await mountDatalinkPages(t, 'si-pdc', { sayintentions: true });
+  const { shell, fmc, gaugeDev, rows, pages } = ui;
+  const pushes = () => callsOf(gaugeDev, 'sendSayIntentionsPdc');
+  gaugeDev.sayIntentionsScenario('pdc-sent');
+  await ui.scenario('leg');
+
+  // With no clearance on screen there is nothing to push.
+  fmc.showPage('DL-CLEARANCE');
+  assert.deepEqual([rows()[1], rows()[11]], [['NO CLEARANCE RECEIVED'], ['<RETURN', '']]);
+  assert.equal(await ui.lsk('DL-CLEARANCE', 'R5'), false);
+  fmc.showPage('DL-SI-PDC');
+  assert.deepEqual([shell.title, rows()], ['SEND PDC',
+    [[''], ['NO PENDING ACTION'], [''], [''], [''], [''], [''], [''], [''], [''], [''], ['<RETURN', '']]]);
+  assert.equal(await ui.lsk('DL-SI-PDC', 'R6'), false, 'nothing pending');
+  assert.equal(await ui.lsk('DL-SI-PDC', 'L6'), true);
+  assert.equal(shell.id, 'DL-CLEARANCE');
+
+  // A clearance, then the prompt beside it.
+  fmc.showPage('DL-INDEX');
+  await settle();
+  await ui.lsk('DL-INDEX', 'R5');
+  await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+  await later(30);
+  assert.equal(shell.id, 'DL-CLEARANCE');
+  assert.deepEqual(rows()[9], ['', 'SEND PDC>']);
+  assert.equal(shell.view.children[9].children[1].className, 'cell-r prompt');
+  assert.equal(await ui.lsk('DL-CLEARANCE', 'L5'), false, 'the left half of the prompt row is not a key');
+  assert.deepEqual([rows()[10], rows()[11]], [['NOT FOR REAL WORLD USE'], ['<RETURN', 'MESSAGES>']]);
+
+  assert.equal(await ui.lsk('DL-CLEARANCE', 'R5'), true);
+  assert.deepEqual([shell.id, shell.title, shell.scratchpad], ['DL-SI-PDC', 'SEND PDC', null]);
+  assert.deepEqual(rows(), [['SEND PDC', 'LEG 12'], ['TO SAYINTENTIONS'], [''], [''], [''], [''], [''], [''], [''], [''], [''], ['<CANCEL', 'SEND*']]);
+  assertClearanceWidths(rows(), 'DL-SI-PDC staged');
+  await later(30);
+  assert.equal(pushes().length, 0, 'R5 only opens the page');
+  for (const key of ['L1', 'R1', 'L2', 'R2', 'L3', 'R3', 'L4', 'R4', 'L5', 'R5']) {
+    assert.equal(await ui.lsk('DL-SI-PDC', key), false, key);
+  }
+  assert.equal(await ui.lsk('DL-SI-PDC', 'L6'), true);
+  assert.deepEqual([shell.id, pushes().length], ['DL-CLEARANCE', 0]);
+
+  // A double press on SEND* makes exactly one push, which is the press that
+  // matters most: a repeat files a second row in a live session.
+  gaugeDev.setSayIntentionsDelay(50);
+  await ui.lsk('DL-CLEARANCE', 'R5');
+  const pdc = pages.get('DL-SI-PDC');
+  assert.equal(pdc.onLsk('R6', {}), true);
+  assert.deepEqual([rows()[0], rows()[11]], [['SEND PDC', 'LEG 12'], ['', 'SENDING']]);
+  assert.equal(pdc.onLsk('R6', {}), true);
+  assert.equal(pdc.onLsk('L6', {}), true);
+  assert.equal(shell.id, 'DL-SI-PDC');
+  // R5 on the clearance page while one is out reopens it without staging another.
+  fmc.showPage('DL-CLEARANCE');
+  assert.equal(await ui.lsk('DL-CLEARANCE', 'R5'), true);
+  assert.deepEqual([shell.id, rows()[11]], ['DL-SI-PDC', ['', 'SENDING']]);
+  await later(120);
+  gaugeDev.setSayIntentionsDelay(0);
+  assert.deepEqual([shell.id, shell.scratchpad, pushes().map((call) => call.args)],
+    ['DL-CLEARANCE', ['PDC SENT', 'advisory'], [[{ plannedLegId: 12 }]]]);
+
+  // What went upstream is kept: the row is filed against the planned leg, so the
+  // flight's own thread may never show it and this may be the only confirmation.
+  assert.equal(await ui.lsk('DL-CLEARANCE', 'R5'), true);
+  assert.deepEqual(rows().slice(2, 7), [['LAST SENT'], ...SI_PDC_LINES.map((line) => [line])]);
+  assertClearanceWidths(rows(), 'DL-SI-PDC last sent');
+  await ui.lsk('DL-SI-PDC', 'L6');
+  assert.equal(pushes().length, 1);
+
+  // The prompt is on row 10 of a route that pages, not only of the first page.
+  const paged = await mountDatalinkPages(t, 'si-pdc-paged', { sayintentions: true });
+  paged.gaugeDev.sayIntentionsScenario('pdc-sent');
+  paged.gaugeDev.clearanceScenario('long-route');
+  await paged.scenario('leg');
+  paged.fmc.showPage('DL-INDEX');
+  await settle();
+  await paged.lsk('DL-INDEX', 'R5');
+  await paged.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+  await later(30);
+  assert.equal(paged.shell.number, '1/4');
+  for (const page of ['2/4', '3/4', '4/4', '1/4']) {
+    assert.deepEqual(paged.rows()[9], ['', 'SEND PDC>'], paged.shell.number);
+    assertClearanceWidths(paged.rows(), `route page ${paged.shell.number}`);
+    assert.equal(paged.pages.get('DL-CLEARANCE').onPageKey(1), true);
+    assert.equal(paged.shell.number, page);
+  }
+  assert.equal(paged.pages.get('DL-CLEARANCE').onPageKey(1), true);
+  assert.equal(paged.shell.number, '2/4');
+  assert.equal(await paged.lsk('DL-CLEARANCE', 'R5'), true, 'the key works on page 2 as on page 1');
+  assert.deepEqual([paged.shell.id, paged.rows()[0]], ['DL-SI-PDC', ['SEND PDC', 'LEG 12']]);
+});
+
+test('sayintentions refusals: each refusing scope shows its text and asks the host for nothing', async (t) => {
+  const ui = await mountDatalinkPages(t, 'si-refusals', { sayintentions: true, fpln: true });
+  const { shell, fmc, gaugeDev, pages } = ui;
+  const actions = () => plain(gaugeDev.calls).filter((call) =>
+    ['linkSayIntentions', 'unlinkSayIntentions', 'importSayIntentionsComms', 'sendSayIntentionsPdc'].includes(call.method)).length;
+  gaugeDev.sayIntentionsScenario('leg-scope');
+  fmc.showPage('DL-SI');
+  await settle();
+  const press = (key, text, where) => {
+    shell.scratchpad = null;
+    assert.equal(pages.get('DL-SI').onLsk(key, {}), true, `${where} ${key}`);
+    assert.deepEqual([shell.id, shell.scratchpad], ['DL-SI', [text, 'error']], `${where} ${key}`);
+  };
+  // Through the mock: the leg scope the scenario puts the datalink in.
+  assert.equal(shell.datalink.scope.kind, 'leg');
+  for (const key of ['L4', 'L5', 'R5']) press(key, 'NEEDS ACTIVE FLIGHT', 'leg scope');
+  assert.deepEqual(ui.rows()[10], ['LINK AVAILABLE ONCE FLYING', ''], 'the page says when it will be available');
+  await ui.scenario('no-flight-plan');
+  for (const key of ['L4', 'L5', 'R5']) press(key, 'NEEDS ACTIVE FLIGHT', 'no flight plan');
+  await ui.scenario('invalid-token');
+  for (const key of ['L4', 'L5', 'R5']) press(key, 'INGEST TOKEN REJECTED', 'token latched');
+
+  // States the mock cannot publish, put on screen directly.
+  await ui.scenario('flight');
+  for (const [where, state, text] of [
+    ['a ground leg', withScope(ui, { kind: 'leg', plannedLegId: 12, source: 'status' }), 'NEEDS ACTIVE FLIGHT'],
+    ['a prefiled leg', withScope(ui, { kind: 'leg', plannedLegId: 4812, source: 'prefile' }, 4812), 'NEEDS ACTIVE FLIGHT'],
+    ['no scope at all', withScope(ui, null), 'NEEDS ACTIVE FLIGHT'],
+    ['no config', withScope(ui, { kind: 'flight', flightId: 92 }, null, { state: 'dl.no-config' }), 'DATALINK NO CONFIG'],
+    ['flight 0', withScope(ui, { kind: 'flight', flightId: 0, plannedLegId: 12 }), 'NO FLIGHT PLAN'],
+  ]) {
+    showState(ui, state);
+    for (const key of ['L4', 'L5', 'R5']) press(key, text, where);
+  }
+
+  // The PDC inherits the clearance leg rule, including its scope-lag refusal.
+  await ui.scenario('leg');
+  gaugeDev.sayIntentionsScenario('pdc-sent');
+  fmc.showPage('DL-INDEX');
+  await settle();
+  await ui.lsk('DL-INDEX', 'R5');
+  await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+  await later(30);
+  assert.deepEqual([shell.id, ui.rows()[9]], ['DL-CLEARANCE', ['', 'SEND PDC>']]);
+  for (const [where, state, text] of [
+    ['a held prefile the scope has not applied', withScope(ui, { kind: 'none' }, 4812), 'SCOPE UPDATE PENDING'],
+    ['a newer prefile held than the scope shows', withScope(ui, { kind: 'leg', plannedLegId: 4812, source: 'prefile' }, 4813), 'SCOPE UPDATE PENDING'],
+    ['a flight without a linked leg', withScope(ui, { kind: 'flight', flightId: 92, plannedLegId: null }), 'NO LINKED LEG'],
+    ['another leg than the clearance shown', withScope(ui, { kind: 'leg', plannedLegId: 77, source: 'status' }), 'PDC LEG CHANGED'],
+  ]) {
+    showState(ui, state);
+    shell.scratchpad = null;
+    assert.equal(pages.get('DL-CLEARANCE').onLsk('R5', {}), true, where);
+    assert.deepEqual([shell.id, shell.scratchpad], ['DL-CLEARANCE', [text, 'error']], where);
+  }
+  await later(50);
+  assert.equal(actions(), 0, 'not one of the four actions reached the host');
+});
+
+test('sayintentions errors: every code shows its own text, hint and kind, and never the server prose', async (t) => {
+  const ui = await mountDatalinkPages(t, 'si-errors', { sayintentions: true });
+  const { shell, fmc, gaugeDev, rows } = ui;
+  const screens = [];
+  const codes = Object.entries(SI_ERRORS);
+  assert.equal(codes.length, 35, 'every row of the error table, plus the unknown-code fallback');
+  for (const [name, [code, , , text, hint, kind]] of codes) {
+    // A named subtest per code, so a failure names the code it belongs to.
+    await t.test(`${name} shows ${text}`, async () => {
+      await ui.scenario('flight');
+      gaugeDev.sayIntentionsScenario(name);
+      fmc.showPage('DL-SI');
+      await settle();
+      await ui.lsk('DL-SI', 'R6');
+      // A failed status read is the state line, and the page does not retry it.
+      assert.deepEqual(rows()[1], [text], name);
+      screens.push(rows());
+      if (name === 'invalid-token') {
+        // The latch comes back as the datalink state, and the rule then refuses
+        // locally; the scenario keeps answering the same way afterwards.
+        assert.equal(shell.datalink.state, 'dl.token-invalid');
+        await ui.scenario('flight');
+      } else {
+        assert.deepEqual(rows()[10], [hint, ''], name);
+      }
+      const before = plain(gaugeDev.calls).filter((call) => call.method === 'linkSayIntentions').length;
+      assert.equal(await ui.lsk('DL-SI', 'L4'), true, name);
+      assert.equal(shell.id, 'DL-SI-CONFIRM', name);
+      await ui.lsk('DL-SI-CONFIRM', 'R6');
+      await later(30);
+      const after = plain(gaugeDev.calls).filter((call) => call.method === 'linkSayIntentions').length;
+      assert.deepEqual([shell.id, shell.scratchpad, after], ['DL-SI-CONFIRM', [text, kind], before + 1], name);
+      // The action stays staged with what happened to it above the SEND key.
+      assert.deepEqual(rows().slice(6, 9), [['LAST REQUEST'], [text], [hint]], name);
+      assert.deepEqual(rows()[11], ['<CANCEL', 'SEND*'], name);
+      screens.push(rows(), shell.scratchpad);
+      await later(50);
+      assert.equal(plain(gaugeDev.calls).filter((call) => call.method === 'linkSayIntentions').length, after, `${name} is never sent again`);
+      await ui.lsk('DL-SI-CONFIRM', 'L6');
+      assertClearanceWidths(rows(), name);
+    });
+  }
+
+  // The PDC page carries its own hint after an outcome nobody can vouch for.
+  for (const name of ['client-timeout', 'host-error', 'no-clearance']) {
+    const pdc = await mountDatalinkPages(t, `si-errors-pdc-${name}`, { sayintentions: true });
+    await pdc.scenario('leg');
+    pdc.gaugeDev.clearanceScenario('created');
+    pdc.fmc.showPage('DL-INDEX');
+    await settle();
+    await pdc.lsk('DL-INDEX', 'R5');
+    await pdc.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+    await later(30);
+    pdc.gaugeDev.sayIntentionsScenario(name);
+    await pdc.lsk('DL-CLEARANCE', 'R5');
+    await pdc.lsk('DL-SI-PDC', 'R6');
+    await later(30);
+    const [, , , text, hint, kind] = SI_ERRORS[name];
+    assert.deepEqual([pdc.shell.id, pdc.shell.scratchpad], ['DL-SI-PDC', [text, kind]], name);
+    assert.deepEqual(pdc.rows().slice(8, 11), [['LAST REQUEST'], [text], [siHint(hint, 'pdc')]], name);
+    screens.push(pdc.rows(), pdc.shell.scratchpad);
+    await later(50);
+    assert.equal(callsOf(pdc.gaugeDev, 'sendSayIntentionsPdc').length, 1, `${name} is never sent again`);
+  }
+
+  // Answers the mock never gives: a non-envelope, a rejected call, a result that
+  // is not the answer to the question that was asked.
+  const odd = [
+    [async () => 'not an envelope', 'SAYINTENTIONS HOST FAULT'],
+    [async () => { throw new Error('transport'); }, 'SAYINTENTIONS HOST FAULT'],
+    [async () => ({ ok: true, result: { flightId: 93, created: true, pendingMessages: 0, link: null } }), 'SAYINTENTIONS BAD DATA'],
+    [async () => ({ ok: true }), 'SAYINTENTIONS BAD DATA'],
+    [async () => ({ ok: false, error: { code: 'http-error', httpStatus: 502, serverCode: null } }), 'SAYINTENTIONS FAULT 502'],
+    [async () => ({ ok: false, error: 'text' }), 'SAYINTENTIONS HOST FAULT'],
+    [async () => ({ ok: false }), 'SAYINTENTIONS HOST FAULT'],
+  ];
+  for (const [index, [override, text]] of odd.entries()) {
+    let asked = 0;
+    const other = await mountDatalinkPages(t, `si-odd-${index}`, {
+      sayintentions: true,
+      linkSayIntentions: (req) => { asked += 1; return override(req); },
+    });
+    await other.scenario('flight');
+    other.fmc.showPage('DL-SI');
+    await settle();
+    await other.lsk('DL-SI', 'L4');
+    await other.lsk('DL-SI-CONFIRM', 'R6');
+    await later(30);
+    assert.deepEqual([other.shell.id, other.shell.scratchpad], ['DL-SI-CONFIRM', [text, 'error']], String(index));
+    assert.deepEqual(other.rows().slice(6, 9), [['LAST REQUEST'], [text], [SI_UNKNOWN_HINT]], String(index));
+    screens.push(other.rows());
+    await later(50);
+    assert.equal(asked, 1, String(index));
+  }
+
+  const shown = JSON.stringify(screens);
+  for (const hidden of [SERVER_TEXT_SENTINEL, 'NO_API_KEY', 'SESSION_CHANGED', 'NO_ACTIVE_SESSION', 'NO_CLEARANCE',
+    'INVALID_INGEST_TOKEN', 'CROSS_ORIGIN', 'some-future-code', 'si-no-api-key', 'sayintentions-unavailable']) {
+    assert.equal(shown.includes(hidden), false, hidden);
+  }
+});
+
+test('sayintentions on an older host: still adopted, the pages say NOT SUPPORTED, and DATALINK works as before', async (t) => {
+  const legacy = { hostLabel: 'LEGACY' };
+  for (const name of ['getConfig', 'setConfig', 'getConfigPath', 'startUplink', 'stopUplink', 'restartSidecar', 'getStatus', 'onStatus', 'onLog', 'onExit']) {
+    legacy[name] = async () => null;
+  }
+  const bare = await importBridgeWith({ __FMC_HOST__: legacy }, 'si-legacy');
+  assert.equal(bare.hostLabel, 'LEGACY');
+  for (const name of SI_METHODS) {
+    assert.deepEqual(await bare[name]({ flightId: 92, from: 'now', plannedLegId: 12 }), localError('host-unsupported'), name);
+  }
+
+  // A host that has them is handed the named keys and nothing else.
+  const seen = [];
+  const modern = { ...legacy, hostLabel: 'MODERN' };
+  for (const name of SI_METHODS) modern[name] = async (...args) => { seen.push([name, ...args]); return { ok: true, result: {} }; };
+  const adoptedModern = await importBridgeWith({ __FMC_HOST__: modern }, 'si-modern');
+  await adoptedModern.getSayIntentionsStatus({ flightId: null, ingestToken: SI_SENTINEL });
+  await adoptedModern.linkSayIntentions({ flightId: 92, from: 'now', tripId: 3 });
+  await adoptedModern.unlinkSayIntentions({ flightId: 92, ingestToken: SI_SENTINEL });
+  await adoptedModern.importSayIntentionsComms({ flightId: 92, epoch: 1 });
+  await adoptedModern.sendSayIntentionsPdc({ plannedLegId: 12, ingestToken: SI_SENTINEL });
+  await adoptedModern.sendSayIntentionsPdc('12');
+  assert.deepEqual(plain(seen), [
+    ['getSayIntentionsStatus', { flightId: null }], ['linkSayIntentions', { flightId: 92, from: 'now' }],
+    ['unlinkSayIntentions', { flightId: 92 }], ['importSayIntentionsComms', { flightId: 92 }],
+    ['sendSayIntentionsPdc', { plannedLegId: 12 }], ['sendSayIntentionsPdc', {}],
+  ]);
+  assert.deepEqual(Object.keys(seen.at(-1)[1]), ['plannedLegId'], 'the key is there and undefined, never another key');
+  assert.equal(JSON.stringify(seen).includes(SI_SENTINEL), false);
+
+  // Tauri: one command name each, and a malformed request never invoked.
+  const invoked = [];
+  const tauri = await importBridgeWith({ __TAURI__: { core: { invoke: async (cmd, args) => { invoked.push([cmd, args]); return { ok: true, result: {} }; } } } }, 'si-tauri');
+  await tauri.getSayIntentionsStatus({ flightId: 92, ingestToken: SI_SENTINEL });
+  await tauri.linkSayIntentions({ flightId: 92, from: 'session-start' });
+  await tauri.unlinkSayIntentions({ flightId: 92 });
+  await tauri.importSayIntentionsComms({ flightId: 92 });
+  await tauri.sendSayIntentionsPdc({ plannedLegId: 12 });
+  assert.deepEqual(invoked, [
+    ['sayintentions_status', { flightId: 92 }], ['sayintentions_link', { flightId: 92, from: 'session-start' }],
+    ['sayintentions_unlink', { flightId: 92 }], ['sayintentions_import', { flightId: 92 }],
+    ['sayintentions_pdc', { plannedLegId: 12 }],
+  ]);
+  const malformed = [undefined, null, {}, [], { flightId: '92' }, { flightId: 1.5 }, { flightId: -1 }];
+  for (const req of malformed) {
+    for (const name of SI_METHODS) assert.deepEqual(await tauri[name](req), localError('bad-request'), `${name} ${JSON.stringify(req)}`);
+  }
+  for (const from of [undefined, null, 'NOW', 'session_start']) {
+    assert.deepEqual(await tauri.linkSayIntentions({ flightId: 92, from }), localError('bad-request'), String(from));
+  }
+  assert.equal(invoked.length, 5, 'nothing malformed was invoked');
+
+  // Stub: recorded, and unsupported until a result is set.
+  const stubWindow = {};
+  const stubBridge = await importBridgeWith(stubWindow, 'si-stub');
+  const stub = stubWindow.__FMC_STUB__;
+  assert.deepEqual(await stubBridge.getSayIntentionsStatus({ flightId: null }), localError('host-unsupported'));
+  stub.datalinkResults.getSayIntentionsStatus = { ok: true, result: { answered: 'settings' } };
+  assert.deepEqual(await stubBridge.getSayIntentionsStatus({ flightId: null }), { ok: true, result: { answered: 'settings' } });
+  assert.deepEqual(stub.calls.at(-1).method, 'getSayIntentionsStatus');
+
+  // The preview mock without the five methods, through the adopted host, on the pages.
+  const mock = await loadMock();
+  for (const name of SI_METHODS) delete mock.host[name];
+  const adopted = await importBridgeWith({ __FMC_HOST__: mock.host }, 'si-old-mock');
+  assert.equal(adopted.hostLabel, 'GAUGE MOCK');
+  const ui = await mountDatalinkPages(t, 'si-old-host', { sayintentions: true, fpln: true, mock, via: adopted });
+  const { shell, fmc, rows } = ui;
+  await ui.scenario('flight');
+  fmc.showPage('DL-INDEX');
+  await settle();
+  const indexBefore = rows().slice(1);
+  await ui.lsk('DL-INDEX', 'R2');
+  assert.deepEqual([shell.id, rows()[1], rows()[3], rows()[10]],
+    ['DL-SI', ['SAYINTENTIONS NOT SUPPORTED'], ['----', '---'], ['', '']]);
+  await ui.lsk('DL-SI', 'L4');
+  assert.equal(shell.id, 'DL-SI-CONFIRM');
+  await ui.lsk('DL-SI-CONFIRM', 'R6');
+  await later(30);
+  assert.deepEqual([shell.id, shell.scratchpad], ['DL-SI-CONFIRM', ['SAYINTENTIONS NOT SUPPORTED', 'error']]);
+  assert.deepEqual(rows().slice(6, 9), [['LAST REQUEST'], ['SAYINTENTIONS NOT SUPPORTED'], ['']]);
+  await ui.lsk('DL-SI-CONFIRM', 'L6');
+  await ui.lsk('DL-SI', 'L6');
+  assert.deepEqual([shell.id, rows().slice(1)], ['DL-INDEX', indexBefore]);
+
+  // The PDC push says the same, and the clearance page it came from is unchanged.
+  await ui.scenario('leg');
+  await ui.lsk('DL-INDEX', 'R5');
+  await ui.lsk('DL-CLEARANCE-CONFIRM', 'R6');
+  await later(30);
+  assert.deepEqual([shell.id, rows()[9]], ['DL-CLEARANCE', ['', 'SEND PDC>']]);
+  const clearanceBefore = rows();
+  await ui.lsk('DL-CLEARANCE', 'R5');
+  await ui.lsk('DL-SI-PDC', 'R6');
+  await later(30);
+  assert.deepEqual([shell.id, shell.scratchpad], ['DL-SI-PDC', ['SAYINTENTIONS NOT SUPPORTED', 'error']]);
+  assert.deepEqual(rows().slice(8, 11), [['LAST REQUEST'], ['SAYINTENTIONS NOT SUPPORTED'], ['']]);
+  await ui.lsk('DL-SI-PDC', 'L6');
+  assert.deepEqual([shell.id, rows()], ['DL-CLEARANCE', clearanceBefore]);
+
+  // Everything that worked before still works.
+  await ui.lsk('DL-CLEARANCE', 'L6');
+  await ui.lsk('DL-INDEX', 'L3');
+  assert.deepEqual([shell.id, rows()[0]], ['DL-THREAD', ['UP 1220Z DISPATCH RELEASE']]);
+  await ui.lsk('DL-THREAD', 'L6');
+  await ui.lsk('DL-INDEX', 'R4');
+  await ui.lsk('DL-LOADSHEET', 'R6');
+  await ui.lsk('DL-CONFIRM', 'R6');
+  assert.deepEqual([shell.id, shell.scratchpad], ['DL-LOADSHEET', ['LOADSHEET RECEIVED', 'advisory']]);
+  fmc.showPage('FPLN');
+  await settle();
+  assert.deepEqual([rows()[1], rows()[11]], [['CONFIGURED'], ['<MENU', 'PREFILE>']]);
+});
+
+test('sayintentions thread: an imported ATC row with no label renders through the missing-label fallback', async (t) => {
+  // The CDU has no category table: `category` is opaque text kept verbatim, and
+  // the one place it is read is as the fallback for a message with no label.
+  // SayIntentions comms arrive as category "atc" with no label of their own, so
+  // they already render as DN 1431Z ATC with no code of ours. This assertion is
+  // the whole of what keeps that fallback from being removed by a later change.
+  const { formatMessageHeader } = await pageModule('datalink-vocab.js');
+  const comm = { direction: 'downlink', category: 'atc', sentAt: '2026-09-16T14:31:52.000Z', body: 'SWA1451 READY TO TAXI' };
+  for (const [what, message] of [
+    ['no label key at all', comm],
+    ['a null label', { ...comm, label: null }],
+    ['a blank label', { ...comm, label: '   ' }],
+    ['a label that is not a string', { ...comm, label: 7 }],
+  ]) {
+    const header = formatMessageHeader(message);
+    assert.equal(header, 'DN 1431Z ATC', what);
+    assert.ok(header.startsWith('DN'), what);
+    assert.ok(header.includes('ATC'), what);
+  }
+  assert.equal(formatMessageHeader({ ...comm, direction: 'uplink' }), 'UP 1431Z ATC', 'a clearance is delivered to the aircraft');
+  assert.equal(formatMessageHeader({ ...comm, label: 'ATC CLEARANCE' }), 'DN 1431Z ATC CLEARANCE', 'a label of its own still wins');
+
+  // End to end: an import files the rows, and the thread draws them.
+  const ui = await mountDatalinkPages(t, 'si-atc-thread', { sayintentions: true });
+  const { shell, fmc, gaugeDev, rows } = ui;
+  gaugeDev.sayIntentionsScenario('import-rows');
+  await ui.scenario('flight');
+  fmc.showPage('DL-SI');
+  await settle();
+  await ui.lsk('DL-SI', 'R5');
+  await ui.lsk('DL-SI-CONFIRM', 'R6');
+  await later(30);
+  assert.deepEqual([shell.id, shell.scratchpad], ['DL-SI', ['IMPORTED 4 MSGS SKIPPED 1', 'advisory']]);
+  assert.equal(shell.datalink.thread.total, 9);
+  await ui.lsk('DL-SI', 'L6');
+  await ui.lsk('DL-INDEX', 'L3');
+  await later(30);
+  assert.equal(shell.id, 'DL-THREAD');
+  const headers = rows().map((line) => line[0]).filter((text) => /^DN \d{4}Z ATC$/.test(text));
+  assert.equal(headers.length, 4, JSON.stringify(rows()));
+  assert.ok(rows().some((line) => line[0].startsWith('<SWA1451 ')), JSON.stringify(rows()));
+  await ui.lsk('DL-THREAD', 'L1');
+  assert.equal(shell.id, 'DL-MSG');
+  assert.ok(rows().slice(1, 11).some((line) => line[0].includes('SWA1451')), JSON.stringify(rows()));
 });

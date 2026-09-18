@@ -45,6 +45,11 @@ throwing, so an older host or a mid-upgrade sidecar degrades a page to a
 | `sendCannedMessage({target, cannedId})` | target `{kind, id}` | `{ok, result: {sent, httpStatus}}` |
 | `requestWeather({target, icao})` | | `{ok, result: {icao, available, metar, taf, fetchedAt}}` |
 | `requestLoadsheet({plannedLegId})` | | `{ok, result: {plannedLegId, created, httpStatus, sheet}}` |
+| `getSayIntentionsStatus({flightId})` | `flightId` a safe integer ≥ 1, or `null` (a missing key is refused `BAD_REQUEST` locally — see F1 in the run's amendments) | `{ok, result: {answered, flightId, apiKeySet, linked, link, httpStatus}}` |
+| `linkSayIntentions({flightId, from})` | `from` exactly `'now'` or `'session-start'` | `{ok, result: {flightId, created, pendingMessages, link, httpStatus}}` |
+| `unlinkSayIntentions({flightId})` | only `flightId` is forwarded | `{ok, result: {flightId, unlinked, httpStatus}}` |
+| `importSayIntentionsComms({flightId})` | only `flightId` is forwarded | `{ok, result: {flightId, imported, alreadySeen, skipped, sinceId, httpStatus}}` |
+| `sendSayIntentionsPdc({plannedLegId})` | only `plannedLegId` is forwarded | `{ok, result: {plannedLegId, sentText, httpStatus}}` |
 
 ### SimBrief (optional, no args ever forwarded)
 
@@ -62,7 +67,7 @@ throwing, so an older host or a mid-upgrade sidecar degrades a page to a
 
 ## 2. Tauri commands and events
 
-19 commands, all defined in `src-tauri/src/main.rs`:
+24 commands, all defined in `src-tauri/src/main.rs`:
 
 | Command | Args | Returns | Does |
 | --- | --- | --- | --- |
@@ -85,6 +90,11 @@ throwing, so an older host or a mid-upgrade sidecar degrades a page to a
 | `simbrief_prefile` | — | async | Relays `simbrief-prefile {}` (single-flight) |
 | `simbrief_clear_prefile` | — | async | Relays `prefile-clear {}` |
 | `datalink_clearance` | `planned_leg_id: u64` | async | Relays `clearance {plannedLegId}` (single-flight) |
+| `sayintentions_status` | `flight_id: Option<u64>` | async | Relays `si-status {flightId}` — a `null` id asks the key question alone |
+| `sayintentions_link` | `flight_id: u64, from: String` | async | Relays `si-link {flightId, from}` |
+| `sayintentions_unlink` | `flight_id: u64` | async | Relays `si-unlink {flightId}` |
+| `sayintentions_import` | `flight_id: u64` | async | Relays `si-import {flightId}` |
+| `sayintentions_pdc` | `planned_leg_id: u64` | async | Relays `si-pdc {plannedLegId}` |
 
 Datalink-family commands run via `spawn_blocking` so a multi-second relay
 round trip never blocks the async runtime, and every returned envelope is
@@ -141,15 +151,18 @@ cap) before being dropped as oversized input. On the shell's outgoing side, a
 ### Datalink-request ops
 
 `watch`, `refresh`, `thread`, `canned-list`, `send-canned`, `wx`, `loadsheet`,
-`simbrief-settings`, `simbrief-prefile`, `prefile-clear`, `clearance`.
+`simbrief-settings`, `simbrief-prefile`, `prefile-clear`, `clearance`,
+`si-status`, `si-link`, `si-unlink`, `si-import`, `si-pdc`.
 
 Every op requires the `datalink` feature in the connected sidecar's `hello`;
 without it, every op is refused `sidecar-outdated`. `simbrief-settings`,
 `simbrief-prefile` and `prefile-clear` additionally require the
-`simbrief-prefile` feature, and `clearance` additionally requires the
-`pdc-clearance` feature — a sidecar with `datalink` but not (say)
-`pdc-clearance` still serves every other op normally; only `clearance` is
-refused.
+`simbrief-prefile` feature, `clearance` additionally requires the
+`pdc-clearance` feature, and the five `si-*` ops additionally require the
+`sayintentions` feature — a sidecar with `datalink` but not (say)
+`sayintentions` still serves every other op normally; only `si-status`,
+`si-link`, `si-unlink`, `si-import` and `si-pdc` are refused (with
+`sidecar-outdated`, rendered on the CDU as `SIDECAR UPDATE REQUIRED`).
 
 ### Error codes
 
@@ -251,6 +264,45 @@ request body (`{"canned_id": ...}` / `{"icao": ...}`), never in the path or a
 query string, and no trailing slash reaches a URL either. SimBrief and PDC
 clearance are proxied and simulated by the msfslogger server itself; the
 sidecar never contacts SimBrief or any ACARS network directly.
+
+### SayIntentions routes (6)
+
+The msfslogger server's optional SayIntentions.AI integration, frozen by a
+peer session's contract (`.claude/runs/2026-09-17-mcdu-sayintentions/contracts/server-sayintentions-api.md`)
+and never yet exercised against a live server from this repository (see the
+run's `live-check.md`). Six server-side operations, reachable with the same
+`x-ingest-token` header as the 13 routes above — **with one deliberate
+exception**: `PUT /api/settings/sayintentions` (writing or changing the
+SayIntentions API key itself) is **not** on that token's scope and never will
+be. It is a web-UI-only action on the server's Prefiles page; the sidecar
+never calls it and this client has no code path that could. A CDU that finds
+no key configured points the operator at the web app and never offers to
+collect the key (see [security](security.md)).
+
+The five sidecar ops map to seven literal client-side templates — the link
+route (op 3 below) has two, selected by the CDU's `FROM NOW` / `SESSION
+START` choice, both literal in `sidecar/src/datalink-client.ts`'s closed route
+table (no query string is ever composed from a value):
+
+| # | Method/Path | Notes |
+| --- | --- | --- |
+| 1 | `GET /api/settings/sayintentions` | Whether a key is configured; answers `si-status` when `flightId` is `null` |
+| 2 | `GET /api/flights/:id/sayintentions/link` | Link status for a flight; answers `si-status` when `flightId` is given |
+| 3 | `POST /api/flights/:id/sayintentions/link` · `POST /api/flights/:id/sayintentions/link?from=now` | `si-link`; omitted query defaults to `session_start` server-side, but the CDU always sends one of the two literal templates explicitly rather than relying on that default (A-6 Q4) |
+| 4 | `DELETE /api/flights/:id/sayintentions/link` | `si-unlink`; always 200, even with nothing to remove |
+| 5 | `POST /api/flights/:id/sayintentions/import` | `si-import`; idempotent, cursor-driven, dedups server-side |
+| 6 | `POST /api/planned-legs/:id/sayintentions/clearance` | `si-pdc`; condenses the leg's on-file PDC and sends it as a real CPDLC message |
+
+All six take no request body (D-4: a known upstream `400 text/html` gap on a
+malformed body is deliberately left unreached rather than worked around).
+Method union for the client widens to `GET | POST | DELETE` — route 4 is the
+client's first `DELETE`. Timeout: the default 8 seconds for routes 1, 2 and 4
+(the server's own database, no SayIntentions round trip); 20 seconds for
+routes 3, 5 and 6, which reach SayIntentions itself through the server —
+above the server's own fixed 10-second upstream timeout (`SAYINTENTIONS_TIMEOUT_MS`
+in the server's `sayIntentionsClient.ts`, per the peer session), so the CDU
+sees the server's own `502`/`504`-derived code rather than a local unknown
+result (A-9).
 
 A response's HTTP status and, for a 401, its body `code` and
 `x-ingest-token-scope` header decide the outcome: a body `code` of

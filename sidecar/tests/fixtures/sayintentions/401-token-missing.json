@@ -1,0 +1,36 @@
+{
+  "_sample": "401-token-missing",
+  "_why": "The route takes the token but none arrived: something in between stripped the header.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW No ingest token arrived."
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "token-missing",
+    "httpStatus": 401,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS TOKEN NOT RECEIVED",
+    "hint": "TOKEN HEADER LOST IN TRANSIT",
+    "kind": "error"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "_sample": "409-not-linked",
+  "_why": "An import with no link.",
+  "_op": "si-import",
+  "_route": "si-import",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/import",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW This flight is not linked to a SayIntentions session.",
+      "code": "NOT_LINKED"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "si-not-linked",
+    "httpStatus": 409,
+    "serverCode": "NOT_LINKED",
+    "latch": false,
+    "cdu": "SAYINTENTIONS NOT LINKED",
+    "hint": "LINK THIS FLIGHT ON DL-SI FIRST",
+    "kind": "error"
+  }
+}

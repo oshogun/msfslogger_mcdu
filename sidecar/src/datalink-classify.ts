@@ -78,6 +78,23 @@ export type DatalinkErrorCode =
   | 'clearance-unavailable'
   // sidecar or shell: a clearance is already in flight, nothing was sent
   | 'clearance-in-progress'
+  // SayIntentions routes: the server's own answers about the pilot's key,
+  // the flight-to-session link and the SayIntentions service behind it
+  | 'si-no-api-key'
+  | 'si-bad-api-key'
+  | 'si-not-linked'
+  | 'si-session-changed'
+  | 'si-no-comms'
+  | 'si-no-session'
+  | 'si-no-clearance'
+  | 'si-upstream-unreachable'
+  | 'si-upstream-timeout'
+  | 'si-upstream-error'
+  | 'si-upstream-bad-body'
+  // a 401 with no token scope on a SayIntentions route: the server predates them
+  | 'sayintentions-unavailable'
+  // sidecar or shell: one SayIntentions action is already in flight, nothing was sent
+  | 'sayintentions-in-progress'
   // sidecar-local
   | 'bad-request'
   | 'stale-epoch'

@@ -1,0 +1,55 @@
+{
+  "_sample": "status-200-link-since-null",
+  "_why": "Linked but nothing imported yet: the cursors and the last import are null.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "linked": true,
+      "api_key_set": true,
+      "link": {
+        "flight_id": 42,
+        "upstream_flight_id": "8841207",
+        "since_id": null,
+        "baseline_comm_id": null,
+        "linked_at": "2026-09-17T14:30:00.000Z",
+        "last_import_at": null,
+        "imported_count": 0
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "answered": "link",
+      "flightId": 42,
+      "apiKeySet": true,
+      "linked": true,
+      "link": {
+        "upstreamFlightId": "8841207",
+        "sinceId": null,
+        "baselineCommId": null,
+        "linkedAt": "2026-09-17T14:30:00.000Z",
+        "lastImportAt": null,
+        "importedCount": 0
+      },
+      "httpStatus": 200
+    }
+  }
+}

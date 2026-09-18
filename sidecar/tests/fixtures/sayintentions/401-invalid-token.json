@@ -1,0 +1,38 @@
+{
+  "_sample": "401-invalid-token",
+  "_why": "The token is wrong: this is the one failure that latches and stops every route.",
+  "_op": "si-import",
+  "_route": "si-import",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/import",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW The ingest token was refused.",
+      "code": "INVALID_INGEST_TOKEN"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "token-invalid",
+    "httpStatus": 401,
+    "serverCode": "INVALID_INGEST_TOKEN",
+    "latch": true,
+    "cdu": "INGEST TOKEN REJECTED",
+    "hint": "CHECK INGEST TOKEN ON CFG NETWORK",
+    "kind": "error"
+  }
+}

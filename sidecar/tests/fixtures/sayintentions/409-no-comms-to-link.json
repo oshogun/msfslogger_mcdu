@@ -1,0 +1,38 @@
+{
+  "_sample": "409-no-comms-to-link",
+  "_why": "Nothing to link to yet. Nothing is wrong.",
+  "_op": "si-link",
+  "_route": "si-link",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW No radio calls have been made in this session yet.",
+      "code": "NO_COMMS_TO_LINK"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "si-no-comms",
+    "httpStatus": 409,
+    "serverCode": "NO_COMMS_TO_LINK",
+    "latch": false,
+    "cdu": "NO RADIO CALLS YET",
+    "hint": "CALL ATC IN THE SIM THEN LINK",
+    "kind": "advisory"
+  }
+}

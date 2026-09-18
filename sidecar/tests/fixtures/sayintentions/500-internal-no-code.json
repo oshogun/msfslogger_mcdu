@@ -1,0 +1,44 @@
+{
+  "_sample": "500-internal-no-code",
+  "_why": "A server fault with no code at all.",
+  "_op": "si-pdc",
+  "_route": "si-pdc",
+  "_requested": 29,
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/29/sayintentions/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW Internal server error."
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 500,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS FAULT 500",
+    "hint": null,
+    "kind": "error",
+    "unknownOutcome": true,
+    "hintByAction": {
+      "link": "SAFE TO PRESS AGAIN",
+      "unlink": "SAFE TO PRESS AGAIN",
+      "import": "SAFE TO PRESS AGAIN",
+      "pdc": "PDC MAY HAVE BEEN SENT"
+    }
+  }
+}

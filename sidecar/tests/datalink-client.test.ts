@@ -12,6 +12,8 @@ import {
   DATALINK_HTTP_TIMEOUT_MS,
   DatalinkClient,
   httpTimeoutMs,
+  routeTemplate,
+  SAYINTENTIONS_HTTP_TIMEOUT_MS,
   SIMBRIEF_PREFILE_BODY_MAX_BYTES,
   SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS,
   type DatalinkRoute,
@@ -373,6 +375,158 @@ describe('DatalinkClient against a scratch server', () => {
       server.routes['POST /api/planned-legs/12/acars-messages/clearance'] = clearanceReply('post-201-created');
       server.routes['POST /api/planned-legs/simbrief'] = simbriefReply('post-201-imported');
     }
+  });
+
+  // ── SayIntentions ───────────────────────────────────────────────────────────
+
+  const SAYINTENTIONS_ROUTES: DatalinkRoute[] = [
+    { key: 'si-settings' },
+    { key: 'si-link-status', id: 42 },
+    { key: 'si-link', id: 42 },
+    { key: 'si-link-now', id: 42 },
+    { key: 'si-unlink', id: 42 },
+    { key: 'si-import', id: 42 },
+    { key: 'si-pdc', id: 29 },
+  ];
+
+  const SAYINTENTIONS_FROZEN: [DatalinkRouteKey, string][] = [
+    ['si-settings', 'GET /api/settings/sayintentions'],
+    ['si-link-status', 'GET /api/flights/42/sayintentions/link'],
+    ['si-link', 'POST /api/flights/42/sayintentions/link'],
+    ['si-link-now', 'POST /api/flights/42/sayintentions/link?from=now'],
+    ['si-unlink', 'DELETE /api/flights/42/sayintentions/link'],
+    ['si-import', 'POST /api/flights/42/sayintentions/import'],
+    ['si-pdc', 'POST /api/planned-legs/29/sayintentions/clearance'],
+  ];
+
+  function serveSayIntentions(): void {
+    for (const [, line] of SAYINTENTIONS_FROZEN) {
+      server.routes[line] = () => ({ status: 200, body: { ok: true } });
+    }
+  }
+
+  it('sends the seven SayIntentions routes exactly, all with no body, the token and no Origin or Cookie', async () => {
+    serveSayIntentions();
+    const before = server.requests.length;
+    for (const route of SAYINTENTIONS_ROUTES) {
+      const outcome = await client.request(route);
+      expect(outcome, route.key).toMatchObject({ kind: 'response', status: 200 });
+    }
+    const made = server.requests.slice(before);
+    expect(made.map((r) => `${r.method} ${r.path}`)).toEqual(SAYINTENTIONS_FROZEN.map(([, line]) => line));
+    for (const request of made) {
+      expect(['GET', 'POST', 'DELETE']).toContain(request.method);
+      // No body on any of the seven, so no content-type is sent either.
+      expect(request.body).toBe('');
+      expect(request.headers['content-type']).toBeUndefined();
+      expect(request.headers['x-ingest-token']).toBe(SENTINEL_TOKEN);
+      expect(request.headers.origin).toBeUndefined();
+      expect(request.headers.cookie).toBeUndefined();
+      expect(request.headers.accept).toBe('application/json');
+      expect(request.path).not.toContain(SENTINEL_TOKEN);
+      expect(request.path.endsWith('/')).toBe(false);
+    }
+    // The one query string in the table belongs to a literal template.
+    expect(made.filter((r) => r.path.includes('?')).map((r) => r.path)).toEqual([
+      '/api/flights/42/sayintentions/link?from=now',
+    ]);
+    expect(buildRequest({ key: 'si-link-now', id: 42 })).toEqual({
+      method: 'POST',
+      path: '/api/flights/42/sayintentions/link?from=now',
+      template: '/api/flights/:id/sayintentions/link?from=now',
+      body: null,
+      maxBodyBytes: 1024 * 1024,
+    });
+    expect(buildRequest({ key: 'si-unlink', id: 42 })).toMatchObject({ method: 'DELETE', body: null });
+    for (const route of SAYINTENTIONS_ROUTES) {
+      expect(buildRequest(route)!.body, route.key).toBeNull();
+      expect(buildRequest(route)!.maxBodyBytes, route.key).toBe(1024 * 1024);
+    }
+  });
+
+  it('the route table is closed at twenty keys, and every key has its template', () => {
+    // A missing key here is a compile error, so the count is checked by the type too.
+    const templates: Record<DatalinkRouteKey, string> = {
+      status: 'GET /api/status',
+      'canned-list': 'GET /api/acars/canned-messages',
+      'ground-session-current': 'GET /api/ground-sessions/current',
+      'flight-thread': 'GET /api/flights/:id/acars-messages',
+      'leg-thread': 'GET /api/planned-legs/:id/acars-messages',
+      'flight-send': 'POST /api/flights/:id/acars-messages',
+      'leg-send': 'POST /api/planned-legs/:id/acars-messages',
+      'flight-wx': 'POST /api/flights/:id/acars-messages/wx',
+      'leg-wx': 'POST /api/planned-legs/:id/acars-messages/wx',
+      'leg-loadsheet': 'POST /api/planned-legs/:id/acars-messages/loadsheet',
+      'leg-clearance': 'POST /api/planned-legs/:id/acars-messages/clearance',
+      'simbrief-settings': 'GET /api/settings/simbrief',
+      'simbrief-prefile': 'POST /api/planned-legs/simbrief',
+      'si-settings': 'GET /api/settings/sayintentions',
+      'si-link-status': 'GET /api/flights/:id/sayintentions/link',
+      'si-link': 'POST /api/flights/:id/sayintentions/link',
+      'si-link-now': 'POST /api/flights/:id/sayintentions/link?from=now',
+      'si-unlink': 'DELETE /api/flights/:id/sayintentions/link',
+      'si-import': 'POST /api/flights/:id/sayintentions/import',
+      'si-pdc': 'POST /api/planned-legs/:id/sayintentions/clearance',
+    };
+    expect(Object.keys(templates)).toHaveLength(20);
+    for (const [key, line] of Object.entries(templates)) {
+      expect(routeTemplate(key as DatalinkRouteKey), key).toBe(line);
+    }
+  });
+
+  it('builds no SayIntentions request, and sends nothing, for an id outside the param rule', async () => {
+    const before = server.requests.length;
+    const keys: DatalinkRouteKey[] = ['si-link-status', 'si-link', 'si-link-now', 'si-unlink', 'si-import', 'si-pdc'];
+    for (const key of keys) {
+      for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, '42' as unknown as number]) {
+        const route = { key, id } as DatalinkRoute;
+        expect(buildRequest(route), `${key} ${id}`).toBeNull();
+        expect(await client.request(route)).toEqual({ kind: 'transport', errorName: 'InvalidRoute', errorCode: null });
+      }
+    }
+    expect(server.requests.length).toBe(before);
+  });
+
+  it('uses the 20 s SayIntentions timeout for the three upstream routes and the unlink default for the rest', () => {
+    expect(SAYINTENTIONS_HTTP_TIMEOUT_MS).toBe(20000);
+    expect(SAYINTENTIONS_HTTP_TIMEOUT_MS).toBeGreaterThan(DATALINK_HTTP_TIMEOUT_MS);
+    const upstream = new Set<DatalinkRouteKey>(['si-link', 'si-link-now', 'si-import', 'si-pdc']);
+    for (const [key] of SAYINTENTIONS_FROZEN) {
+      const expected = upstream.has(key) ? SAYINTENTIONS_HTTP_TIMEOUT_MS : DATALINK_HTTP_TIMEOUT_MS;
+      expect(httpTimeoutMs(key, {}), key).toBe(expected);
+      expect(httpTimeoutMs(key, { timeoutMs: 100, prefileTimeoutMs: 400, sayintentionsTimeoutMs: 700 }), key).toBe(
+        upstream.has(key) ? 700 : 100,
+      );
+      // Neither of the other two overrides reaches these routes.
+      expect(httpTimeoutMs(key, { prefileTimeoutMs: 400 }), key).toBe(expected);
+    }
+    // And the SayIntentions override reaches nothing else.
+    for (const key of ['status', 'leg-clearance', 'simbrief-prefile'] as DatalinkRouteKey[]) {
+      expect(httpTimeoutMs(key, { sayintentionsTimeoutMs: 700 }), key).toBe(
+        key === 'simbrief-prefile' ? SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS : DATALINK_HTTP_TIMEOUT_MS,
+      );
+    }
+  });
+
+  it('an import answering after the scaled default still succeeds; the unlink with the same delay times out', async () => {
+    serveSayIntentions();
+    server.routes['POST /api/flights/42/sayintentions/import'] = () => ({ status: 201, body: { ok: true }, delayMs: 200 });
+    server.routes['DELETE /api/flights/42/sayintentions/link'] = () => ({ status: 200, body: { ok: true }, delayMs: 200 });
+    const scaled = new DatalinkClient(() => uplink, { timeoutMs: 100, sayintentionsTimeoutMs: 400 });
+    const [imported, unlinked] = await Promise.all([
+      scaled.request({ key: 'si-import', id: 42 }),
+      scaled.request({ key: 'si-unlink', id: 42 }),
+    ]);
+    expect(imported).toMatchObject({ kind: 'response', status: 201, bodyTooLarge: false });
+    expect(unlinked).toEqual({ kind: 'transport', errorName: 'TimeoutError', errorCode: null });
+  });
+
+  it('stops reading a SayIntentions body past the 1 MiB cap', async () => {
+    serveSayIntentions();
+    const big = JSON.stringify({ flight_id: 42, imported: 1, pad: 'x'.repeat(1024 * 1024 + 16) });
+    server.routes['POST /api/flights/42/sayintentions/import'] = () => ({ status: 201, body: big });
+    const outcome = await client.request({ key: 'si-import', id: 42 });
+    expect(outcome).toMatchObject({ kind: 'response', status: 201, bodyTooLarge: true, bodyText: null });
   });
 
   it('reports an abort by its owner as a timeout', async () => {

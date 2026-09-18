@@ -20,6 +20,7 @@ import {
   PROTOCOL_VERSION,
   CLEARANCE_FEATURE,
   DATALINK_OPS,
+  SAYINTENTIONS_FEATURE,
   SIMBRIEF_FEATURE,
   type ControlMessage,
   type SidecarMessage,
@@ -469,6 +470,7 @@ describe('SimBrief datalink ops', () => {
     expect(DATALINK_OPS).toEqual([
       'watch', 'refresh', 'thread', 'canned-list', 'send-canned', 'wx', 'loadsheet',
       'simbrief-settings', 'simbrief-prefile', 'prefile-clear', 'clearance',
+      'si-status', 'si-link', 'si-unlink', 'si-import', 'si-pdc',
     ]);
     expect(SIMBRIEF_FEATURE).toBe('simbrief-prefile');
     expect(PROTOCOL_VERSION).toBe(1);
@@ -589,11 +591,164 @@ describe('clearance datalink op', () => {
     expect(decodeSidecarMessage(encoded.trim())).toEqual({ ok: true, message: longRoute });
   });
 
-  it('names the feature, keeps the protocol version, and lists the op last', () => {
+  it('names the feature, keeps the protocol version, and lists the op after the SimBrief three', () => {
     expect(CLEARANCE_FEATURE).toBe('pdc-clearance');
     expect(JSON.parse(HELLOS[0]).features).toEqual(['datalink', 'simbrief-prefile', CLEARANCE_FEATURE]);
     expect(PROTOCOL_VERSION).toBe(1);
-    expect(DATALINK_OPS[DATALINK_OPS.length - 1]).toBe('clearance');
+    expect(DATALINK_OPS.indexOf('clearance')).toBe(DATALINK_OPS.indexOf('prefile-clear') + 1);
     expect(DATALINK_OPS.filter((op) => op === 'clearance')).toHaveLength(1);
+  });
+});
+
+describe('SayIntentions datalink ops', () => {
+  // The accepted shape, an extra key, a missing key, a wrong-typed value, and
+  // for si-link a `from` outside the set. Written so it can be diffed against
+  // the Rust mirror row for row.
+  const ACCEPTED = [
+    '{"v":1,"type":"datalink-request","id":"dl-80","op":"si-status","params":{"flightId":92}}',
+    '{"v":1,"type":"datalink-request","id":"dl-81","op":"si-status","params":{"flightId":null}}',
+    '{"v":1,"type":"datalink-request","id":"dl-82","op":"si-link","params":{"flightId":92,"from":"now"}}',
+    '{"v":1,"type":"datalink-request","id":"dl-83","op":"si-link","params":{"flightId":92,"from":"session-start"}}',
+    '{"v":1,"type":"datalink-request","id":"dl-84","op":"si-unlink","params":{"flightId":92}}',
+    '{"v":1,"type":"datalink-request","id":"dl-85","op":"si-import","params":{"flightId":92}}',
+    '{"v":1,"type":"datalink-request","id":"dl-86","op":"si-pdc","params":{"plannedLegId":12}}',
+    '{"v":1,"type":"datalink-request","id":"dl-87","op":"si-status","params":{"flightId":9007199254740991}}',
+  ];
+
+  /** Every row: the op, the params, and the reason it is one of the five rejections. */
+  const REJECTED: [string, string, string][] = [
+    ['si-status', '{"flightId":92,"plannedLegId":12}', 'extra key'],
+    ['si-status', '{}', 'missing key'],
+    ['si-status', '{"flight_id":92}', 'missing key'],
+    ['si-status', '{"flightId":"92"}', 'wrong type'],
+    ['si-status', '{"flightId":0}', 'wrong type'],
+    ['si-status', '{"flightId":1.5}', 'wrong type'],
+    ['si-status', '{"flightId":-1}', 'wrong type'],
+    ['si-status', '{"flightId":9007199254740992}', 'wrong type'],
+    ['si-link', '{"flightId":92,"from":"now","text":"x"}', 'extra key'],
+    ['si-link', '{"flightId":92}', 'missing key'],
+    ['si-link', '{"from":"now"}', 'missing key'],
+    ['si-link', '{"flightId":"92","from":"now"}', 'wrong type'],
+    ['si-link', '{"flightId":null,"from":"now"}', 'wrong type'],
+    ['si-link', '{"flightId":92,"from":"session_start"}', 'from outside the set'],
+    ['si-link', '{"flightId":92,"from":"NOW"}', 'from outside the set'],
+    ['si-link', '{"flightId":92,"from":null}', 'from outside the set'],
+    ['si-link', '{"flightId":92,"from":"whenever"}', 'from outside the set'],
+    ['si-unlink', '{"flightId":92,"from":"now"}', 'extra key'],
+    ['si-unlink', '{}', 'missing key'],
+    ['si-unlink', '{"flightId":null}', 'wrong type'],
+    ['si-unlink', '{"flightId":0}', 'wrong type'],
+    ['si-import', '{"flightId":92,"since":51224}', 'extra key'],
+    ['si-import', '{}', 'missing key'],
+    ['si-import', '{"flightId":true}', 'wrong type'],
+    ['si-import', '{"flightId":1.5}', 'wrong type'],
+    ['si-pdc', '{"plannedLegId":12,"flightId":92}', 'extra key'],
+    ['si-pdc', '{}', 'missing key'],
+    ['si-pdc', '{"flightId":92}', 'missing key'],
+    ['si-pdc', '{"plannedLegId":"12"}', 'wrong type'],
+    ['si-pdc', '{"plannedLegId":null}', 'wrong type'],
+    ['si-pdc', '{"plannedLegId":0}', 'wrong type'],
+  ];
+
+  const DETAIL: Record<string, string> = {
+    'si-status': 'si-status params must be exactly { flightId }',
+    'si-link': 'si-link params must be exactly { flightId, from }',
+    'si-unlink': 'si-unlink params must be exactly { flightId }',
+    'si-import': 'si-import params must be exactly { flightId }',
+    'si-pdc': 'si-pdc params must be exactly { plannedLegId }',
+  };
+
+  it('decodes each accepted shape and round-trips it', () => {
+    for (const line of ACCEPTED) {
+      const result = decodeControlMessage(line);
+      expect(result, line).toEqual({ ok: true, message: JSON.parse(line) });
+      if (result.ok) expect(encodeControlMessage(result.message)).toBe(`${line}\n`);
+    }
+    expect(new Set(ACCEPTED.map((line) => JSON.parse(line).op))).toEqual(
+      new Set(['si-status', 'si-link', 'si-unlink', 'si-import', 'si-pdc']),
+    );
+  });
+
+  it.each(REJECTED)('%s rejects %s (%s) as bad-shape with the request id echoed', (op, params, _why) => {
+    const line = `{"v":1,"type":"datalink-request","id":"dl-90","op":"${op}","params":${params}}`;
+    const result = decodeControlMessage(line);
+    expect(result, line).toMatchObject({
+      ok: false, error: 'bad-shape', messageType: 'datalink-request', requestId: 'dl-90',
+    });
+    if (!result.ok) {
+      expect(describeDecodeError(result)).toBe(`dropped a malformed "datalink-request" message (${DETAIL[op]})`);
+    }
+  });
+
+  it('covers all five rejection kinds for every op, and non-object params too', () => {
+    for (const op of Object.keys(DETAIL)) {
+      const kinds = new Set(REJECTED.filter(([name]) => name === op).map(([, , why]) => why));
+      expect(kinds.has('extra key'), op).toBe(true);
+      expect(kinds.has('missing key'), op).toBe(true);
+      expect(kinds.has('wrong type'), op).toBe(true);
+      for (const params of ['null', '[]', '"x"', '42']) {
+        expect(decodeControlMessage(`{"v":1,"type":"datalink-request","id":"dl-91","op":"${op}","params":${params}}`)).toMatchObject({
+          ok: false, error: 'bad-shape', requestId: 'dl-91',
+        });
+      }
+      expect(decodeControlMessage(`{"v":1,"type":"datalink-request","id":"dl-92","op":"${op}"}`)).toMatchObject({
+        ok: false, error: 'bad-shape', requestId: 'dl-92',
+      });
+    }
+    expect(new Set(REJECTED.filter(([name]) => name === 'si-link').map(([, , why]) => why))).toContain(
+      'from outside the set',
+    );
+  });
+
+  it('never echoes a rejected value into the detail text', () => {
+    const line = '{"v":1,"type":"datalink-request","id":"dl-93","op":"si-link","params":{"flightId":92,"from":"now","body":"HELLO SAYINTENTIONS"}}';
+    const result = decodeControlMessage(line);
+    expect(result).toMatchObject({ ok: false, error: 'bad-shape' });
+    if (!result.ok) {
+      expect(describeDecodeError(result)).not.toContain('HELLO');
+      expect(describeDecodeError(result)).not.toContain('92');
+    }
+  });
+
+  it('decodes the five responses and the hello that advertises the feature', () => {
+    const lines = [
+      '{"v":1,"type":"hello","at":1789800000000,"pid":4242,"sidecarVersion":"0.1.0","nodeVersion":"v20.20.2","configPath":"/x","features":["datalink","simbrief-prefile","pdc-clearance","sayintentions"]}',
+      '{"v":1,"type":"datalink-response","at":1789800000000,"id":"dl-80","ok":true,"result":{"answered":"settings","flightId":null,"apiKeySet":false,"linked":null,"link":null,"httpStatus":200}}',
+      '{"v":1,"type":"datalink-response","at":1789800000000,"id":"dl-81","ok":true,"result":{"answered":"link","flightId":42,"apiKeySet":true,"linked":true,"link":{"upstreamFlightId":"8841207","sinceId":51223,"baselineCommId":51220,"linkedAt":"2026-09-17T14:30:00.000Z","lastImportAt":"2026-09-17T14:40:11.284Z","importedCount":4},"httpStatus":200}}',
+      '{"v":1,"type":"datalink-response","at":1789800000000,"id":"dl-82","ok":true,"result":{"flightId":42,"created":true,"pendingMessages":4,"link":{"upstreamFlightId":"8841207","sinceId":null,"baselineCommId":51224,"linkedAt":"2026-09-17T14:30:00.000Z","lastImportAt":null,"importedCount":0},"httpStatus":201}}',
+      '{"v":1,"type":"datalink-response","at":1789800000000,"id":"dl-84","ok":true,"result":{"flightId":42,"unlinked":false,"httpStatus":200}}',
+      '{"v":1,"type":"datalink-response","at":1789800000000,"id":"dl-85","ok":true,"result":{"flightId":42,"imported":4,"alreadySeen":0,"skipped":1,"sinceId":51224,"httpStatus":201}}',
+      '{"v":1,"type":"datalink-response","at":1789800000000,"id":"dl-86","ok":true,"result":{"plannedLegId":29,"sentText":"PDC KSFO KLAX CLRD SSTIK3 BSR Q13 RZS KWANG2 CLB 5000FT SQ 2451","httpStatus":201}}',
+      '{"v":1,"type":"datalink-response","at":1789800000000,"id":"dl-87","ok":false,"error":{"code":"si-no-api-key","httpStatus":409,"serverCode":"NO_API_KEY"}}',
+      '{"v":1,"type":"datalink-response","at":1789800000000,"id":"dl-88","ok":false,"error":{"code":"sayintentions-in-progress","httpStatus":null,"serverCode":null}}',
+      '{"v":1,"type":"datalink-response","at":1789800000000,"id":"dl-89","ok":false,"error":{"code":"sayintentions-unavailable","httpStatus":401,"serverCode":null}}',
+    ];
+    for (const line of lines) {
+      const result = decodeSidecarMessage(line);
+      expect(result, line).toEqual({ ok: true, message: JSON.parse(line) });
+      if (result.ok) expect(encodeSidecarMessage(result.message)).toBe(`${line}\n`);
+    }
+    expect(JSON.parse(lines[0]).features).toEqual([
+      'datalink', SIMBRIEF_FEATURE, CLEARANCE_FEATURE, SAYINTENTIONS_FEATURE,
+    ]);
+  });
+
+  it('names the feature, and lists the five ops last and once each', () => {
+    expect(SAYINTENTIONS_FEATURE).toBe('sayintentions');
+    expect(DATALINK_OPS.slice(-5)).toEqual(['si-status', 'si-link', 'si-unlink', 'si-import', 'si-pdc']);
+    expect(DATALINK_OPS).toHaveLength(16);
+    expect(new Set(DATALINK_OPS).size).toBe(16);
+    expect(PROTOCOL_VERSION).toBe(1);
+  });
+
+  it('a 144-unit sent text and a full link row encode to one line and decode back', () => {
+    const wide = {
+      v: 1 as const, type: 'datalink-response' as const, at: AT, id: 'dl-94', ok: true as const,
+      result: { plannedLegId: 29, sentText: 'P'.repeat(144), httpStatus: 201 },
+    };
+    expect(wide.result.sentText).toHaveLength(144);
+    const encoded = encodeDatalinkResponse(wide);
+    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(MAX_LINE_BYTES);
+    expect(decodeSidecarMessage(encoded.trim())).toEqual({ ok: true, message: wide });
   });
 });

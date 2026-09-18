@@ -1,0 +1,56 @@
+{
+  "_sample": "link-201-created-not-boolean",
+  "_why": "created is a string.",
+  "_op": "si-link",
+  "_route": "si-link",
+  "_requested": 42,
+  "_from": "session-start",
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "created": "yes",
+      "pending_messages": 0,
+      "link": {
+        "flight_id": 42,
+        "upstream_flight_id": "8841207",
+        "since_id": null,
+        "baseline_comm_id": 51224,
+        "linked_at": "2026-09-17T14:30:00.000Z",
+        "last_import_at": null,
+        "imported_count": 0
+      }
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "bad-response",
+    "httpStatus": 201,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS BAD DATA",
+    "hint": null,
+    "hintByAction": {
+      "link": "SAFE TO PRESS AGAIN",
+      "unlink": "SAFE TO PRESS AGAIN",
+      "import": "SAFE TO PRESS AGAIN",
+      "pdc": "PDC MAY HAVE BEEN SENT"
+    },
+    "unknownOutcome": true,
+    "kind": "error"
+  }
+}

@@ -42,6 +42,11 @@ const COMMANDS = {
   simbriefPrefile: 'simbrief_prefile',
   simbriefClearPrefile: 'simbrief_clear_prefile',
   datalinkClearance: 'datalink_clearance',
+  sayintentionsStatus: 'sayintentions_status',
+  sayintentionsLink: 'sayintentions_link',
+  sayintentionsUnlink: 'sayintentions_unlink',
+  sayintentionsImport: 'sayintentions_import',
+  sayintentionsPdc: 'sayintentions_pdc',
 };
 
 /** Event names the shell emits into the webview. */
@@ -114,6 +119,27 @@ const SIMBRIEF_HOST_METHODS = ['getSimbriefSettings', 'prefileSimbrief', 'clearP
  */
 const CLEARANCE_HOST_METHODS = ['requestClearance'];
 
+/**
+ * The SayIntentions methods are optional in the same way: a host without them
+ * is still adopted and the SayIntentions pages say NOT SUPPORTED. None takes a
+ * token or any config value — the key lives on the server — and each resolves
+ * to an `{ok, result|error}` envelope. The brand is camel-cased as
+ * `SayIntentions`, unlike the older `Simbrief` members.
+ */
+const SAYINTENTIONS_HOST_METHODS = [
+  'getSayIntentionsStatus', 'linkSayIntentions', 'unlinkSayIntentions',
+  'importSayIntentionsComms', 'sendSayIntentionsPdc',
+];
+
+/** The only keys each SayIntentions method forwards; everything else is dropped. */
+const SAYINTENTIONS_ARGS = {
+  getSayIntentionsStatus: ['flightId'],
+  linkSayIntentions: ['flightId', 'from'],
+  unlinkSayIntentions: ['flightId'],
+  importSayIntentionsComms: ['flightId'],
+  sendSayIntentionsPdc: ['plannedLegId'],
+};
+
 const datalinkError = (code) => ({ ok: false, error: { code, httpStatus: null, serverCode: null } });
 const UNSUPPORTED = datalinkError('host-unsupported');
 const BAD_REQUEST = datalinkError('bad-request');
@@ -130,6 +156,15 @@ function datalinkFallback(name) {
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
 const isTarget = (target) => isPlainObject(target) && typeof target.kind === 'string' && isCount(target.id);
+const hasKey = (req, key) => isPlainObject(req) && Object.prototype.hasOwnProperty.call(req, key);
+
+/** Reads exactly the named keys off a request; anything else never leaves here. */
+function pickKeys(req, keys) {
+  const source = isPlainObject(req) ? req : {};
+  const args = {};
+  for (const key of keys) args[key] = source[key];
+  return args;
+}
 
 /**
  * A host installs itself by assigning `window.__FMC_HOST__` before this module
@@ -173,6 +208,11 @@ function adoptHost(installed) {
   adapter.requestClearance = typeof installed.requestClearance === 'function'
     ? (req) => installed.requestClearance({ plannedLegId: isPlainObject(req) ? req.plannedLegId : undefined })
     : async () => clone(UNSUPPORTED);
+  for (const name of SAYINTENTIONS_HOST_METHODS) {
+    adapter[name] = typeof installed[name] === 'function'
+      ? (req) => installed[name](pickKeys(req, SAYINTENTIONS_ARGS[name]))
+      : async () => clone(UNSUPPORTED);
+  }
   return adapter;
 }
 
@@ -293,6 +333,34 @@ function createTauriBridge(host) {
     requestClearance: async (req) => {
       if (!isPlainObject(req) || !isCount(req.plannedLegId)) return clone(BAD_REQUEST);
       return host.invoke(COMMANDS.datalinkClearance, { plannedLegId: req.plannedLegId });
+    },
+    getSayIntentionsStatus: async (req) => {
+      // The flight id is the question, not an option: a flight id asks whether
+      // that flight is linked, an explicit null asks whether a key is
+      // configured at all. The shell receives an absent argument as the same
+      // "no flight" as an explicit null, so a caller that drops the key would
+      // silently get the wrong answer — this is the only place it can be
+      // caught, and a missing or undefined `flightId` is refused here.
+      if (!hasKey(req, 'flightId')) return clone(BAD_REQUEST);
+      if (req.flightId !== null && !isCount(req.flightId)) return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.sayintentionsStatus, { flightId: req.flightId });
+    },
+    linkSayIntentions: async (req) => {
+      if (!isPlainObject(req) || !isCount(req.flightId)) return clone(BAD_REQUEST);
+      if (req.from !== 'now' && req.from !== 'session-start') return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.sayintentionsLink, { flightId: req.flightId, from: req.from });
+    },
+    unlinkSayIntentions: async (req) => {
+      if (!isPlainObject(req) || !isCount(req.flightId)) return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.sayintentionsUnlink, { flightId: req.flightId });
+    },
+    importSayIntentionsComms: async (req) => {
+      if (!isPlainObject(req) || !isCount(req.flightId)) return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.sayintentionsImport, { flightId: req.flightId });
+    },
+    sendSayIntentionsPdc: async (req) => {
+      if (!isPlainObject(req) || !isCount(req.plannedLegId)) return clone(BAD_REQUEST);
+      return host.invoke(COMMANDS.sayintentionsPdc, { plannedLegId: req.plannedLegId });
     },
   };
 }
@@ -426,7 +494,10 @@ function createStubBridge() {
       return subscribe(listeners.datalink, fn);
     },
   };
-  for (const name of [...DATALINK_HOST_METHODS, ...SIMBRIEF_HOST_METHODS, ...CLEARANCE_HOST_METHODS]) {
+  for (const name of [
+    ...DATALINK_HOST_METHODS, ...SIMBRIEF_HOST_METHODS, ...CLEARANCE_HOST_METHODS,
+    ...SAYINTENTIONS_HOST_METHODS,
+  ]) {
     if (name === 'getDatalinkState' || name === 'onDatalink') continue;
     bridge[name] = async (...args) => {
       record(name, clone(args));

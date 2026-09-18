@@ -1,0 +1,38 @@
+{
+  "_sample": "settings-200-key-set-masked-token",
+  "_why": "The masked key is a sentinel: proving the mask never reaches a result, a log or a state.",
+  "_op": "si-status",
+  "_route": "si-settings",
+  "_requested": null,
+  "request": {
+    "method": "GET",
+    "path": "/api/settings/sayintentions",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "sayintentions_api_key_set": true,
+      "sayintentions_api_key_masked": "si_1…SENTINEL-DATALINK-TOKEN-0000"
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "answered": "settings",
+      "flightId": null,
+      "apiKeySet": true,
+      "linked": null,
+      "link": null,
+      "httpStatus": 200
+    }
+  }
+}

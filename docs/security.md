@@ -59,6 +59,31 @@ environment variable: the shell spawns the sidecar with
 `node <entry> --config <path>` and an otherwise unmodified environment, so the
 token reaches the sidecar only by that process reading `config.json` itself.
 
+## The SayIntentions API key: a second secret this client never touches
+
+The msfslogger server's optional SayIntentions.AI integration holds a second
+secret — the pilot's SayIntentions API key — entirely on the server side.
+This is a deliberate, permanent boundary, not a current limitation:
+
+- The CDU never sees, collects, types or displays the key, in any form. The
+  server's own read route can answer with a masked form
+  (`sayintentions_api_key_masked`, e.g. `"si_1…9f2c"`) alongside the boolean
+  `sayintentions_api_key_set`, but this client takes only the boolean —
+  `DL-SI` renders `KEY ON FILE` / `NO KEY ON FILE` and nothing more specific.
+  The masked value is never requested, never projected into any result shape,
+  never logged and never reaches the webview.
+- **The key-write route, `PUT /api/settings/sayintentions`, is intentionally
+  excluded from the `x-ingest-token` scope** — permanently, by the server's
+  own design, and confirmed as such by the peer session that shipped it. It
+  stays a web-UI-only action on the server's Prefiles page. This client's
+  ingest token, however capable, cannot write or change that key: there is no
+  code path in the sidecar, the shell or the CDU that calls, or could call,
+  that route. A CDU that finds no key configured points the operator at the
+  web app rather than offering a field to fill in.
+
+See [api](api.md) for the token-scoped routes SayIntentions does use, and
+[cdu-reference](cdu-reference.md) for the exact CDU text.
+
 ## TLS
 
 TLS verification is never disabled. A `certPath` in the config file gives an
@@ -87,7 +112,7 @@ sidecar's job, entirely outside the webview's CSP jurisdiction.
 
 The one capability file (`src-tauri/capabilities/main.json`) grants window
 `main` only `core:event:allow-listen` and `core:event:allow-unlisten` — no
-other core or plugin permission. The 19 app-defined `#[tauri::command]`s are
+other core or plugin permission. The 24 app-defined `#[tauri::command]`s are
 not listed in any ACL file, and `src-tauri/build.rs` generates no app ACL
 manifest either. Tauri only enforces its capability ACL against an
 app-defined (non-plugin) command when the app has its own ACL manifest, or

@@ -5,6 +5,8 @@
 // asserted in exact milliseconds and exact request counts. The load sheet and
 // weather ops also run against a scratch HTTP server through the real client.
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HttpOutcome } from '../src/datalink-classify';
 import { buildRequest, DatalinkClient, type DatalinkRoute } from '../src/datalink-client';
@@ -1905,6 +1907,512 @@ describe('clearance against a scratch server through the real client', () => {
         'GET /api/status',
         'GET /api/planned-legs/12/acars-messages',
       ]);
+    } finally {
+      service.shutdown();
+      await uplink.close();
+      await server.close();
+    }
+  });
+});
+
+// ── SayIntentions ─────────────────────────────────────────────────────────────
+
+const SI_DIR = path.join(__dirname, 'fixtures', 'sayintentions');
+
+interface SayIntentionsFixture {
+  _sample: string;
+  _op: 'si-status' | 'si-link' | 'si-unlink' | 'si-import' | 'si-pdc';
+  _requested?: number | null;
+  _from?: 'now' | 'session-start';
+  _bodyTooLarge?: boolean;
+  configToken?: string;
+  request: { method: string; path: string };
+  response: { status: number; headers: Record<string, string>; body: unknown };
+  expect: { ok: boolean; code?: string; httpStatus?: number | null; serverCode?: string | null; latch?: boolean; result?: Record<string, unknown> };
+}
+
+function sayintentionsFixture(name: string): SayIntentionsFixture {
+  return JSON.parse(fs.readFileSync(path.join(SI_DIR, `${name}.json`), 'utf8')) as SayIntentionsFixture;
+}
+
+function sayintentionsFixtureNames(): string[] {
+  return fs
+    .readdirSync(SI_DIR)
+    .filter((file) => file.endsWith('.json') && file !== 'local-outcomes.json')
+    .map((file) => file.slice(0, -'.json'.length))
+    .sort();
+}
+
+/** `id` re-aims a sample at another flight or leg, so a mismatch sample stays a mismatch. */
+function fromSayIntentions(name: string, id?: number): HttpOutcome {
+  const fixtureFile = sayintentionsFixture(name);
+  const { response } = fixtureFile;
+  let body = response.body;
+  if (id !== undefined && typeof body === 'object' && body !== null) {
+    const row = body as Record<string, unknown>;
+    if (row.flight_id === 42) body = { ...row, flight_id: id };
+    else if (row.planned_leg_id === 29) body = { ...row, planned_leg_id: id };
+  }
+  const scope = Object.entries(response.headers).find(([k]) => k.toLowerCase() === 'x-ingest-token-scope');
+  // The one sample whose body is over the cap: the client reports no text at all.
+  const tooLarge = fixtureFile._bodyTooLarge === true;
+  return {
+    kind: 'response',
+    status: response.status,
+    scopeHeader: scope ? scope[1] : null,
+    bodyText: tooLarge ? null : typeof body === 'string' ? body : JSON.stringify(body),
+    bodyTooLarge: tooLarge,
+  };
+}
+
+const SI_LOG =
+  /^(info|warn) (Datalink dl\.\S+ \(HTTP [^)]*\)( on .*)?|SayIntentions (status|link|unlink|import|pdc) [a-z-]+ \(HTTP (\d{3}|---)\)|SimBrief (prefile|settings) [a-z-]+ \(HTTP (\d{3}|---)\))$/;
+
+/** `base`, with the seven SayIntentions routes answered by `answer`. */
+function withSayIntentions(
+  base: Responder,
+  answer: (key: string, id: number | null) => HttpOutcome | Promise<HttpOutcome>,
+): Responder {
+  return (route) => {
+    if (route.key.startsWith('si-')) return answer(route.key, 'id' in route ? route.id : null);
+    return base(route);
+  };
+}
+
+const SI_PARAMS: Record<string, Record<string, unknown>> = {
+  'si-status': { flightId: 42 },
+  'si-link': { flightId: 42, from: 'session-start' },
+  'si-unlink': { flightId: 42 },
+  'si-import': { flightId: 42 },
+  'si-pdc': { plannedLegId: 29 },
+};
+
+describe('SayIntentions: the parameter picks the route, and a write is followed by one refresh', () => {
+  beforeEach(() => {
+    config = { token: SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  it.each([
+    ['si-status', { flightId: null }, 'GET /api/settings/sayintentions', 'settings-200-key-set'],
+    ['si-status', { flightId: 42 }, 'GET /api/flights/42/sayintentions/link', 'status-200-linked'],
+    ['si-link', { flightId: 42, from: 'now' }, 'POST /api/flights/42/sayintentions/link?from=now', 'link-now-201-created'],
+    ['si-link', { flightId: 42, from: 'session-start' }, 'POST /api/flights/42/sayintentions/link', 'link-201-created'],
+    ['si-unlink', { flightId: 42 }, 'DELETE /api/flights/42/sayintentions/link', 'unlink-200-unlinked'],
+    ['si-import', { flightId: 42 }, 'POST /api/flights/42/sayintentions/import', 'import-201-imported'],
+    ['si-pdc', { plannedLegId: 29 }, 'POST /api/planned-legs/29/sayintentions/clearance', 'pdc-201-sent'],
+  ])('%s %j requests %s', async (op, params, line, fixtureName) => {
+    const client = new ScriptedClient(withSayIntentions(groundServer(), () => fromSayIntentions(fixtureName as string)));
+    const service = makePrefileService(client);
+    const outcome = await service.handle(req(op as 'si-status', params as never));
+    expect(outcome).toEqual({ ok: true, result: sayintentionsFixture(fixtureName as string).expect.result });
+    await flush();
+    // Exactly one request, on that one path. Nothing is watching, so the
+    // refresh an action asks for has nothing to do.
+    expect(paths(client)).toEqual([line]);
+  });
+
+  it('a write while watching refreshes once, and then nothing until the poll, which only GETs', async () => {
+    const client = new ScriptedClient(withSayIntentions(
+      groundServer({ status: () => fromFixture('01b-get-status-ground-leg') }),
+      () => fromSayIntentions('import-201-imported'),
+    ));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    const made = client.routes.length;
+    const emitted = states.length;
+
+    expect(await service.handle(req('si-import', { flightId: 42 }))).toMatchObject({
+      ok: true, result: { imported: 4, alreadySeen: 0, skipped: 1, sinceId: 51224, httpStatus: 201 },
+    });
+    await flush();
+    expect(paths(client, made)).toEqual([
+      'POST /api/flights/42/sayintentions/import',
+      'GET /api/status',
+      'GET /api/planned-legs/12/acars-messages',
+    ]);
+    // The only emit is the refresh cycle's own.
+    expect(states.length).toBe(emitted + 1);
+    expect(logs).toContain('info SayIntentions import ok (HTTP 201)');
+    await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+    expect(client.count('si-import')).toBe(1);
+    expect(paths(client, made).slice(1).every((line) => line.startsWith('GET '))).toBe(true);
+    for (const line of logs) expect(line).toMatch(SI_LOG);
+  });
+
+  it('page open, three poll cycles, a manual refresh and the other ops make no SayIntentions request', async () => {
+    const client = new ScriptedClient(withSayIntentions(
+      groundServer({ status: () => fromFixture('01b-get-status-ground-leg') }),
+      () => fromSayIntentions('status-200-linked'),
+    ));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+    await service.handle(req('refresh', {}));
+    await flush();
+    await service.handle(req('wx', { target: { kind: 'leg', id: 12 }, icao: 'LFPG' }));
+    await service.handle(req('simbrief-settings', {}));
+    await service.handle(req('prefile-clear', {}));
+    await watchFor(service, 2 * DATALINK_POLL_INTERVAL_MS);
+    expect(client.count('status')).toBeGreaterThanOrEqual(6);
+    expect(paths(client).filter((line) => line.includes('sayintentions'))).toEqual([]);
+  });
+});
+
+describe('SayIntentions failures and the datalink state', () => {
+  beforeEach(() => {
+    config = { token: SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  /** Watching, prefiled leg 123 shown with its thread, the SayIntentions routes answering with `answer`. */
+  async function shownPrefile(answer: (key: string, id: number | null) => HttpOutcome) {
+    const client = new ScriptedClient(withSayIntentions(groundServer(), answer));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    await service.handle(req('simbrief-prefile', {}));
+    await flush();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(last()).toMatchObject({
+      state: 'dl.ok', scope: { kind: 'leg', plannedLegId: 123, source: 'prefile' }, prefiledLeg: { plannedLegId: 123 },
+    });
+    return { client, service };
+  }
+
+  // Every non-2xx sample that must leave the datalink exactly as it was: not a
+  // refused token, and not an answer that re-resolves the scope. A failed
+  // request asks for no refresh either: only a 2xx or a lost answer does.
+  const UNCHANGED = sayintentionsFixtureNames().filter((name) => {
+    const s = sayintentionsFixture(name);
+    return (
+      !s.expect.ok &&
+      !s.expect.latch &&
+      s.expect.code !== 'flight-not-found' &&
+      s.expect.code !== 'leg-not-found' &&
+      s.response.status >= 300
+    );
+  });
+
+  it('the rows that change nothing are the 409s, the 502/504s, the non-latching 401s, 403 and the http-errors', () => {
+    expect(UNCHANGED).toHaveLength(20);
+    expect(new Set(UNCHANGED.map((name) => sayintentionsFixture(name).expect.code))).toEqual(new Set([
+      'http-error', 'invalid-id', 'rejected', 'sayintentions-unavailable', 'si-bad-api-key',
+      'si-no-api-key', 'si-no-clearance', 'si-no-comms', 'si-no-session', 'si-not-linked', 'si-session-changed',
+      'si-upstream-bad-body', 'si-upstream-error', 'si-upstream-timeout', 'si-upstream-unreachable', 'token-missing',
+    ]));
+  });
+
+  it.each(UNCHANGED)('%s leaves availability, schedule, scope, thread cache and the held leg identical, with no emit', async (name) => {
+    const s = sayintentionsFixture(name);
+    config.token = s.configToken ?? SENTINEL_TOKEN;
+    const { client, service } = await shownPrefile(() => fromSayIntentions(name));
+    const before = withoutAt(service.buildState());
+    const epoch = before.thread!.epoch;
+    const emitted = states.length;
+    const made = client.routes.length;
+
+    expect(await service.handle(req(s._op as 'si-status', SI_PARAMS[s._op] as never))).toMatchObject({
+      ok: false, error: { code: s.expect.code },
+    });
+    await flush();
+    expect(withoutAt(service.buildState())).toEqual(before);
+    expect(states.length).toBe(emitted);
+    expect(paths(client, made)).toHaveLength(1);
+    const word = s._op.slice(3);
+    expect(logs[logs.length - 1]).toBe(`warn SayIntentions ${word} ${s.expect.code} (HTTP ${s.response.status})`);
+    for (const line of logs) expect(line).toMatch(SI_LOG);
+
+    // The rest of the datalink carries on as before.
+    expect(await service.handle(req('thread', { epoch, endSeq: 1 }))).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(DATALINK_POLL_INTERVAL_MS);
+    expect(last()).toMatchObject({ state: 'dl.ok', prefiledLeg: { plannedLegId: 123 } });
+  });
+
+  // A 2xx the CDU cannot vouch for: the action may have taken effect, so an
+  // action refreshes and the operator sees the truth in the thread. The
+  // availability axis is never touched, because an op is not a poll.
+  const REFRESHED = sayintentionsFixtureNames().filter((name) => {
+    const s = sayintentionsFixture(name);
+    return !s.expect.ok && s.response.status < 300;
+  });
+
+  it('the 2xx rows that refresh are the ones that fail to project, plus the body over the cap', () => {
+    expect(REFRESHED.length).toBeGreaterThanOrEqual(19);
+    expect(new Set(REFRESHED.map((name) => sayintentionsFixture(name).expect.code))).toEqual(
+      new Set(['bad-response', 'too-large']),
+    );
+  });
+
+  it.each(REFRESHED)('%s leaves availability, scope, the held leg and the epoch alone', async (name) => {
+    const s = sayintentionsFixture(name);
+    const { client, service } = await shownPrefile(() => fromSayIntentions(name));
+    const before = withoutAt(service.buildState());
+    const made = client.routes.length;
+
+    expect(await service.handle(req(s._op as 'si-status', SI_PARAMS[s._op] as never))).toMatchObject({
+      ok: false, error: { code: s.expect.code, httpStatus: s.response.status, serverCode: null },
+    });
+    await flush();
+    // A read asks for no refresh; each action asks for exactly one.
+    expect(paths(client, made)).toHaveLength(s._op === 'si-status' ? 1 : 3);
+    const after = withoutAt(service.buildState());
+    expect(after.state).toBe('dl.ok');
+    expect(after.scope).toEqual(before.scope);
+    expect(after.prefiledLeg).toEqual(before.prefiledLeg);
+    expect(after.thread!.epoch).toBe(before.thread!.epoch);
+    expect(states.map((state) => state.state)).not.toContain('dl.bad-response');
+    const word = s._op.slice(3);
+    expect(logs).toContain(`warn SayIntentions ${word} ${s.expect.code} (HTTP ${s.response.status})`);
+    for (const line of logs) expect(line).toMatch(SI_LOG);
+  });
+
+  it.each([
+    ['transport-unreachable', UNREACHABLE, 'unreachable'],
+    ['transport-reset', RESET, 'unreachable'],
+    ['transport-client-timeout', TIMED_OUT, 'timeout'],
+    ['transport-tls', { kind: 'transport', errorName: 'TypeError', errorCode: 'SELF_SIGNED_CERT_IN_CHAIN' } as HttpOutcome, 'tls-error'],
+  ])('%s: an action whose fate is unknown refreshes, and availability is still untouched', async (_name, outcome, code) => {
+    const { client, service } = await shownPrefile(() => outcome as HttpOutcome);
+    const before = withoutAt(service.buildState());
+    const made = client.routes.length;
+    expect(await service.handle(req('si-pdc', { plannedLegId: 29 }))).toMatchObject({ ok: false, error: { code } });
+    await flush();
+    expect(paths(client, made)).toEqual([
+      'POST /api/planned-legs/29/sayintentions/clearance',
+      'GET /api/status',
+      'GET /api/planned-legs/123/acars-messages',
+    ]);
+    const after = withoutAt(service.buildState());
+    expect(after.state).toBe('dl.ok');
+    expect(after.scope).toEqual(before.scope);
+    expect(after.prefiledLeg).toEqual(before.prefiledLeg);
+    expect(logs).toContain(`warn SayIntentions pdc ${code} (HTTP ---)`);
+  });
+
+  it.each(['401-invalid-token', '401-invalid-token-no-header'])(
+    '%s latches: the held leg is dropped and nothing is sent until a valid reload',
+    async (name) => {
+      let refuse = true;
+      const { client, service } = await shownPrefile(() =>
+        refuse ? fromSayIntentions(name) : fromSayIntentions('import-201-imported'));
+      expect(await service.handle(req('si-import', { flightId: 42 }))).toEqual({
+        ok: false, error: { code: 'token-invalid', httpStatus: 401, serverCode: 'INVALID_INGEST_TOKEN' },
+      });
+      expect(last()).toMatchObject({
+        state: 'dl.token-invalid', httpStatus: 401, nextPollAt: null, scope: null, thread: null,
+      });
+      expect(last()).not.toHaveProperty('prefiledLeg');
+      expect(logs).toContain('warn SayIntentions import token-invalid (HTTP 401)');
+      const made = client.routes.length;
+      const refused = { ok: false, error: { code: 'token-invalid', httpStatus: 401, serverCode: 'INVALID_INGEST_TOKEN' } };
+      await watchFor(service, 300000);
+      for (const [op, params] of Object.entries(SI_PARAMS)) {
+        expect(await service.handle(req(op as 'si-status', params as never))).toEqual(refused);
+      }
+      expect(await service.handle(req('si-status', { flightId: null }))).toEqual(refused);
+      expect(client.routes.length).toBe(made);
+      refuse = false;
+      service.onConfigApplied(true);
+      await flush();
+      expect(paths(client, made)).toEqual(['GET /api/status', 'GET /api/ground-sessions/current']);
+    },
+  );
+
+  it('404 FLIGHT_NOT_FOUND re-resolves the scope, from the read as well as the actions', async () => {
+    const { client, service } = await shownPrefile(() => fromSayIntentions('404-flight-not-found'));
+    for (const op of ['si-status', 'si-link', 'si-unlink', 'si-import'] as const) {
+      const made = client.routes.length;
+      expect(await service.handle(req(op, SI_PARAMS[op] as never))).toEqual({
+        ok: false, error: { code: 'flight-not-found', httpStatus: 404, serverCode: 'FLIGHT_NOT_FOUND' },
+      });
+      await flush();
+      expect(paths(client, made).slice(-2)).toEqual(['GET /api/status', 'GET /api/planned-legs/123/acars-messages']);
+      expect(last()).toMatchObject({ prefiledLeg: { plannedLegId: 123 } });
+    }
+  });
+
+  it('404 PLANNED_LEG_NOT_FOUND on another leg keeps the held one; on the held leg it drops it', async () => {
+    const { client, service } = await shownPrefile(() => fromSayIntentions('404-planned-leg-not-found'));
+    const made = client.routes.length;
+    const emitted = states.length;
+    expect(await service.handle(req('si-pdc', { plannedLegId: 29 }))).toMatchObject({
+      ok: false, error: { code: 'leg-not-found', httpStatus: 404 },
+    });
+    await flush();
+    expect(paths(client, made)).toEqual([
+      'POST /api/planned-legs/29/sayintentions/clearance',
+      'GET /api/status',
+      'GET /api/planned-legs/123/acars-messages',
+    ]);
+    // Only the cycle emitted.
+    expect(states.length).toBe(emitted + 1);
+    expect(last()).toMatchObject({ prefiledLeg: { plannedLegId: 123 } });
+
+    const then = client.routes.length;
+    expect(await service.handle(req('si-pdc', { plannedLegId: 123 }))).toMatchObject({
+      ok: false, error: { code: 'leg-not-found' },
+    });
+    await flush();
+    expect(paths(client, then)).toEqual([
+      'POST /api/planned-legs/123/sayintentions/clearance',
+      'GET /api/status',
+      'GET /api/ground-sessions/current',
+    ]);
+    expect(last()).not.toHaveProperty('prefiledLeg');
+    expect(last()).toMatchObject({ state: 'dl.ok', scope: { kind: 'none' } });
+    expect(logs).toContain('warn SayIntentions pdc leg-not-found (HTTP 404)');
+  });
+
+});
+
+describe('SayIntentions: one guard, never retried, never doubled', () => {
+  beforeEach(() => {
+    config = { token: SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  it('with one action out, every other action is refused and sends nothing, while the read still gets through', async () => {
+    let release: ((outcome: HttpOutcome) => void) | null = null;
+    const client = new ScriptedClient(withSayIntentions(groundServer(), (key) =>
+      key === 'si-settings'
+        ? fromSayIntentions('settings-200-key-set')
+        : new Promise<HttpOutcome>((resolve) => { release = resolve; })));
+    const service = makePrefileService(client);
+    const first = service.handle(req('si-import', { flightId: 42 }));
+    await flush();
+    expect(client.count('si-import')).toBe(1);
+    const inProgress = { ok: false, error: { code: 'sayintentions-in-progress', httpStatus: null, serverCode: null } };
+    expect(await service.handle(req('si-import', { flightId: 42 }))).toEqual(inProgress);
+    expect(await service.handle(req('si-link', { flightId: 42, from: 'now' }))).toEqual(inProgress);
+    expect(await service.handle(req('si-unlink', { flightId: 42 }))).toEqual(inProgress);
+    expect(await service.handle(req('si-pdc', { plannedLegId: 29 }))).toEqual(inProgress);
+    // Checked before the config, so it answers the same with no config.
+    hasConfig = false;
+    expect(await service.handle(req('si-import', { flightId: 42 }))).toEqual(inProgress);
+    hasConfig = true;
+    // The read takes no guard, and the other features keep their own.
+    expect(await service.handle(req('si-status', { flightId: null }))).toMatchObject({ ok: true });
+    expect(await service.handle(req('simbrief-prefile', {}))).toMatchObject({ ok: true });
+    expect(client.routes.filter((r) => r.key.startsWith('si-') && r.key !== 'si-settings')).toHaveLength(1);
+    expect(logs.filter((line) => line.includes('SayIntentions import'))).toEqual([]);
+
+    release!(fromSayIntentions('500-internal-no-code'));
+    expect(await first).toMatchObject({ ok: false, error: { code: 'http-error', httpStatus: 500 } });
+    await vi.advanceTimersByTimeAsync(100000);
+    expect(client.count('si-import')).toBe(1);
+
+    // Settled: a new press is accepted and makes its own single request.
+    const again = service.handle(req('si-pdc', { plannedLegId: 29 }));
+    await flush();
+    expect(client.count('si-pdc')).toBe(1);
+    release!(fromSayIntentions('pdc-201-sent'));
+    expect(await again).toMatchObject({ ok: true, result: { plannedLegId: 29 } });
+  });
+
+  it('no config: every op is refused locally with no request, and the guard is released', async () => {
+    const client = new ScriptedClient(withSayIntentions(groundServer(), () => fromSayIntentions('pdc-201-sent')));
+    const service = makePrefileService(client);
+    hasConfig = false;
+    for (const [op, params] of Object.entries(SI_PARAMS)) {
+      expect(await service.handle(req(op as 'si-status', params as never))).toEqual({
+        ok: false, error: { code: 'no-config', httpStatus: null, serverCode: null },
+      });
+    }
+    expect(await service.handle(req('si-status', { flightId: null }))).toMatchObject({ error: { code: 'no-config' } });
+    expect(client.routes).toEqual([]);
+    expect(logs).toEqual([]);
+    hasConfig = true;
+    expect(await service.handle(req('si-pdc', { plannedLegId: 29 }))).toMatchObject({ ok: true });
+  });
+
+  it('shutdown while an action is in flight answers sidecar-unavailable and emits nothing', async () => {
+    let release: ((outcome: HttpOutcome) => void) | null = null;
+    const client = new ScriptedClient(withSayIntentions(groundServer(), () =>
+      new Promise<HttpOutcome>((resolve) => { release = resolve; })));
+    const service = makePrefileService(client);
+    const pending = service.handle(req('si-link', { flightId: 42, from: 'session-start' }));
+    await flush();
+    service.shutdown();
+    release!(fromSayIntentions('401-invalid-token'));
+    expect(await pending).toEqual({
+      ok: false, error: { code: 'sidecar-unavailable', httpStatus: null, serverCode: null },
+    });
+    expect(states).toEqual([]);
+    for (const [op, params] of Object.entries(SI_PARAMS)) {
+      expect(await service.handle(req(op as 'si-status', params as never))).toMatchObject({
+        error: { code: 'sidecar-unavailable' },
+      });
+    }
+    expect(client.count('si-link')).toBe(1);
+  });
+
+  it.each([
+    ['500', () => fromSayIntentions('500-internal-no-code'), 'http-error'],
+    ['502', () => fromSayIntentions('502-upstream-error'), 'si-upstream-error'],
+    ['504', () => fromSayIntentions('504-upstream-timeout'), 'si-upstream-timeout'],
+    ['reset', () => RESET, 'unreachable'],
+    ['client timeout', () => TIMED_OUT, 'timeout'],
+  ])('%s: one request, and three poll intervals later still one', async (_name, outcome, code) => {
+    const client = new ScriptedClient(withSayIntentions(groundServer(), () => outcome()));
+    const service = makePrefileService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    expect(await service.handle(req('si-pdc', { plannedLegId: 29 }))).toMatchObject({ ok: false, error: { code } });
+    await watchFor(service, 3 * DATALINK_POLL_INTERVAL_MS + 5000);
+    expect(client.count('si-pdc')).toBe(1);
+    expect(client.count('status')).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('SayIntentions against a scratch server through the real client', () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    config = { token: SENTINEL_TOKEN, serverUrl: 'http://scratch.invalid' };
+  });
+
+  it('the server records exactly one request per op, on the seven frozen paths, all with no body', async () => {
+    const handler = (name: string) => () => {
+      const { response } = sayintentionsFixture(name);
+      return { status: response.status, headers: response.headers, body: response.body };
+    };
+    const server = await startScratchServer({
+      'GET /api/settings/sayintentions': handler('settings-200-key-unset'),
+      'GET /api/flights/42/sayintentions/link': handler('status-200-not-linked'),
+      'POST /api/flights/42/sayintentions/link': handler('link-201-created'),
+      'POST /api/flights/42/sayintentions/link?from=now': handler('link-now-201-created'),
+      'DELETE /api/flights/42/sayintentions/link': handler('unlink-200-unlinked'),
+      'POST /api/flights/42/sayintentions/import': handler('import-201-imported'),
+      'POST /api/planned-legs/29/sayintentions/clearance': handler('pdc-201-sent'),
+    });
+    const uplink = new Uplink(scratchConfig(server.baseUrl));
+    const real = new DatalinkClient(() => uplink, { timeoutMs: 500, sayintentionsTimeoutMs: 500 });
+    // The SayIntentions ops go to the scratch server; the poll GETs are scripted.
+    const polls = new ScriptedClient(groundServer());
+    const service = makePrefileService({
+      request: (route, abort) => (route.key.startsWith('si-') ? real.request(route, abort) : polls.request(route)),
+    });
+    try {
+      expect(await service.handle(req('si-status', { flightId: null }))).toMatchObject({ ok: true });
+      expect(await service.handle(req('si-status', { flightId: 42 }))).toMatchObject({ ok: true });
+      expect(await service.handle(req('si-link', { flightId: 42, from: 'session-start' }))).toMatchObject({ ok: true });
+      expect(await service.handle(req('si-link', { flightId: 42, from: 'now' }))).toMatchObject({ ok: true });
+      expect(await service.handle(req('si-unlink', { flightId: 42 }))).toMatchObject({ ok: true });
+      expect(await service.handle(req('si-import', { flightId: 42 }))).toMatchObject({ ok: true });
+      expect(await service.handle(req('si-pdc', { plannedLegId: 29 }))).toMatchObject({ ok: true });
+      expect(server.requests.map((r) => `${r.method} ${r.path}`)).toEqual([
+        'GET /api/settings/sayintentions',
+        'GET /api/flights/42/sayintentions/link',
+        'POST /api/flights/42/sayintentions/link',
+        'POST /api/flights/42/sayintentions/link?from=now',
+        'DELETE /api/flights/42/sayintentions/link',
+        'POST /api/flights/42/sayintentions/import',
+        'POST /api/planned-legs/29/sayintentions/clearance',
+      ]);
+      for (const request of server.requests) {
+        expect(request.body).toBe('');
+        expect(request.headers['content-type']).toBeUndefined();
+        expect(request.headers['x-ingest-token']).toBe(SENTINEL_TOKEN);
+      }
     } finally {
       service.shutdown();
       await uplink.close();

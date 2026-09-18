@@ -1,0 +1,38 @@
+{
+  "_sample": "settings-200-key-set",
+  "_why": "A key is saved. The masked form is in the body and is deliberately not read.",
+  "_op": "si-status",
+  "_route": "si-settings",
+  "_requested": null,
+  "request": {
+    "method": "GET",
+    "path": "/api/settings/sayintentions",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "sayintentions_api_key_set": true,
+      "sayintentions_api_key_masked": "si_1…9f2c"
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "answered": "settings",
+      "flightId": null,
+      "apiKeySet": true,
+      "linked": null,
+      "link": null,
+      "httpStatus": 200
+    }
+  }
+}

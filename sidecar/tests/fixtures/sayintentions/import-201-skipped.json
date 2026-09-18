@@ -1,0 +1,58 @@
+{
+  "_sample": "import-201-skipped",
+  "_why": "Some rows imported, some already seen, some skipped, and no cursor yet.",
+  "_op": "si-import",
+  "_route": "si-import",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/import",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "imported": 2,
+      "already_seen": 1,
+      "skipped": 3,
+      "since_id": null,
+      "messages": [
+        {
+          "id": 901,
+          "flight_id": 42,
+          "planned_leg_id": null,
+          "direction": "downlink",
+          "category": "atc",
+          "label": "SWA1451",
+          "body": "Ground, Southwest 1451, gate 24, ready to taxi with information Kilo.",
+          "payload_json": "{}",
+          "correlation_id": null,
+          "dedup_key": "sayintentions:comm:42:51221:out",
+          "sent_at": "2026-09-17T14:31:02.000Z",
+          "read_at": null
+        }
+      ]
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "flightId": 42,
+      "imported": 2,
+      "alreadySeen": 1,
+      "skipped": 3,
+      "sinceId": null,
+      "httpStatus": 201
+    }
+  }
+}

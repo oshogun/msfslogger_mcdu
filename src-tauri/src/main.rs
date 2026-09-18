@@ -173,6 +173,52 @@ async fn datalink_clearance(
     relay_datalink(state, "clearance", json!({"plannedLegId": planned_leg_id})).await
 }
 
+// One flight id or none: a null id is the CDU asking whether a key is on file
+// at all, which is a question that has an answer before any flight exists.
+#[tauri::command]
+async fn sayintentions_status(
+    flight_id: Option<u64>,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    relay_datalink(state, "si-status", json!({"flightId": flight_id})).await
+}
+
+#[tauri::command]
+async fn sayintentions_link(
+    flight_id: u64,
+    from: String,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    let params = json!({"flightId": flight_id, "from": from});
+    relay_datalink(state, "si-link", params).await
+}
+
+#[tauri::command]
+async fn sayintentions_unlink(
+    flight_id: u64,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    relay_datalink(state, "si-unlink", json!({"flightId": flight_id})).await
+}
+
+#[tauri::command]
+async fn sayintentions_import(
+    flight_id: u64,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    relay_datalink(state, "si-import", json!({"flightId": flight_id})).await
+}
+
+// Only the leg the CDU confirmed: the text sent upstream is the server's to
+// compose, and nothing here can supply or alter it.
+#[tauri::command]
+async fn sayintentions_pdc(
+    planned_leg_id: u64,
+    state: State<'_, Supervisor>,
+) -> Result<Value, String> {
+    relay_datalink(state, "si-pdc", json!({"plannedLegId": planned_leg_id})).await
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
@@ -223,7 +269,12 @@ fn main() {
             simbrief_settings,
             simbrief_prefile,
             simbrief_clear_prefile,
-            datalink_clearance
+            datalink_clearance,
+            sayintentions_status,
+            sayintentions_link,
+            sayintentions_unlink,
+            sayintentions_import,
+            sayintentions_pdc
         ])
         .build(tauri::generate_context!())
         .expect("Cannot initialize msfslogger desktop shell");

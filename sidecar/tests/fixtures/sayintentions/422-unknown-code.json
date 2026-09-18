@@ -1,0 +1,45 @@
+{
+  "_sample": "422-unknown-code",
+  "_why": "A newer server with a code this build has never seen.",
+  "_op": "si-import",
+  "_route": "si-import",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/import",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 422,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW A code this build does not know.",
+      "code": "SOME_FUTURE_CODE"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 422,
+    "serverCode": "SOME_FUTURE_CODE",
+    "latch": false,
+    "cdu": "SAYINTENTIONS FAULT 422",
+    "hint": null,
+    "kind": "error",
+    "unknownOutcome": true,
+    "hintByAction": {
+      "link": "SAFE TO PRESS AGAIN",
+      "unlink": "SAFE TO PRESS AGAIN",
+      "import": "SAFE TO PRESS AGAIN",
+      "pdc": "PDC MAY HAVE BEEN SENT"
+    }
+  }
+}

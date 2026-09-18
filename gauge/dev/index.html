@@ -64,6 +64,33 @@ iframe { display: block; width: 600px; height: 900px; max-width: 100%; border: 0
 <option value="sidecar-unavailable">Sidecar unavailable</option><option value="sidecar-outdated">Sidecar outdated</option>
 <option value="not-supported">Not supported</option><option value="host-error">Host fault</option>
 </select></label>
+<label>SayIntentions <select id="sayintentions-scenario">
+<option value="linked">Linked with imports</option><option value="no-key">No key configured</option>
+<option value="key-not-linked">Key set, not linked</option><option value="link-from-now">Link from now</option>
+<option value="import-none">Import, nothing new</option><option value="import-rows">Import, four rows</option>
+<option value="pdc-sent">PDC sent</option><option value="leg-scope">Leg scope (refused)</option>
+<option value="no-api-key">No API key (409)</option><option value="bad-api-key">Key rejected (409)</option>
+<option value="not-linked">Not linked (409)</option><option value="session-changed">Session changed (409)</option>
+<option value="no-comms">No radio calls yet (409)</option><option value="no-active-session">Not running (409)</option>
+<option value="no-clearance">No PDC on file (409)</option>
+<option value="upstream-unreachable">Upstream no comm (502)</option>
+<option value="upstream-timeout">Upstream timeout (504)</option>
+<option value="upstream-error">Upstream fault (502)</option>
+<option value="upstream-bad-body">Upstream bad body (502)</option>
+<option value="flight-not-found">Flight not found (404)</option>
+<option value="leg-not-found">Leg not found (404)</option><option value="invalid-id">Invalid id (400)</option>
+<option value="invalid-token">Invalid token</option><option value="token-missing">Token not received</option>
+<option value="unavailable">Pre-SayIntentions server</option><option value="rejected">Rejected (403)</option>
+<option value="http-error">HTTP error (500)</option><option value="unknown-code">Unknown code</option>
+<option value="bad-response">Bad response</option><option value="too-large">Too large</option>
+<option value="client-timeout">Sidecar HTTP timeout</option><option value="relay-timeout">Shell relay timeout</option>
+<option value="tls-error">TLS error</option><option value="unreachable">Unreachable</option>
+<option value="no-config">No config</option><option value="in-progress">SayIntentions in progress</option>
+<option value="bad-params">Params refused</option><option value="busy">Sidecar busy</option>
+<option value="sidecar-exited">Sidecar exited</option><option value="sidecar-unavailable">Sidecar unavailable</option>
+<option value="sidecar-outdated">Sidecar outdated</option><option value="unsupported-host">Not supported</option>
+<option value="host-error">Host fault</option>
+</select></label>
 <label>Viewport <select id="size"><option value="600">600 px</option><option value="480">480 px</option><option value="800">800 px</option></select></label>
 <button id="reload">Reload</button><label><input type="checkbox" id="auto" checked> Reload on save</label>
 <p>F12 opens DevTools. Select the CDU iframe context to inspect <code>window.gaugeDev</code>. <span id="connection"></span></p>

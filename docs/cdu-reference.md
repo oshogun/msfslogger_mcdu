@@ -33,7 +33,7 @@ walkthroughs, see [usage](usage.md).
 | `NETWORK` (CFG) | CFG NETWORK | MENU L2 | L1 serverUrl, L2 ingestToken, L3 certPath, L6 MENU, R6 save (EXEC also saves) | serverUrl / ingestToken (masked) / certPath |
 | `SIM` (CFG) | CFG SIM | MENU L3 | L1 sim version, L2 autoUplink, L6/R6 as above | sim, autoUplink |
 | `TRAFFIC` (CFG) | CFG TRAFFIC | MENU L4 | L1 trafficEnabled, L2 trafficRadiusM, L6/R6 as above | trafficEnabled, trafficRadiusM |
-| `DL-INDEX` | ACARS DATALINK | MENU L5; L6 from other DL pages | R1 CLR PREFILE (if held); L3 MESSAGES→DL-THREAD; L4 DOWNLINK→DL-CANNED; R3 WX→DL-WX; R4 LOADSHEET→DL-LOADSHEET; R5 CLEARANCE; R6 REFRESH; L6 MENU | scope, DATALINK state line, prefiled-leg row |
+| `DL-INDEX` | ACARS DATALINK | MENU L5; L6 from other DL pages | R1 CLR PREFILE (if held); R2 SAYINTENTIONS→DL-SI; L3 MESSAGES→DL-THREAD; L4 DOWNLINK→DL-CANNED; R3 WX→DL-WX; R4 LOADSHEET→DL-LOADSHEET; R5 CLEARANCE; R6 REFRESH; L6 MENU | scope, DATALINK state line, prefiled-leg row |
 | `DL-THREAD` | ACARS MSGS | DL-INDEX L3 | L1–L5 open a message; L6 DL-INDEX; R6 REFRESH; PREV/NEXT pages | 5 msgs/page, oldest-first, newest page on open |
 | `DL-MSG` | ACARS MSG | DL-THREAD L1–L5 | L6 return to originating thread page; PREV/NEXT pages the text | one message, 10 lines/page |
 | `DL-CANNED` | DOWNLINK | DL-INDEX L4 | L1–L5 select → DL-CONFIRM; L6 DL-INDEX; PREV/NEXT pages | server's canned list |
@@ -42,10 +42,20 @@ walkthroughs, see [usage](usage.md).
 | `DL-WX-RESULT` | `WX <ICAO>` | after WX send | L6→DL-WX; PREV/NEXT pages | METAR/TAF paged |
 | `DL-LOADSHEET` | LOADSHEET | DL-INDEX R4 | L6 DL-INDEX; R6 REQUEST→DL-CONFIRM | last illustrative sheet for the leg |
 | `DL-CLEARANCE-CONFIRM` | REQUEST CLEARANCE | DL-INDEX R5 | R6 SEND*; L6 CANCEL | target leg, last failure |
-| `DL-CLEARANCE` | CLEARANCE | after successful send, or R5 with a kept result | L6 DL-INDEX; R6 MESSAGES→DL-THREAD; PREV/NEXT pages the route | pair, initial alt, squawk, route paged, `NOT FOR REAL WORLD USE` |
+| `DL-CLEARANCE` | CLEARANCE | after successful send, or R5 with a kept result | L6 DL-INDEX; R5 SEND PDC→DL-SI-PDC; R6 MESSAGES→DL-THREAD; PREV/NEXT pages the route | pair, initial alt, squawk, route paged (see paging note below), `NOT FOR REAL WORLD USE` |
+| `DL-SI` | SAYINTENTIONS | DL-INDEX R2 | L4 LINK→DL-SI-CONFIRM; L5 UNLINK→DL-SI-CONFIRM; R4 toggle NOW/SESSION START; R5 IMPORT→DL-SI-CONFIRM; R6 REFRESH (re-reads `si-status` only, not the whole datalink poll); L6 DL-INDEX | key state, scope/flight, upstream session id, imported count, linked/last-import stamps, `LINK FROM` choice, hint line |
+| `DL-SI-CONFIRM` | `CONFIRM LINK` / `CONFIRM UNLINK` / `CONFIRM IMPORT` / `CONFIRM SI ACTION` | DL-SI L4, L5, R5 | L6 CANCEL→DL-SI (also after success); R6 SEND* (once) | staged action, target flight, `LINK FROM` (link only), last failure + hint |
+| `DL-SI-PDC` | SEND PDC | DL-CLEARANCE R5 | L6 CANCEL→DL-CLEARANCE (also after success); R6 SEND* (once) | target leg, last sent text (paged, up to 4 lines), last failure + hint |
 | `FPLN` | FLIGHT PLAN | MENU L6 | L6 MENU; R6 PREFILE→FPLN-CONFIRM (only if offered); R3 CLR PREFILE | Pilot ID status, held prefiled leg, last outcome |
 | `FPLN-CONFIRM` | PREFILE SIMBRIEF | FPLN R6 | R6 CONFIRM* (once); L6 CANCEL | static staging text |
 | `FPLN-RESULT` | PREFILE | after send | L6 FPLN; R5 DATALINK→DL-INDEX | PREFILED/ALREADY FILED, label, leg id, warnings |
+
+**`DL-CLEARANCE` paging change (this run).** Adding `SEND PDC>` to row 10 on
+every page cost the route block one line per page: `PAGE1_ROUTE_LINES` went
+5→4 and `MORE_ROUTE_LINES` 9→8 (`ui/src/pages/clearance-vocab.js`). A clearance
+route of five to nine lines therefore now pages once more than it did before
+this run, in exchange for `SEND PDC>` living on the page the clearance is
+already showing.
 
 Every DATALINK page holds its poll lease only while on screen. No key send
 in DATALINK/FPLN is a single press: canned downlink, WX, loadsheet and
@@ -204,6 +214,171 @@ appears only on the reopened `DL-CLEARANCE-CONFIRM`, under `LAST REQUEST`):
 | `SIDECAR UPDATE REQUIRED` | `REBUILD SIDECAR THEN RESTART APP` | This build's sidecar predates the clearance feature |
 | `CLEARANCE NOT SUPPORTED` | | An installed custom host (not this app's own shell) lacks the clearance method |
 | `CLEARANCE HOST FAULT` | | This build's own shell exe predates the clearance feature; restart the app |
+
+## SAYINTENTIONS vocabulary
+
+All strings below come verbatim from `ui/src/pages/sayintentions-vocab.js`,
+checked mechanically by diffing the exported `TEXT`/`ADVISORY`/`REFUSAL`/
+`ERRORS` tables (plus `SAFE_TO_PRESS_AGAIN`, `PDC_MAY_HAVE_BEEN_SENT` and
+`UNKNOWN_CODE_TEXT`) against every backtick-quoted token in this section: 95
+distinct non-empty strings are exported by the module, and all 95 appear
+verbatim somewhere below. The reverse direction was checked the same way —
+every backtick token below that is *not* one of those 95 strings is a page id
+(`DL-SI`), a route/op key (`si-link`), a server `code` name (`NO_API_KEY`), or
+a condition/template shown for explanation (`pendingMessages > 0`,
+`IMPORTED <n> MSGS`), never a CDU string claimed as this module's own. Several
+rows below reuse a string already documented under DATALINK or CLEARANCE
+above rather than a new one — noted where that happens.
+
+The CDU never collects or displays the SayIntentions API key (see
+[security](security.md)); every "no key" string below points the operator at
+the **web** app's Prefiles page, never at a CDU entry field.
+
+**Page text** (`DL-SI`, `DL-SI-CONFIRM`, `DL-SI-PDC`):
+
+| CDU text | Where it appears | Action |
+|---|---|---|
+| `SAYINTENTIONS>` | `DL-INDEX` R2 prompt; always shown, never refuses | Press R2 to open `DL-SI` |
+| `SAYINTENTIONS` | `DL-SI` page title | — |
+| `SI KEY` | `DL-SI` row 1 left label | — |
+| `KEY ON FILE` | `DL-SI` row 2, key configured on the server | Nothing needed |
+| `NO KEY ON FILE` | `DL-SI` row 2, no key configured | Set the key on the web app's Prefiles page |
+| `LOADING` | `DL-SI` row 2 while the first `si-status` read is out | Wait a moment |
+| `SESSION` | `DL-SI` row 3 left label | — |
+| `IMPORTED` | `DL-SI` row 3 right label | — |
+| `LINKED` | `DL-SI` row 5 left label | — |
+| `LAST IMPORT` | `DL-SI` row 5 right label | — |
+| `LINK FROM` | `DL-SI` row 7 right label; `DL-SI-CONFIRM` row 5 (link only) | — |
+| `NOW` | `DL-SI` row 8 right (selected `?from=now`); `DL-SI-CONFIRM` row 6 | Press R4 on `DL-SI` to select |
+| `SESSION START` | `DL-SI` row 8 right (selected default); `DL-SI-CONFIRM` row 6 | Press R4 on `DL-SI` to select |
+| `<LINK` | `DL-SI` L4 prompt | Press L4 to stage a link, then `SEND*` on `DL-SI-CONFIRM` |
+| `<UNLINK` | `DL-SI` L5 prompt | Press L5 to stage an unlink, then `SEND*` |
+| `IMPORT>` | `DL-SI` R5 prompt | Press R5 to stage an import, then `SEND*` |
+| `<RETURN` | `DL-SI` L6; `DL-SI-CONFIRM`/`DL-SI-PDC` L6 with nothing staged | Returns without sending anything |
+| `REFRESH>` | `DL-SI` R6 | Re-reads `si-status` only, not the whole datalink poll |
+| `----` | `DL-SI` placeholder for an unknown session id or time | — |
+| `---` | `DL-SI` placeholder for an unknown count | — |
+| `NEEDS ACTIVE FLIGHT` | `DL-SI` row 2 right-hand state line, and the scratchpad refusal on L4/L5/R5, in leg scope or with no flight plan | Wait for the flight to be detected (at FLYING); see the row 11 hint |
+| `LINK AVAILABLE ONCE FLYING` | `DL-SI` row 11 hint, leg scope or no flight plan | Nothing to do until the flight starts |
+| `SET KEY ON WEB PREFILES PAGE` | `DL-SI` row 11 hint when no key is configured | Set the key on the web app's Prefiles page |
+| `CONFIRM LINK` | `DL-SI-CONFIRM` title, link staged | — |
+| `CONFIRM UNLINK` | `DL-SI-CONFIRM` title, unlink staged | — |
+| `CONFIRM IMPORT` | `DL-SI-CONFIRM` title, import staged | — |
+| `CONFIRM SI ACTION` | `DL-SI-CONFIRM` title, nothing staged | Press L6 to return to `DL-SI` |
+| `LINK SESSION` | `DL-SI-CONFIRM` row 2, link staged | — |
+| `UNLINK SESSION` | `DL-SI-CONFIRM` row 2, unlink staged | — |
+| `IMPORT COMMS` | `DL-SI-CONFIRM` row 2, import staged | — |
+| `CONFIRM` | `DL-SI-CONFIRM` row 1 left label | — |
+| `TO` | `DL-SI-CONFIRM` row 3 left label, over the target flight | — |
+| `NO PENDING ACTION` | `DL-SI-CONFIRM`/`DL-SI-PDC` reached with nothing staged | Press L6 to return |
+| `LAST REQUEST` | `DL-SI-CONFIRM`/`DL-SI-PDC` label over a kept failure | — |
+| `<CANCEL` | `DL-SI-CONFIRM`/`DL-SI-PDC` L6 | Discards the staged action without sending |
+| `SEND*` | `DL-SI-CONFIRM`/`DL-SI-PDC` R6, the one press that sends | Press once; not repeatable while in flight |
+| `SENDING` | `DL-SI-CONFIRM`/`DL-SI-PDC` R6 while a request is out | Wait |
+| `SEND PDC>` | `DL-CLEARANCE` R5 prompt | Press R5 to stage a PDC push, then `SEND*` on `DL-SI-PDC` |
+| `SEND PDC` | `DL-SI-PDC` title and row 1 left label | — |
+| `TO SAYINTENTIONS` | `DL-SI-PDC` row 2 | — |
+| `LAST SENT` | `DL-SI-PDC` row 3 label over the kept sent text | — |
+
+`SEND*` is used for the import too, even though an import is a read: every
+action reaches the real SayIntentions upstream (D-6), so the panel spells "the
+one press that sends a request" the same way everywhere rather than carving
+out an exception for the one that happens to be a read.
+
+**Refusals** (local; nothing is sent):
+
+| CDU text | When | Action |
+|---|---|---|
+| `NEEDS ACTIVE FLIGHT` | Link/unlink/import pressed in leg scope, prefile scope, or no scope | Wait for a live flight; see `LINK AVAILABLE ONCE FLYING` |
+| `NO FLIGHT PLAN` | Same action pressed with flight scope but no usable flight id, or an unreadable datalink state — same string as the existing DATALINK table above | Nothing to press yet |
+| `INGEST TOKEN REJECTED` | Token already known to be rejected — same string as DATALINK/CLEARANCE above | Fix the token on `CFG NETWORK` |
+| `DATALINK NO CONFIG` | Sidecar has no valid config — same string as DATALINK above | Fill in `CFG NETWORK` and save |
+| `SI FLIGHT CHANGED` | `SEND*` pressed on a link/unlink/import confirm page, but the flight it targeted is no longer what the current rule picks | Return to `DL-SI` and re-stage the action |
+| `PDC LEG CHANGED` | `SEND*` pressed on `DL-SI-PDC`, but the leg it targeted is no longer what `DL-CLEARANCE` shows | Return to `DL-CLEARANCE` and press `SEND PDC>` again |
+
+The PDC send does not have its own `SCOPE UPDATE PENDING` refusal: it inherits
+`DL-CLEARANCE`'s own rule of that name (CLEARANCE vocabulary above) by
+construction, so a stale held prefiled leg is refused once, not twice, and the
+two paths can't drift apart.
+
+**Advisories** (a successful action):
+
+| CDU text | When |
+|---|---|
+| `SESSION LINKED` | `si-link` with `created === true` |
+| `SESSION RELINKED` | `si-link` with `created === false` — the flight was already linked, and the session was rebound |
+| `SESSION UNLINKED` | `si-unlink` with `unlinked === true` |
+| `NO LINK TO REMOVE` | `si-unlink` with `unlinked === false` — still a success, route 4 never errors on a missing link |
+| `NO NEW COMMS` | `si-import` with `imported === 0` |
+| `PDC SENT` | `si-pdc` success |
+
+Two of the advisories above grow a numeric suffix: `SESSION LINKED`/
+`SESSION RELINKED` get ` <n> PENDING` appended when `pendingMessages > 0` (e.g.
+`SESSION LINKED 4 PENDING`), and a non-empty import (`IMPORTED <n> MSGS`,
+otherwise `NO NEW COMMS`) gets ` SKIPPED <k>` appended when `skipped > 0`.
+
+## SayIntentions error codes
+
+Restated one row per code, because this is what a Reviewer checks against the
+contract one by one (intake success criteria 5 and 6).
+
+**The seven contract codes:**
+
+| Server `code` | CDU text | Hint | Action |
+|---|---|---|---|
+| `NO_API_KEY` | `NO SAYINTENTIONS KEY` | `SET KEY ON WEB PREFILES PAGE` | Leave the CDU and save the key in the web app's Prefiles page — reachable in leg scope, on the ground, because `si-status` answers the key question without a flight id |
+| `BAD_API_KEY` | `SAYINTENTIONS KEY REJECTED` | `CHECK KEY ON WEB PREFILES PAGE` | Same journey; the key exists but the server no longer accepts it |
+| `NOT_LINKED` | `SAYINTENTIONS NOT LINKED` | `LINK THIS FLIGHT ON DL-SI FIRST` | Press `DL-SI` L4 `<LINK`, then `SEND*`, then R5 `IMPORT>` |
+| `SESSION_CHANGED` | `SAYINTENTIONS SESSION CHANGED` | `UNLINK THEN LINK AGAIN` | Press L5 `<UNLINK`, `SEND*`, then L4 `<LINK`, `SEND*` — the old session id shown on row 4 is the evidence |
+| `NO_COMMS_TO_LINK` | `NO RADIO CALLS YET` (advisory) | `CALL ATC IN THE SIM THEN LINK` | Make one radio call in the sim, then press `SEND*` again — the staged action is not cleared |
+| `NO_ACTIVE_SESSION` | `SAYINTENTIONS NOT RUNNING` (advisory) | `START SAYINTENTIONS THEN RETRY` | Start SayIntentions and press `SEND*` again; this is an expected outcome for a pilot not running SayIntentions that day, never phrased as a fault |
+| `NO_CLEARANCE` | `NO PDC ON FILE` | `REQUEST CLEARANCE ON DL-INDEX R5` | Go to `DL-INDEX`, press R5, `SEND*`, then return to `DL-CLEARANCE` and press R5 `SEND PDC>` |
+
+**Other codes a SayIntentions request can produce** — transport, local and
+shared-infrastructure codes, mapped the same way the DATALINK/CLEARANCE tables
+above map them for their own requests. A local code appearing in more than one
+op's table always renders the same CDU text everywhere it is used:
+
+| Code | CDU text | Hint | Meaning |
+|---|---|---|---|
+| `si-upstream-unreachable` (`UPSTREAM_UNREACHABLE`) | `SAYINTENTIONS NO COMM` | | The server couldn't reach SayIntentions itself |
+| `si-upstream-timeout` (`UPSTREAM_TIMEOUT`) | `SAYINTENTIONS TIMEOUT` | | The server's own 10 s SayIntentions timeout fired |
+| `si-upstream-error` (`UPSTREAM_ERROR`) | `SAYINTENTIONS UPSTREAM FAULT` | | SayIntentions answered the server with an unexpected status |
+| `si-upstream-bad-body` (`UPSTREAM_BAD_BODY`) | `SAYINTENTIONS UPSTREAM BAD DATA` | | SayIntentions' answer wasn't usable |
+| `flight-not-found` (`FLIGHT_NOT_FOUND`) | `FLIGHT NOT FOUND` | | The flight id no longer exists on the server |
+| `leg-not-found` (`PLANNED_LEG_NOT_FOUND`) | `PLANNED LEG NOT FOUND` | | The leg id no longer exists on the server |
+| `invalid-id` (`INVALID_ID`) | `DATALINK INVALID ID` | | Malformed id — should not happen from normal CDU use |
+| `token-invalid` | `INGEST TOKEN REJECTED` | `CHECK INGEST TOKEN ON CFG NETWORK` | Server rejected the token; same as DATALINK |
+| `token-missing` | `SAYINTENTIONS TOKEN NOT RECEIVED` | `TOKEN HEADER LOST IN TRANSIT` | Route answered but the token header never arrived |
+| `sayintentions-unavailable` | `SAYINTENTIONS UNAVAILABLE` | `SERVER UPDATE NEEDED` | A 401 outside the token's scope — server build predates these routes |
+| `rejected` | `SAYINTENTIONS REJECTED 403` | | Server refused the request; should not happen |
+| `http-error` | `SAYINTENTIONS FAULT` | | Any other non-2xx server response (status appended when known) |
+| `bad-response` | `SAYINTENTIONS BAD DATA` | | Response wasn't valid JSON or the expected shape |
+| `too-large` | `SAYINTENTIONS BAD DATA` | | Response exceeded the body cap |
+| `timeout` | `SAYINTENTIONS RESULT UNKNOWN` | | Sidecar-side HTTP timeout; outcome unknown |
+| `tls-error` | `DATALINK CERT FAULT` | `CHECK CERTIFICATE PATH` | TLS handshake failed; same as DATALINK |
+| `unreachable` | `DATALINK NO COMM` | | Can't reach the server at all; same as DATALINK |
+| `no-config` | `DATALINK NO CONFIG` | `COMPLETE CFG NETWORK` | Sidecar has no valid config; same as DATALINK |
+| `sayintentions-in-progress` | `SAYINTENTIONS IN PROGRESS` | | Shell or sidecar refused a concurrent SayIntentions request |
+| `bad-request` | `INVALID ENTRY` | | Malformed request; same as DATALINK |
+| `busy` | `DATALINK BUSY` | | Relay already had 8 requests pending, or the shell's queue was full; same as DATALINK |
+| `shell-timeout` | `SAYINTENTIONS RESULT UNKNOWN` | | Shell-side relay timeout; outcome unknown |
+| `sidecar-exited` | `DATALINK OFFLINE` | | Sidecar died mid-request; same as DATALINK |
+| `sidecar-unavailable` | `DATALINK OFFLINE` | | No sidecar connected; same as DATALINK |
+| `sidecar-outdated` | `SIDECAR UPDATE REQUIRED` | `REBUILD SIDECAR THEN RESTART APP` | Connected sidecar predates the `sayintentions` feature |
+| `host-unsupported` | `SAYINTENTIONS NOT SUPPORTED` | | An installed custom host lacks the method |
+| `host-error` | `SAYINTENTIONS HOST FAULT` | | The host adapter itself threw or returned something unusable |
+
+**Unknown-outcome hints.** `timeout`, `shell-timeout`, `http-error`,
+`bad-response`, `too-large`, `unreachable`, `sidecar-exited` and `host-error`,
+plus any code this build does not recognize at all (rendered as
+`SAYINTENTIONS FAULT`), are outcomes nobody can vouch for: the request may
+have reached the server before the answer was lost. Link, unlink and import
+show `SAFE TO PRESS AGAIN` under those codes — a re-link rebinds the same
+session, an unlink is idempotent, and an import dedups server-side. The PDC
+push shows `PDC MAY HAVE BEEN SENT` instead: a second push is a real decision,
+because it files a second CPDLC message into the live session and nothing can
+be checked afterwards to find out whether the first one arrived.
 
 ## FPLN vocabulary
 

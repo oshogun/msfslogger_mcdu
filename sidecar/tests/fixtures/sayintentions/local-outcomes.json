@@ -1,0 +1,279 @@
+{
+  "_why": "The codes the model never produces, plus the transport ones it does, so a vocabulary test can iterate the whole union.",
+  "transport-unreachable": {
+    "_why": "connection refused on a closed ephemeral port",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "",
+      "code": "unreachable",
+      "cdu": "DATALINK NO COMM"
+    }
+  },
+  "transport-reset": {
+    "_why": "the scratch server destroys the socket after reading the request",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "",
+      "code": "unreachable",
+      "cdu": "DATALINK NO COMM"
+    }
+  },
+  "transport-tls": {
+    "_why": "certificate rejected before any request is written",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "CHECK CERTIFICATE PATH",
+      "code": "tls-error",
+      "cdu": "DATALINK CERT FAULT"
+    }
+  },
+  "transport-client-timeout": {
+    "_why": "no complete answer within the sidecar timeout (20 000 ms upstream, 8 000 ms otherwise; test-scaled)",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": null,
+      "code": "timeout",
+      "cdu": "SAYINTENTIONS RESULT UNKNOWN",
+      "unknownOutcome": true,
+      "hintByAction": {
+        "link": "SAFE TO PRESS AGAIN",
+        "unlink": "SAFE TO PRESS AGAIN",
+        "import": "SAFE TO PRESS AGAIN",
+        "pdc": "PDC MAY HAVE BEEN SENT"
+      }
+    }
+  },
+  "relay-timeout": {
+    "_why": "no datalink-response within the shell relay timeout (25 000 ms upstream, 12 000 ms otherwise; test-scaled)",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": null,
+      "code": "shell-timeout",
+      "cdu": "SAYINTENTIONS RESULT UNKNOWN",
+      "unknownOutcome": true,
+      "hintByAction": {
+        "link": "SAFE TO PRESS AGAIN",
+        "unlink": "SAFE TO PRESS AGAIN",
+        "import": "SAFE TO PRESS AGAIN",
+        "pdc": "PDC MAY HAVE BEEN SENT"
+      }
+    }
+  },
+  "response-line-too-large": {
+    "_why": "unreachable with the protocol caps; the encodeDatalinkResponse guard",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": null,
+      "code": "too-large",
+      "cdu": "SAYINTENTIONS BAD DATA",
+      "unknownOutcome": true,
+      "hintByAction": {
+        "link": "SAFE TO PRESS AGAIN",
+        "unlink": "SAFE TO PRESS AGAIN",
+        "import": "SAFE TO PRESS AGAIN",
+        "pdc": "PDC MAY HAVE BEEN SENT"
+      }
+    }
+  },
+  "busy": {
+    "_why": "shell pending bound or writer queue full; no line written",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "",
+      "code": "busy",
+      "cdu": "DATALINK BUSY"
+    }
+  },
+  "sayintentions-in-progress": {
+    "_why": "one SayIntentions action already in flight, in the sidecar or the shell; nothing sent by this press",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "",
+      "code": "sayintentions-in-progress",
+      "cdu": "SAYINTENTIONS IN PROGRESS"
+    }
+  },
+  "no-config": {
+    "_why": "the sidecar has no valid config; no request",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "COMPLETE CFG NETWORK",
+      "code": "no-config",
+      "cdu": "DATALINK NO CONFIG"
+    }
+  },
+  "latched": {
+    "_why": "an earlier INVALID_INGEST_TOKEN; no request",
+    "expect": {
+      "ok": false,
+      "httpStatus": 401,
+      "serverCode": "INVALID_INGEST_TOKEN",
+      "latch": "stays",
+      "kind": "error",
+      "hint": "CHECK INGEST TOKEN ON CFG NETWORK",
+      "code": "token-invalid",
+      "cdu": "INGEST TOKEN REJECTED"
+    }
+  },
+  "sidecar-exited": {
+    "_why": "the sidecar exited with the request bound",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": null,
+      "code": "sidecar-exited",
+      "cdu": "DATALINK OFFLINE",
+      "unknownOutcome": true,
+      "hintByAction": {
+        "link": "SAFE TO PRESS AGAIN",
+        "unlink": "SAFE TO PRESS AGAIN",
+        "import": "SAFE TO PRESS AGAIN",
+        "pdc": "PDC MAY HAVE BEEN SENT"
+      }
+    }
+  },
+  "sidecar-unavailable": {
+    "_why": "no sidecar, or shutting down",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "",
+      "code": "sidecar-unavailable",
+      "cdu": "DATALINK OFFLINE"
+    }
+  },
+  "sidecar-outdated": {
+    "_why": "a hello without datalink; no line written",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "REBUILD SIDECAR THEN RESTART APP",
+      "code": "sidecar-outdated",
+      "cdu": "SIDECAR UPDATE REQUIRED"
+    }
+  },
+  "sidecar-outdated-no-sayintentions": {
+    "_why": "a hello with datalink but without sayintentions: the same code, because the fix is the same",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "REBUILD SIDECAR THEN RESTART APP",
+      "code": "sidecar-outdated",
+      "cdu": "SIDECAR UPDATE REQUIRED"
+    }
+  },
+  "bad-request": {
+    "_why": "params out of contract; not reachable from the host API",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "",
+      "code": "bad-request",
+      "cdu": "INVALID ENTRY"
+    }
+  },
+  "host-unsupported": {
+    "_why": "an installed host that predates the five methods",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": "",
+      "code": "host-unsupported",
+      "cdu": "SAYINTENTIONS NOT SUPPORTED"
+    }
+  },
+  "host-error": {
+    "_why": "the host call rejected, or resolved a non-envelope",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": null,
+      "code": "host-error",
+      "cdu": "SAYINTENTIONS HOST FAULT",
+      "unknownOutcome": true,
+      "hintByAction": {
+        "link": "SAFE TO PRESS AGAIN",
+        "unlink": "SAFE TO PRESS AGAIN",
+        "import": "SAFE TO PRESS AGAIN",
+        "pdc": "PDC MAY HAVE BEEN SENT"
+      }
+    }
+  },
+  "unknown-code": {
+    "_why": "a code this build does not know",
+    "expect": {
+      "ok": false,
+      "httpStatus": null,
+      "serverCode": null,
+      "latch": false,
+      "kind": "error",
+      "hint": null,
+      "code": "some-future-code",
+      "cdu": "SAYINTENTIONS FAULT",
+      "unknownOutcome": true,
+      "hintByAction": {
+        "link": "SAFE TO PRESS AGAIN",
+        "unlink": "SAFE TO PRESS AGAIN",
+        "import": "SAFE TO PRESS AGAIN",
+        "pdc": "PDC MAY HAVE BEEN SENT"
+      }
+    }
+  }
+}

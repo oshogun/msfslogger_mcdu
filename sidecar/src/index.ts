@@ -33,6 +33,7 @@ import {
   isBlankLine,
   MAX_LINE_BYTES,
   PROTOCOL_VERSION,
+  SAYINTENTIONS_FEATURE,
   SIMBRIEF_FEATURE,
   type DatalinkError,
   type DatalinkOutcome,
@@ -207,7 +208,7 @@ class Sidecar {
       sidecarVersion: SIDECAR_VERSION,
       nodeVersion: process.version,
       configPath: this.configPath,
-      features: [DATALINK_FEATURE, SIMBRIEF_FEATURE, CLEARANCE_FEATURE],
+      features: [DATALINK_FEATURE, SIMBRIEF_FEATURE, CLEARANCE_FEATURE, SAYINTENTIONS_FEATURE],
     });
     this.send(this.datalink.buildState());
 

@@ -1,0 +1,37 @@
+{
+  "_sample": "401-code-shaped-token",
+  "_why": "The token is itself a well-formed server code, echoed as the code: classification uses the raw value, the emitted one is null.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "configToken": "SENTINELDATALINKTOKEN0000",
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINELDATALINKTOKEN0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW Not in this token scope.",
+      "code": "SENTINELDATALINKTOKEN0000"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "sayintentions-unavailable",
+    "httpStatus": 401,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS UNAVAILABLE",
+    "hint": "SERVER UPDATE NEEDED",
+    "kind": "error"
+  }
+}

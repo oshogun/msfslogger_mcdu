@@ -34,6 +34,8 @@ let session = null;
 
 /** The leg the confirm page offers, `{ plannedLegId }`, or null. */
 let pending = null;
+/** What DL-CLEARANCE R5 does; the SayIntentions pages register it. */
+let pdcAction = null;
 let sending = false;
 let sendingLegId = null;
 /** Planned leg id → clearance result, oldest first. */
@@ -225,7 +227,9 @@ function paintResult(view) {
   } else {
     for (const line of routeLinesOnPage(result.route, n)) rows.push(textRow(line.text));
   }
-  padTo(rows, ROWS - 2, () => textRow(''));
+  // Row 10 is a prompt row on every page, so the route block ends at row 9.
+  padTo(rows, ROWS - 3, () => textRow(''));
+  rows.push(value('', prompt(pdcAction ? 'SEND PDC>' : '')));
   rows.push(label(TEXT.notReal), value(prompt(TEXT.return), prompt(TEXT.messages)));
   fill(view, rows);
   fmc.setPageNumber(n, m);
@@ -235,6 +239,10 @@ function resultLsk(lsk) {
   if (lsk === 'L6') {
     fmc.showPage('DL-INDEX');
     return true;
+  }
+  if (lsk === 'R5') {
+    if (!pdcAction || !shownResult()) return false;
+    return pdcAction(shownLegId);
   }
   if (lsk === 'R6') {
     if (!shownResult()) return false;
@@ -246,6 +254,15 @@ function resultLsk(lsk) {
 }
 
 // ── Configuration changes ────────────────────────────────────────────────────
+
+/**
+ * What R5 of the result page does with the leg it is showing. Registered by the
+ * pages that push a clearance onwards, so this module does not import them; an
+ * unset action leaves the prompt unpainted and the key inactive.
+ */
+export function setPdcAction(fn) {
+  pdcAction = typeof fn === 'function' ? fn : null;
+}
 
 /**
  * Forget every kept clearance and the last failure. CFG NETWORK calls this

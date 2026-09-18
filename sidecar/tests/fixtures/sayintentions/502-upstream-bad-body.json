@@ -1,0 +1,38 @@
+{
+  "_sample": "502-upstream-bad-body",
+  "_why": "The server could not read what SayIntentions sent.",
+  "_op": "si-link",
+  "_route": "si-link",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 502,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW SayIntentions answered something unreadable.",
+      "code": "UPSTREAM_BAD_BODY"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "si-upstream-bad-body",
+    "httpStatus": 502,
+    "serverCode": "UPSTREAM_BAD_BODY",
+    "latch": false,
+    "cdu": "SAYINTENTIONS UPSTREAM BAD DATA",
+    "hint": "",
+    "kind": "error"
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "_sample": "status-200-not-linked-with-link",
+  "_why": "Not linked, yet a link row came with it.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "linked": false,
+      "api_key_set": true,
+      "link": {
+        "flight_id": 42,
+        "upstream_flight_id": "8841207",
+        "since_id": 51223,
+        "baseline_comm_id": 51220,
+        "linked_at": "2026-09-17T14:30:00.000Z",
+        "last_import_at": "2026-09-17T14:40:11.284Z",
+        "imported_count": 4
+      }
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "bad-response",
+    "httpStatus": 200,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS BAD DATA",
+    "hint": null,
+    "hintByAction": {
+      "link": "SAFE TO PRESS AGAIN",
+      "unlink": "SAFE TO PRESS AGAIN",
+      "import": "SAFE TO PRESS AGAIN",
+      "pdc": "PDC MAY HAVE BEEN SENT"
+    },
+    "unknownOutcome": true,
+    "kind": "error"
+  }
+}

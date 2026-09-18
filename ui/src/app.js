@@ -558,6 +558,11 @@ function boot() {
     prefileSimbrief: () => runDatalink(() => bridge.prefileSimbrief()),
     clearPrefiledLeg: () => runDatalink(() => bridge.clearPrefiledLeg()),
     requestClearance: (req) => runDatalink(() => bridge.requestClearance(req)),
+    getSayIntentionsStatus: (req) => runDatalink(() => bridge.getSayIntentionsStatus(req)),
+    linkSayIntentions: (req) => runDatalink(() => bridge.linkSayIntentions(req)),
+    unlinkSayIntentions: (req) => runDatalink(() => bridge.unlinkSayIntentions(req)),
+    importSayIntentionsComms: (req) => runDatalink(() => bridge.importSayIntentionsComms(req)),
+    sendSayIntentionsPdc: (req) => runDatalink(() => bridge.sendSayIntentionsPdc(req)),
   };
   window.FMC = fmc;
 

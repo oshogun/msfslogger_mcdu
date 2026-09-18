@@ -1,0 +1,45 @@
+{
+  "_sample": "409-code-status-mismatch",
+  "_why": "A code only counts on its own status, so this reads as an unknown fault rather than an upstream timeout.",
+  "_op": "si-import",
+  "_route": "si-import",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/import",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW A known code on a status it is not documented with.",
+      "code": "UPSTREAM_TIMEOUT"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 409,
+    "serverCode": "UPSTREAM_TIMEOUT",
+    "latch": false,
+    "cdu": "SAYINTENTIONS FAULT 409",
+    "hint": null,
+    "kind": "error",
+    "unknownOutcome": true,
+    "hintByAction": {
+      "link": "SAFE TO PRESS AGAIN",
+      "unlink": "SAFE TO PRESS AGAIN",
+      "import": "SAFE TO PRESS AGAIN",
+      "pdc": "PDC MAY HAVE BEEN SENT"
+    }
+  }
+}

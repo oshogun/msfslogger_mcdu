@@ -1,0 +1,38 @@
+{
+  "_sample": "502-upstream-unreachable",
+  "_why": "The server reached us but not SayIntentions. Nothing was sent.",
+  "_op": "si-link",
+  "_route": "si-link",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 502,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW SayIntentions could not be reached.",
+      "code": "UPSTREAM_UNREACHABLE"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "si-upstream-unreachable",
+    "httpStatus": 502,
+    "serverCode": "UPSTREAM_UNREACHABLE",
+    "latch": false,
+    "cdu": "SAYINTENTIONS NO COMM",
+    "hint": "",
+    "kind": "error"
+  }
+}

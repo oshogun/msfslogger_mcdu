@@ -158,6 +158,11 @@ export const SIMBRIEF_FEATURE = 'simbrief-prefile';
  * this feature: an older sidecar would leave the request unanswered.
  */
 export const CLEARANCE_FEATURE = 'pdc-clearance';
+/**
+ * The five SayIntentions ops. A shell must not send them to a sidecar whose
+ * hello lacks this feature: an older sidecar would leave the request unanswered.
+ */
+export const SAYINTENTIONS_FEATURE = 'sayintentions';
 
 export const DATALINK_REQUEST_ID_PATTERN = /^dl-[0-9]{1,20}$/;
 export const CANNED_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -210,6 +215,24 @@ export interface LoadsheetSheet {
   takeoffWeight: number | null;
 }
 
+/**
+ * The server's SayIntentions link row, projected. Never the pilot's API key or
+ * its masked form: a mask is a fragment of a secret, and the CDU can do nothing
+ * with it that the key-set boolean does not already answer.
+ */
+export interface SayIntentionsLink {
+  /** Token-scrubbed, trimmed, 1..64 UTF-16 units. */
+  upstreamFlightId: string;
+  /** Safe integers from 0, or null as the server sends them. */
+  sinceId: number | null;
+  baselineCommId: number | null;
+  /** ISO-8601 the CDU can parse; `linkedAt` is required, `lastImportAt` nullable. */
+  linkedAt: string;
+  lastImportAt: string | null;
+  /** 0 to 999 999. */
+  importedCount: number;
+}
+
 /** Codes only: no server `error` text ever crosses a process boundary. */
 export interface DatalinkError {
   code: DatalinkErrorCode;
@@ -228,7 +251,12 @@ export type DatalinkOp =
   | 'simbrief-settings'
   | 'simbrief-prefile'
   | 'prefile-clear'
-  | 'clearance';
+  | 'clearance'
+  | 'si-status'
+  | 'si-link'
+  | 'si-unlink'
+  | 'si-import'
+  | 'si-pdc';
 
 export interface WriteTarget {
   kind: 'flight' | 'leg';
@@ -250,6 +278,16 @@ export interface DatalinkParams {
   'prefile-clear': Record<string, never>;
   // The server takes no request body: the leg id is the whole request.
   clearance: { plannedLegId: number };
+  /**
+   * Which question to ask: an id asks this flight's link state, `null` asks
+   * only whether a key is on file. The page decides; the sidecar does not
+   * re-resolve its scope to choose.
+   */
+  'si-status': { flightId: number | null };
+  'si-link': { flightId: number; from: 'now' | 'session-start' };
+  'si-unlink': { flightId: number };
+  'si-import': { flightId: number };
+  'si-pdc': { plannedLegId: number };
 }
 
 export interface DatalinkResults {
@@ -298,6 +336,47 @@ export interface DatalinkResults {
     initialAltitudeFt: number;
     /** Four octal digits. */
     squawk: string;
+    httpStatus: number;
+  };
+  'si-status': {
+    /** Which question was answered: the flight's link, or the key on file. */
+    answered: 'link' | 'settings';
+    /** The requested flight id, or null when `answered === 'settings'`. */
+    flightId: number | null;
+    apiKeySet: boolean;
+    /** null when `answered === 'settings'`: not asked, not assumed. */
+    linked: boolean | null;
+    link: SayIntentionsLink | null;
+    httpStatus: number;
+  };
+  'si-link': {
+    flightId: number;
+    /** false: the flight was already linked and this re-linked it. */
+    created: boolean;
+    /** 0 to 999 999. */
+    pendingMessages: number;
+    link: SayIntentionsLink;
+    httpStatus: number;
+  };
+  'si-unlink': {
+    flightId: number;
+    /** false: there was nothing to remove. Still a success. */
+    unlinked: boolean;
+    httpStatus: number;
+  };
+  'si-import': {
+    flightId: number;
+    /** All 0 to 999 999. The imported rows reach the CDU through the thread, never here. */
+    imported: number;
+    alreadySeen: number;
+    skipped: number;
+    sinceId: number | null;
+    httpStatus: number;
+  };
+  'si-pdc': {
+    plannedLegId: number;
+    /** Token-scrubbed, 1 to 144 UTF-16 units: what was actually sent upstream. */
+    sentText: string;
     httpStatus: number;
   };
 }
@@ -441,6 +520,11 @@ export const DATALINK_OPS: readonly DatalinkOp[] = [
   'simbrief-prefile',
   'prefile-clear',
   'clearance',
+  'si-status',
+  'si-link',
+  'si-unlink',
+  'si-import',
+  'si-pdc',
 ];
 
 const LOG_LEVELS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
@@ -544,6 +628,33 @@ function datalinkParamsProblem(op: DatalinkOp, params: Record<string, unknown>):
       return hasExactKeys(params, ['plannedLegId']) && isSafeInt(params.plannedLegId, 1)
         ? null
         : 'clearance params must be exactly { plannedLegId }';
+    // `null` is a choice of question, not a missing value, so the key must
+    // still be there: {} is rejected.
+    case 'si-status':
+      return hasExactKeys(params, ['flightId']) && (params.flightId === null || isSafeInt(params.flightId, 1))
+        ? null
+        : 'si-status params must be exactly { flightId }';
+    // `from` is a closed set. An unknown value is refused here rather than
+    // forwarded: the server would fall back to the whole session, and the CDU
+    // must not depend on a default it did not choose.
+    case 'si-link':
+      return hasExactKeys(params, ['flightId', 'from']) &&
+        isSafeInt(params.flightId, 1) &&
+        (params.from === 'now' || params.from === 'session-start')
+        ? null
+        : 'si-link params must be exactly { flightId, from }';
+    case 'si-unlink':
+      return hasExactKeys(params, ['flightId']) && isSafeInt(params.flightId, 1)
+        ? null
+        : 'si-unlink params must be exactly { flightId }';
+    case 'si-import':
+      return hasExactKeys(params, ['flightId']) && isSafeInt(params.flightId, 1)
+        ? null
+        : 'si-import params must be exactly { flightId }';
+    case 'si-pdc':
+      return hasExactKeys(params, ['plannedLegId']) && isSafeInt(params.plannedLegId, 1)
+        ? null
+        : 'si-pdc params must be exactly { plannedLegId }';
   }
 }
 

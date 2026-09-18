@@ -1,12 +1,16 @@
 // ── Datalink HTTP client ──────────────────────────────────────────────────────
 //
 // The only datalink code that talks to the network. It can build exactly
-// thirteen requests, one per server route in the table below, and nothing
+// twenty requests, one per server route in the table below, and nothing
 // else: paths are assembled from validated integer ids, so no user text, query
 // string or trailing slash can reach a URL. The two SimBrief routes take no
 // parameter at all: the prefile POST has no body, so it can never ask the
 // server to import a duplicate plan. The clearance POST has no body either;
 // the leg id in its path is the whole request.
+//
+// The one query string in the table is part of a literal template
+// (`si-link-now`), not composed from a value: "link from now" and "link from
+// the session start" are two route keys, so nothing builds a query string.
 //
 // What the server's token check expects shapes the rest:
 //
@@ -33,6 +37,13 @@ export const DATALINK_HTTP_TIMEOUT_MS = 8000;
 // seconds cover the port forward and queueing, so a slow SimBrief comes back
 // as the server's own answer rather than as an unknown outcome here.
 export const SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS = 25000;
+// Three of the SayIntentions routes reach SayIntentions itself through the
+// server, which answers 504 UPSTREAM_TIMEOUT when that takes too long. With the
+// default 8 s our own timer would fire first and turn the server's knowable
+// answer into an unknown outcome, which for a write is the worst answer there
+// is. 20 s is the estimated upstream budget; the extra seconds are the port
+// forward and queueing.
+export const SAYINTENTIONS_HTTP_TIMEOUT_MS = 20000;
 export const DATALINK_THREAD_BODY_MAX_BYTES = 16 * 1024 * 1024;
 export const DATALINK_OTHER_BODY_MAX_BYTES = 1024 * 1024;
 /** A successful prefile answers with the whole planned-leg row. */
@@ -51,12 +62,21 @@ export type DatalinkRoute =
   | { key: 'leg-loadsheet'; id: number }
   | { key: 'leg-clearance'; id: number }
   | { key: 'simbrief-settings' }
-  | { key: 'simbrief-prefile' };
+  | { key: 'simbrief-prefile' }
+  | { key: 'si-settings' }
+  | { key: 'si-link-status'; id: number }
+  | { key: 'si-link'; id: number }
+  | { key: 'si-link-now'; id: number }
+  | { key: 'si-unlink'; id: number }
+  | { key: 'si-import'; id: number }
+  | { key: 'si-pdc'; id: number };
 
 export type DatalinkRouteKey = DatalinkRoute['key'];
 
+export type DatalinkMethod = 'GET' | 'POST' | 'DELETE';
+
 export interface BuiltRequest {
-  method: 'GET' | 'POST';
+  method: DatalinkMethod;
   path: string;
   /** The path with `:id` in place of the number: the only form that is logged. */
   template: string;
@@ -71,24 +91,36 @@ export interface DatalinkTransport {
 }
 
 export interface DatalinkClientOptions {
-  /** Every route except the SimBrief prefile. */
+  /** Every route except the SimBrief prefile and the three upstream SayIntentions ones. */
   timeoutMs?: number;
   /** The SimBrief prefile only. */
   prefileTimeoutMs?: number;
+  /** The SayIntentions routes that reach SayIntentions through the server. */
+  sayintentionsTimeoutMs?: number;
   /** Overrides every body cap; tests use it to exercise the cap cheaply. */
   maxBodyBytes?: number;
 }
 
+/**
+ * The routes whose answer waits on SayIntentions. The link status GET, the
+ * settings GET and the unlink DELETE are the server's own database and keep the
+ * default.
+ */
+const SAYINTENTIONS_UPSTREAM_KEYS: readonly DatalinkRouteKey[] = ['si-link', 'si-link-now', 'si-import', 'si-pdc'];
+
 /** The timeout one attempt on `key` uses. Nothing else picks a timeout. */
 export function httpTimeoutMs(
   key: DatalinkRouteKey,
-  options: Pick<DatalinkClientOptions, 'timeoutMs' | 'prefileTimeoutMs'>,
+  options: Pick<DatalinkClientOptions, 'timeoutMs' | 'prefileTimeoutMs' | 'sayintentionsTimeoutMs'>,
 ): number {
   if (key === 'simbrief-prefile') return options.prefileTimeoutMs ?? SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS;
+  if (SAYINTENTIONS_UPSTREAM_KEYS.includes(key)) {
+    return options.sayintentionsTimeoutMs ?? SAYINTENTIONS_HTTP_TIMEOUT_MS;
+  }
   return options.timeoutMs ?? DATALINK_HTTP_TIMEOUT_MS;
 }
 
-const ROUTE_TABLE: Readonly<Record<DatalinkRouteKey, { method: 'GET' | 'POST'; template: string }>> = {
+const ROUTE_TABLE: Readonly<Record<DatalinkRouteKey, { method: DatalinkMethod; template: string }>> = {
   status: { method: 'GET', template: '/api/status' },
   'canned-list': { method: 'GET', template: '/api/acars/canned-messages' },
   'flight-thread': { method: 'GET', template: '/api/flights/:id/acars-messages' },
@@ -102,6 +134,13 @@ const ROUTE_TABLE: Readonly<Record<DatalinkRouteKey, { method: 'GET' | 'POST'; t
   'ground-session-current': { method: 'GET', template: '/api/ground-sessions/current' },
   'simbrief-settings': { method: 'GET', template: '/api/settings/simbrief' },
   'simbrief-prefile': { method: 'POST', template: '/api/planned-legs/simbrief' },
+  'si-settings': { method: 'GET', template: '/api/settings/sayintentions' },
+  'si-link-status': { method: 'GET', template: '/api/flights/:id/sayintentions/link' },
+  'si-link': { method: 'POST', template: '/api/flights/:id/sayintentions/link' },
+  'si-link-now': { method: 'POST', template: '/api/flights/:id/sayintentions/link?from=now' },
+  'si-unlink': { method: 'DELETE', template: '/api/flights/:id/sayintentions/link' },
+  'si-import': { method: 'POST', template: '/api/flights/:id/sayintentions/import' },
+  'si-pdc': { method: 'POST', template: '/api/planned-legs/:id/sayintentions/clearance' },
 };
 
 export function routeTemplate(key: DatalinkRouteKey): string {

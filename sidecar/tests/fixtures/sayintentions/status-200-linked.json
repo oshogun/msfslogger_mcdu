@@ -1,0 +1,55 @@
+{
+  "_sample": "status-200-linked",
+  "_why": "The contract sample: linked, with four comms already imported.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "linked": true,
+      "api_key_set": true,
+      "link": {
+        "flight_id": 42,
+        "upstream_flight_id": "8841207",
+        "since_id": 51223,
+        "baseline_comm_id": 51220,
+        "linked_at": "2026-09-17T14:30:00.000Z",
+        "last_import_at": "2026-09-17T14:40:11.284Z",
+        "imported_count": 4
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "answered": "link",
+      "flightId": 42,
+      "apiKeySet": true,
+      "linked": true,
+      "link": {
+        "upstreamFlightId": "8841207",
+        "sinceId": 51223,
+        "baselineCommId": 51220,
+        "linkedAt": "2026-09-17T14:30:00.000Z",
+        "lastImportAt": "2026-09-17T14:40:11.284Z",
+        "importedCount": 4
+      },
+      "httpStatus": 200
+    }
+  }
+}

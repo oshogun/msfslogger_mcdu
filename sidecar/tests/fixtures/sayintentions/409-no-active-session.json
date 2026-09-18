@@ -1,0 +1,38 @@
+{
+  "_sample": "409-no-active-session",
+  "_why": "An expected, common outcome: flying without SayIntentions that day.",
+  "_op": "si-pdc",
+  "_route": "si-pdc",
+  "_requested": 29,
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/29/sayintentions/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW SayIntentions is not running for this pilot.",
+      "code": "NO_ACTIVE_SESSION"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "si-no-session",
+    "httpStatus": 409,
+    "serverCode": "NO_ACTIVE_SESSION",
+    "latch": false,
+    "cdu": "SAYINTENTIONS NOT RUNNING",
+    "hint": "START SAYINTENTIONS THEN RETRY",
+    "kind": "advisory"
+  }
+}

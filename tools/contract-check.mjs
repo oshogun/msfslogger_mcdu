@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 const COMMANDS = ['config_get', 'config_set', 'config_path', 'uplink_start', 'uplink_stop', 'sidecar_restart', 'status_get',
   'datalink_state', 'datalink_watch', 'datalink_refresh', 'datalink_thread', 'datalink_canned', 'datalink_send_canned',
   'datalink_wx', 'datalink_loadsheet', 'simbrief_settings', 'simbrief_prefile', 'simbrief_clear_prefile',
-  'datalink_clearance'];
+  'datalink_clearance', 'sayintentions_status', 'sayintentions_link', 'sayintentions_unlink', 'sayintentions_import',
+  'sayintentions_pdc'];
 const EVENTS = ['sidecar:status', 'sidecar:log', 'sidecar:exit', 'sidecar:datalink'];
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 async function files(dir) {
@@ -53,18 +54,23 @@ try {
     datalink: tsConst('DATALINK_HTTP_TIMEOUT_MS'), prefile: tsConst('SIMBRIEF_PREFILE_HTTP_TIMEOUT_MS'),
     relay: rustConst('REQUEST_TIMEOUT'), prefileRelay: rustConst('PREFILE_REQUEST_TIMEOUT'),
     mirror: rustConst('SIDECAR_PREFILE_HTTP_TIMEOUT'), slack: rustConst('RELAY_SLACK_MIN'),
+    sayintentions: tsConst('SAYINTENTIONS_HTTP_TIMEOUT_MS'), sayintentionsRelay: rustConst('SAYINTENTIONS_REQUEST_TIMEOUT'),
+    sayintentionsMirror: rustConst('SIDECAR_SAYINTENTIONS_HTTP_TIMEOUT'),
   };
   const missing = Object.entries(ms).filter(([, value]) => value === undefined).map(([key]) => key);
   const n = Object.fromEntries(Object.entries(ms).map(([key, value]) => [key, Number(value)]));
   if (missing.length) {
     console.error(`FAIL relay-timeouts: could not read ${missing.join(', ')}`);
     failed = true;
-  } else if (n.mirror !== n.prefile || n.relay < n.datalink + n.slack || n.prefileRelay < n.prefile + n.slack) {
+  } else if (n.mirror !== n.prefile || n.relay < n.datalink + n.slack || n.prefileRelay < n.prefile + n.slack
+    || n.sayintentionsMirror !== n.sayintentions || n.sayintentionsRelay < n.sayintentions + n.slack) {
     console.error(`FAIL relay-timeouts: datalink ${n.datalink} ms, relay ${n.relay} ms; prefile ${n.prefile} ms `
-      + `(mirror ${n.mirror} ms), relay ${n.prefileRelay} ms; slack ${n.slack} ms`);
+      + `(mirror ${n.mirror} ms), relay ${n.prefileRelay} ms; sayintentions ${n.sayintentions} ms `
+      + `(mirror ${n.sayintentionsMirror} ms), relay ${n.sayintentionsRelay} ms; slack ${n.slack} ms`);
     failed = true;
   } else {
-    console.log(`PASS relay-timeouts: datalink ${n.datalink} ms < relay ${n.relay} ms; prefile ${n.prefile} ms < relay ${n.prefileRelay} ms`);
+    console.log(`PASS relay-timeouts: datalink ${n.datalink} ms < relay ${n.relay} ms; prefile ${n.prefile} ms < relay ${n.prefileRelay} ms; `
+      + `sayintentions ${n.sayintentions} ms < relay ${n.sayintentionsRelay} ms`);
   }
   if (failed) process.exitCode = 1;
 } catch (error) { console.error(`FAIL contract: ${error.message}`); process.exitCode = 1; }

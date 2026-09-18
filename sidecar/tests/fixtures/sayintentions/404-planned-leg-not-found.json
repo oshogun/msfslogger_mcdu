@@ -1,0 +1,38 @@
+{
+  "_sample": "404-planned-leg-not-found",
+  "_why": "The leg is gone; a held prefiled leg with that id is dropped.",
+  "_op": "si-pdc",
+  "_route": "si-pdc",
+  "_requested": 29,
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/29/sayintentions/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW No such planned leg.",
+      "code": "PLANNED_LEG_NOT_FOUND"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "leg-not-found",
+    "httpStatus": 404,
+    "serverCode": "PLANNED_LEG_NOT_FOUND",
+    "latch": false,
+    "cdu": "PLANNED LEG NOT FOUND",
+    "hint": "",
+    "kind": "error"
+  }
+}

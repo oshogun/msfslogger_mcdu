@@ -1,0 +1,49 @@
+{
+  "_sample": "import-201-flight-id-mismatch",
+  "_why": "The body names another flight.",
+  "_op": "si-import",
+  "_route": "si-import",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/import",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 43,
+      "imported": 1,
+      "already_seen": 0,
+      "skipped": 0,
+      "since_id": 51224,
+      "messages": []
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "bad-response",
+    "httpStatus": 201,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS BAD DATA",
+    "hint": null,
+    "hintByAction": {
+      "link": "SAFE TO PRESS AGAIN",
+      "unlink": "SAFE TO PRESS AGAIN",
+      "import": "SAFE TO PRESS AGAIN",
+      "pdc": "PDC MAY HAVE BEEN SENT"
+    },
+    "unknownOutcome": true,
+    "kind": "error"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "_sample": "504-upstream-timeout",
+  "_why": "The server timed the upstream out itself, so nothing happened there.",
+  "_op": "si-import",
+  "_route": "si-import",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/import",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 504,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW SayIntentions did not answer in time.",
+      "code": "UPSTREAM_TIMEOUT"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "si-upstream-timeout",
+    "httpStatus": 504,
+    "serverCode": "UPSTREAM_TIMEOUT",
+    "latch": false,
+    "cdu": "SAYINTENTIONS TIMEOUT",
+    "hint": "",
+    "kind": "error"
+  }
+}

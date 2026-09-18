@@ -1,0 +1,44 @@
+{
+  "_sample": "settings-200-not-boolean",
+  "_why": "The key-set flag is a string. The CDU cannot vouch for it, so the answer is bad data.",
+  "_op": "si-status",
+  "_route": "si-settings",
+  "_requested": null,
+  "request": {
+    "method": "GET",
+    "path": "/api/settings/sayintentions",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "sayintentions_api_key_set": "true",
+      "sayintentions_api_key_masked": null
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "bad-response",
+    "httpStatus": 200,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS BAD DATA",
+    "hint": null,
+    "hintByAction": {
+      "link": "SAFE TO PRESS AGAIN",
+      "unlink": "SAFE TO PRESS AGAIN",
+      "import": "SAFE TO PRESS AGAIN",
+      "pdc": "PDC MAY HAVE BEEN SENT"
+    },
+    "unknownOutcome": true,
+    "kind": "error"
+  }
+}

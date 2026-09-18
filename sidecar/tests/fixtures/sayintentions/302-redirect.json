@@ -1,0 +1,41 @@
+{
+  "_sample": "302-redirect",
+  "_why": "Redirects are never followed, so the token is never replayed to wherever this points.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 302,
+    "headers": {
+      "location": "/login",
+      "content-type": "text/html; charset=utf-8"
+    },
+    "body": ""
+  },
+  "expect": {
+    "ok": false,
+    "code": "http-error",
+    "httpStatus": 302,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS FAULT 302",
+    "hint": null,
+    "kind": "error",
+    "unknownOutcome": true,
+    "hintByAction": {
+      "link": "SAFE TO PRESS AGAIN",
+      "unlink": "SAFE TO PRESS AGAIN",
+      "import": "SAFE TO PRESS AGAIN",
+      "pdc": "PDC MAY HAVE BEEN SENT"
+    }
+  }
+}

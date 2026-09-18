@@ -15,6 +15,10 @@ const clearanceScenario = document.getElementById('clearance-scenario');
 function applyClearanceScenario() { frame.contentWindow.gaugeDev.clearanceScenario(clearanceScenario.value); }
 frame.addEventListener('load', applyClearanceScenario);
 clearanceScenario.addEventListener('change', applyClearanceScenario);
+const sayIntentionsScenario = document.getElementById('sayintentions-scenario');
+function applySayIntentionsScenario() { frame.contentWindow.gaugeDev.sayIntentionsScenario(sayIntentionsScenario.value); }
+frame.addEventListener('load', applySayIntentionsScenario);
+sayIntentionsScenario.addEventListener('change', applySayIntentionsScenario);
 document.getElementById('size').addEventListener('change', event => { frame.style.width = event.target.value + 'px'; });
 document.getElementById('reload').addEventListener('click', () => frame.contentWindow.location.reload());
 let revision;

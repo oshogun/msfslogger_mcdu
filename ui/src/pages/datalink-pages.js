@@ -39,6 +39,8 @@ let clearing = false;
 let textPage = 1;
 /** What DL-INDEX R5 does; the clearance pages register it. */
 let clearanceAction = null;
+/** What DL-INDEX R2 does; the SayIntentions pages register it. */
+let sayIntentionsAction = null;
 
 // ── Rows ─────────────────────────────────────────────────────────────────────
 
@@ -107,7 +109,13 @@ function paintIndex(view) {
       ? value(isPrefileScope(scope) ? PREFILE_TEXT.prefileScope : formatScope(scope), prompt(PREFILE_TEXT.clearPrefile))
       : value(formatScope(scope)),
     label('DATALINK'),
-    value(availabilityCell(state)),
+    // The availability line's row is the one whose right-hand cell was free on
+    // every state, and the longest line the panel can draw there still leaves
+    // five columns of gap before the prompt. With no action registered the row
+    // has no right-hand cell at all, as it had none before.
+    sayIntentionsAction
+      ? value(availabilityCell(state), prompt('SAYINTENTIONS>'))
+      : value(availabilityCell(state)),
     label(''),
     value(prompt('<MESSAGES'), prompt('WX REQUEST>')),
     label(''),
@@ -307,8 +315,8 @@ function withTarget(open) {
 /**
  * Registers the reading pages and returns what the write and clearance pages
  * share with them: the one session, the page factory, a repaint of whatever
- * DATALINK page is on screen, its id, and the hook that gives DL-INDEX R5 its
- * action without this module importing the clearance pages.
+ * DATALINK page is on screen, its id, and the hooks that give DL-INDEX R5 and
+ * R2 their actions without this module importing the pages behind them.
  */
 export function register(api) {
   fmc = api;
@@ -323,6 +331,7 @@ export function register(api) {
         void clearPrefile();
         return true;
       }
+      if (lsk === 'R2') return sayIntentionsAction ? sayIntentionsAction() : false;
       if (lsk === 'L3') {
         const state = session.getState();
         if (state && state.scope && state.scope.kind === 'none') {
@@ -418,5 +427,6 @@ export function register(api) {
     repaint,
     currentPageId: () => (current ? current.id : null),
     setClearanceAction(fn) { clearanceAction = typeof fn === 'function' ? fn : null; },
+    setSayIntentionsAction(fn) { sayIntentionsAction = typeof fn === 'function' ? fn : null; },
   };
 }

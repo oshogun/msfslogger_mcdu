@@ -1,0 +1,38 @@
+{
+  "_sample": "409-bad-api-key",
+  "_why": "The saved key is no longer accepted upstream.",
+  "_op": "si-link",
+  "_route": "si-link",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW SayIntentions rejected the saved key.",
+      "code": "BAD_API_KEY"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "si-bad-api-key",
+    "httpStatus": 409,
+    "serverCode": "BAD_API_KEY",
+    "latch": false,
+    "cdu": "SAYINTENTIONS KEY REJECTED",
+    "hint": "CHECK KEY ON WEB PREFILES PAGE",
+    "kind": "error"
+  }
+}

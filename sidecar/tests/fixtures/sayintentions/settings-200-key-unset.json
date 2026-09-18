@@ -1,0 +1,38 @@
+{
+  "_sample": "settings-200-key-unset",
+  "_why": "No key saved on the server. The CDU points the operator at the web Prefiles page.",
+  "_op": "si-status",
+  "_route": "si-settings",
+  "_requested": null,
+  "request": {
+    "method": "GET",
+    "path": "/api/settings/sayintentions",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "sayintentions_api_key_set": false,
+      "sayintentions_api_key_masked": null
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "answered": "settings",
+      "flightId": null,
+      "apiKeySet": false,
+      "linked": null,
+      "link": null,
+      "httpStatus": 200
+    }
+  }
+}

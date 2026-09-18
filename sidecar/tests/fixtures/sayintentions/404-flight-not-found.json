@@ -1,0 +1,37 @@
+{
+  "_sample": "404-flight-not-found",
+  "_why": "The flight is gone on the server; the scope re-resolves within a poll.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW No such flight.",
+      "code": "FLIGHT_NOT_FOUND"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "flight-not-found",
+    "httpStatus": 404,
+    "serverCode": "FLIGHT_NOT_FOUND",
+    "latch": false,
+    "cdu": "FLIGHT NOT FOUND",
+    "hint": "",
+    "kind": "error"
+  }
+}

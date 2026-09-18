@@ -1,0 +1,38 @@
+{
+  "_sample": "409-no-clearance",
+  "_why": "The simulated clearance has to be requested first.",
+  "_op": "si-pdc",
+  "_route": "si-pdc",
+  "_requested": 29,
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/29/sayintentions/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW No PDC is on file for this leg.",
+      "code": "NO_CLEARANCE"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "si-no-clearance",
+    "httpStatus": 409,
+    "serverCode": "NO_CLEARANCE",
+    "latch": false,
+    "cdu": "NO PDC ON FILE",
+    "hint": "REQUEST CLEARANCE ON DL-INDEX R5",
+    "kind": "error"
+  }
+}

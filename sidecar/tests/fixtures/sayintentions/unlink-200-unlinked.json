@@ -1,0 +1,36 @@
+{
+  "_sample": "unlink-200-unlinked",
+  "_why": "The contract sample: the link row was removed.",
+  "_op": "si-unlink",
+  "_route": "si-unlink",
+  "_requested": 42,
+  "request": {
+    "method": "DELETE",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "unlinked": true
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "flightId": 42,
+      "unlinked": true,
+      "httpStatus": 200
+    }
+  }
+}

@@ -734,6 +734,237 @@
       });
     }
   };
+  // ── SayIntentions ─────────────────────────────────────────────────────────
+  // What the five SayIntentions methods answer in each preview scenario. The
+  // API key itself is never here and never travels: the server holds it, and the
+  // panel is told only whether one is on file.
+  //
+  // An "ok" scenario carries a small link model, so LINK, UNLINK and IMPORT move
+  // the state the next status read answers with, the way the server's rows
+  // would. An error scenario answers all five methods with the same failure.
+  // "reject" makes the call itself fail (host-error through runDatalink). Every
+  // error carries a serverError sentinel: the sidecar forwards a code, an HTTP
+  // status and a server code and never the server's prose, so a page that showed
+  // one of these strings would be showing something it was never given.
+  var SI_SESSION = 'si-7f3a91c4';
+  var SI_LINKED_AT = '2026-09-16T14:05:11.000Z';
+  var SI_LAST_IMPORT_AT = '2026-09-16T14:31:52.000Z';
+  // Four display lines at 48 columns, within the 144 units the server caps at.
+  var SI_PDC_TEXT = 'PDC SWA1451 KJFK TO EGLL\nCLEARED VIA GREKI MARTN EBONY JOOPY\nCLIMB AND MAINTAIN 5000FT SQUAWK 4521\nSIMULATED - NOT FOR REAL WORLD USE';
+  // Imported comms as the server files them: a category and no label at all.
+  var SI_ATC_BODIES = [
+    'SWA1451 KENNEDY GROUND TAXI TO RUNWAY 04L VIA ALPHA',
+    'SWA1451 KENNEDY TOWER CLEARED FOR TAKEOFF RUNWAY 04L',
+    'SWA1451 CONTACT DEPARTURE 124.750',
+    'SWA1451 CLIMB AND MAINTAIN FLIGHT LEVEL 230',
+    'SWA1451 PROCEED DIRECT GREKI'
+  ];
+  var SI_PROSE = 'SENTINEL-SERVER-ERROR-TEXT-DO-NOT-SHOW';
+  function siError(code, httpStatus, serverCode) {
+    return { error: { code: code, httpStatus: httpStatus, serverCode: serverCode, serverError: SI_PROSE + ' ' + (serverCode || code) } };
+  }
+  function siLocal(code) { return siError(code, null, null); }
+  function siLink(importedCount, lastImportAt) {
+    return {
+      upstreamFlightId: SI_SESSION, sinceId: 4821, baselineCommId: 4800,
+      linkedAt: SI_LINKED_AT, lastImportAt: lastImportAt, importedCount: importedCount
+    };
+  }
+  var SAYINTENTIONS_SCENARIOS = {
+    "_note": "Answers for getSayIntentionsStatus, linkSayIntentions, unlinkSayIntentions, importSayIntentionsComms and sendSayIntentionsPdc. An ok scenario keeps a link model the three actions move; an error scenario answers all five the same way. serverError members are sentinels the pages must never show.",
+    "_default": "linked",
+    "no-key": { apiKeySet: false },
+    "key-not-linked": { apiKeySet: true },
+    "linked": { apiKeySet: true, linked: true, importedCount: 12, lastImport: SI_LAST_IMPORT_AT, imported: 2 },
+    // Unlinked, so LINK creates one; NOW or SESSION START is the operator's
+    // choice on the page, and the recorded call is where it shows.
+    "link-from-now": { apiKeySet: true },
+    "import-none": { apiKeySet: true, linked: true, importedCount: 12, lastImport: SI_LAST_IMPORT_AT, imported: 0 },
+    "import-rows": { apiKeySet: true, linked: true, importedCount: 12, lastImport: SI_LAST_IMPORT_AT, imported: 4, skipped: 1 },
+    "pdc-sent": { apiKeySet: true, linked: true, importedCount: 12, lastImport: SI_LAST_IMPORT_AT },
+    // The scope refusal is the page's, not the host's: the scenario puts the
+    // datalink in leg scope, where the rule refuses and nothing is asked.
+    "leg-scope": { apiKeySet: true, datalink: "leg" },
+    "no-api-key": siError('si-no-api-key', 409, 'NO_API_KEY'),
+    "bad-api-key": siError('si-bad-api-key', 409, 'BAD_API_KEY'),
+    "not-linked": siError('si-not-linked', 409, 'NOT_LINKED'),
+    "session-changed": siError('si-session-changed', 409, 'SESSION_CHANGED'),
+    "no-comms": siError('si-no-comms', 409, 'NO_COMMS_TO_LINK'),
+    "no-active-session": siError('si-no-session', 409, 'NO_ACTIVE_SESSION'),
+    "no-clearance": siError('si-no-clearance', 409, 'NO_CLEARANCE'),
+    "upstream-unreachable": siError('si-upstream-unreachable', 502, 'UPSTREAM_UNREACHABLE'),
+    "upstream-timeout": siError('si-upstream-timeout', 504, 'UPSTREAM_TIMEOUT'),
+    "upstream-error": siError('si-upstream-error', 502, 'UPSTREAM_ERROR'),
+    "upstream-bad-body": siError('si-upstream-bad-body', 502, 'UPSTREAM_BAD_BODY'),
+    "flight-not-found": siError('flight-not-found', 404, 'FLIGHT_NOT_FOUND'),
+    "leg-not-found": siError('leg-not-found', 404, 'PLANNED_LEG_NOT_FOUND'),
+    "invalid-id": siError('invalid-id', 400, 'INVALID_ID'),
+    "invalid-token": siError('token-invalid', 401, 'INVALID_INGEST_TOKEN'),
+    "token-missing": siError('token-missing', 401, null),
+    "unavailable": siError('sayintentions-unavailable', 401, null),
+    "rejected": siError('rejected', 403, 'CROSS_ORIGIN'),
+    "http-error": siError('http-error', 500, null),
+    "unknown-code": siError('some-future-code', null, null),
+    "bad-response": siError('bad-response', 201, null),
+    "too-large": siLocal('too-large'),
+    "client-timeout": siLocal('timeout'),
+    "relay-timeout": siLocal('shell-timeout'),
+    "tls-error": siLocal('tls-error'),
+    "unreachable": siLocal('unreachable'),
+    "no-config": siLocal('no-config'),
+    "in-progress": siLocal('sayintentions-in-progress'),
+    "bad-params": siLocal('bad-request'),
+    "busy": siLocal('busy'),
+    "sidecar-exited": siLocal('sidecar-exited'),
+    "sidecar-unavailable": siLocal('sidecar-unavailable'),
+    "sidecar-outdated": siLocal('sidecar-outdated'),
+    "unsupported-host": siLocal('host-unsupported'),
+    "host-error": "reject"
+  };
+  var si = { name: SAYINTENTIONS_SCENARIOS._default, delay: 0, latched: false, apiKeySet: true, link: null };
+
+  function sayIntentionsNames() {
+    return Object.keys(SAYINTENTIONS_SCENARIOS).filter(function (name) { return name.charAt(0) !== '_'; });
+  }
+  /** Take the scenario's key and link state as the state the server holds now. */
+  function loadSayIntentionsScenario(name) {
+    var entry = SAYINTENTIONS_SCENARIOS[name];
+    var answers = entry !== 'reject' && !entry.error;
+    si.name = name;
+    si.latched = false;
+    si.apiKeySet = answers ? entry.apiKeySet === true : true;
+    si.link = answers && entry.linked ? siLink(entry.importedCount || 0, entry.lastImport || null) : null;
+    return answers ? entry : null;
+  }
+  function siEntry() { return SAYINTENTIONS_SCENARIOS[si.name]; }
+  function isRequest(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
+  function isFlightId(value) { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1; }
+  // The server's rejected-token answer latches the sidecar, which clears the
+  // prefiled leg and turns the datalink to INGEST TOKEN REJECTED.
+  function siLatch() {
+    if (si.name !== 'invalid-token' || si.latched) return;
+    si.latched = true;
+    loadDatalinkScenario('invalid-token');
+    holdLeg(null);
+    emitDatalink();
+  }
+  /** The server's own answer to an op that needs a key it has not been given. */
+  function siServerRefusal(name) { return { ok: false, error: clone(SAYINTENTIONS_SCENARIOS[name].error) }; }
+  /** The scenario's failure, or null when it answers. */
+  function siFailure() {
+    var entry = siEntry();
+    return entry !== 'reject' && entry.error ? { ok: false, error: clone(entry.error) } : null;
+  }
+  /** Every SayIntentions answer takes this path: the latch, the delay, then `build`. */
+  function siAnswer(build) {
+    var entry = siEntry();
+    siLatch();
+    return new Promise(function (resolve, reject) {
+      setTimeout(function () {
+        if (entry === 'reject') { reject(new Error('mock host fault')); return; }
+        resolve(siFailure() || build());
+      }, si.delay);
+    });
+  }
+  function appendAtcMessages(count) {
+    for (var i = 0; i < count; i += 1) {
+      appendMessage('downlink', 'atc', null, SI_ATC_BODIES[i % SI_ATC_BODIES.length], null);
+    }
+  }
+
+  loadSayIntentionsScenario(si.name);
+
+  var sayIntentionsHost = {
+    getSayIntentionsStatus: function (req) {
+      recordDatalink('getSayIntentionsStatus', [req]);
+      // The flight id is the question, not an option: a number asks whether that
+      // flight is linked, an explicit null asks whether a key is on file at all.
+      // A missing or undefined key is refused rather than read as null, because
+      // only the caller knows which of the two questions it meant to ask, and an
+      // omitted key reaches an installed host as an undefined one.
+      if (!isRequest(req) || !(req.flightId === null || isFlightId(req.flightId))) {
+        return Promise.resolve(failure('bad-request'));
+      }
+      var flightId = req.flightId;
+      return siAnswer(function () {
+        if (flightId === null) {
+          return envelope({ answered: 'settings', flightId: null, apiKeySet: si.apiKeySet, linked: null, link: null, httpStatus: 200 });
+        }
+        return envelope({
+          answered: 'link', flightId: flightId, apiKeySet: si.apiKeySet,
+          linked: si.link !== null, link: si.link ? clone(si.link) : null, httpStatus: 200
+        });
+      });
+    },
+    linkSayIntentions: function (req) {
+      recordDatalink('linkSayIntentions', [req]);
+      if (!isRequest(req) || !isFlightId(req.flightId) || (req.from !== 'now' && req.from !== 'session-start')) {
+        return Promise.resolve(failure('bad-request'));
+      }
+      var flightId = req.flightId;
+      var from = req.from;
+      return siAnswer(function () {
+        // Every one of these three reaches SayIntentions, so the server refuses
+        // them outright until a key is on file.
+        if (!si.apiKeySet) return siServerRefusal('no-api-key');
+        // A re-link rebinds the same session and is a success of its own.
+        var created = si.link === null;
+        si.link = created ? siLink(0, null) : clone(si.link);
+        return envelope({
+          flightId: flightId, created: created,
+          // FROM NOW starts at the present, so nothing is waiting behind it.
+          pendingMessages: from === 'now' ? 0 : 3,
+          link: clone(si.link), httpStatus: created ? 201 : 200
+        });
+      });
+    },
+    unlinkSayIntentions: function (req) {
+      recordDatalink('unlinkSayIntentions', [req]);
+      if (!isRequest(req) || !isFlightId(req.flightId)) return Promise.resolve(failure('bad-request'));
+      var flightId = req.flightId;
+      return siAnswer(function () {
+        // Removing a link that was not there is still a success.
+        var unlinked = si.link !== null;
+        si.link = null;
+        return envelope({ flightId: flightId, unlinked: unlinked, httpStatus: 200 });
+      });
+    },
+    importSayIntentionsComms: function (req) {
+      recordDatalink('importSayIntentionsComms', [req]);
+      if (!isRequest(req) || !isFlightId(req.flightId)) return Promise.resolve(failure('bad-request'));
+      var flightId = req.flightId;
+      return siAnswer(function () {
+        if (!si.apiKeySet) return siServerRefusal('no-api-key');
+        if (si.link === null) return siServerRefusal('not-linked');
+        var entry = siEntry();
+        var imported = entry.imported || 0;
+        var skipped = entry.skipped || 0;
+        si.link = siLink(si.link.importedCount + imported, new Date().toISOString());
+        // The rows land in the flight's own ACARS thread, which the CDU already
+        // reads; there is no second message store for them.
+        if (imported > 0 && dl.messages) {
+          appendAtcMessages(imported);
+          emitDatalink();
+        }
+        return envelope({
+          flightId: flightId, imported: imported, alreadySeen: 0, skipped: skipped,
+          sinceId: 5001, httpStatus: imported > 0 ? 201 : 200
+        });
+      });
+    },
+    sendSayIntentionsPdc: function (req) {
+      recordDatalink('sendSayIntentionsPdc', [req]);
+      if (!isRequest(req) || !isLegId(req.plannedLegId)) return Promise.resolve(failure('bad-request'));
+      var plannedLegId = req.plannedLegId;
+      // The row is written against the planned leg upstream, so nothing is added
+      // to the flight's thread here: what was sent comes back as sentText.
+      return siAnswer(function () {
+        if (!si.apiKeySet) return siServerRefusal('no-api-key');
+        return envelope({ plannedLegId: plannedLegId, sentText: SI_PDC_TEXT, httpStatus: 201 });
+      });
+    }
+  };
+
   // Kept only to notice a changed token, as the sidecar does; never returned or recorded.
   var ingestToken = null;
 
@@ -767,6 +998,7 @@
   Object.keys(datalinkHost).forEach(function (name) { host[name] = datalinkHost[name]; });
   Object.keys(simbriefHost).forEach(function (name) { host[name] = simbriefHost[name]; });
   Object.keys(clearanceHost).forEach(function (name) { host[name] = clearanceHost[name]; });
+  Object.keys(sayIntentionsHost).forEach(function (name) { host[name] = sayIntentionsHost[name]; });
   window.__FMC_HOST__ = host;
   window.gaugeDev = {
     scenario: scenario, calls: calls,
@@ -788,6 +1020,17 @@
       return name;
     },
     setClearanceDelay: function (ms) { clearance.delay = Math.max(0, Number(ms) || 0); return clearance.delay; },
+    sayIntentionsScenario: function (name) {
+      if (sayIntentionsNames().indexOf(name) < 0) throw new Error('Unknown sayintentions scenario: ' + name);
+      var entry = loadSayIntentionsScenario(name);
+      if (entry && entry.datalink) {
+        loadDatalinkScenario(entry.datalink);
+        holdLeg(null);
+        emitDatalink();
+      }
+      return name;
+    },
+    setSayIntentionsDelay: function (ms) { si.delay = Math.max(0, Number(ms) || 0); return si.delay; },
     emitLog: function (message) { listeners.log.forEach(function (fn) { fn({ level: 'info', message: message }); }); },
     emitExit: function () { scenario('crashed'); listeners.exit.forEach(function (fn) { fn({ code: 1 }); }); }
   };

@@ -1,0 +1,56 @@
+{
+  "_sample": "link-200-relinked",
+  "_why": "The flight was already linked: 200, created false, and still a success.",
+  "_op": "si-link",
+  "_route": "si-link",
+  "_requested": 42,
+  "_from": "session-start",
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "created": false,
+      "pending_messages": 2,
+      "link": {
+        "flight_id": 42,
+        "upstream_flight_id": "8841207",
+        "since_id": 51223,
+        "baseline_comm_id": 51220,
+        "linked_at": "2026-09-17T14:30:00.000Z",
+        "last_import_at": "2026-09-17T14:40:11.284Z",
+        "imported_count": 4
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "flightId": 42,
+      "created": false,
+      "pendingMessages": 2,
+      "link": {
+        "upstreamFlightId": "8841207",
+        "sinceId": 51223,
+        "baselineCommId": 51220,
+        "linkedAt": "2026-09-17T14:30:00.000Z",
+        "lastImportAt": "2026-09-17T14:40:11.284Z",
+        "importedCount": 4
+      },
+      "httpStatus": 200
+    }
+  }
+}

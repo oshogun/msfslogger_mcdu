@@ -1,0 +1,45 @@
+{
+  "_sample": "pdc-201-missing-message",
+  "_why": "No filed message: nothing proves a row exists.",
+  "_op": "si-pdc",
+  "_route": "si-pdc",
+  "_requested": 29,
+  "request": {
+    "method": "POST",
+    "path": "/api/planned-legs/29/sayintentions/clearance",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "planned_leg_id": 29,
+      "sent_text": "PDC KSFO KLAX CLRD SSTIK3 BSR Q13 RZS KWANG2 CLB 5000FT SQ 2451"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "bad-response",
+    "httpStatus": 201,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS BAD DATA",
+    "hint": null,
+    "hintByAction": {
+      "link": "SAFE TO PRESS AGAIN",
+      "unlink": "SAFE TO PRESS AGAIN",
+      "import": "SAFE TO PRESS AGAIN",
+      "pdc": "PDC MAY HAVE BEEN SENT"
+    },
+    "unknownOutcome": true,
+    "kind": "error"
+  }
+}

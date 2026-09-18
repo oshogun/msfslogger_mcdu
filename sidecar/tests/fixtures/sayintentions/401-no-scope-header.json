@@ -1,0 +1,35 @@
+{
+  "_sample": "401-no-scope-header",
+  "_why": "A server that predates these routes. It recovers by itself once the server is updated.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW Not in this token scope."
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "sayintentions-unavailable",
+    "httpStatus": 401,
+    "serverCode": null,
+    "latch": false,
+    "cdu": "SAYINTENTIONS UNAVAILABLE",
+    "hint": "SERVER UPDATE NEEDED",
+    "kind": "error"
+  }
+}

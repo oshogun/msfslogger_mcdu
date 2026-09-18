@@ -158,7 +158,94 @@ fails with `CLEARANCE UNAVAILABLE` (hint `SERVER UPDATE NEEDED` on the
 reopened confirm page) and every other DATALINK page and the flight-data
 uplink keep working normally.
 
-## 10. FPLN: SimBrief prefile
+## 10. SayIntentions: linking, importing and pushing a PDC
+
+This is a front end to the msfslogger server's own, optional SayIntentions.AI
+integration — the server holds the SayIntentions API key and does all the
+talking to SayIntentions; the CDU only ever reads a boolean (`KEY ON FILE` /
+`NO KEY ON FILE`) and never sees, collects or types the key itself. See
+[security](security.md) for why that boundary is permanent.
+
+`DL-INDEX` `R2` `SAYINTENTIONS>` opens `DL-SI` and never refuses — it is
+always shown, whatever the scope, because the page itself is where every
+refusal gets explained rather than hiding the explanation behind a missing
+prompt.
+
+**No key configured.** `DL-SI` row 2 reads `NO KEY ON FILE` and row 11 reads
+`SET KEY ON WEB PREFILES PAGE`. This is reachable on the ground, in leg
+scope, before a flight exists — leave the CDU, open the msfslogger web app's
+Prefiles page, and save the key there. There is no CDU field for it.
+
+**Link, unlink and import all need a live flight, not just a flight plan.**
+`DL-SI` L4 `<LINK`, L5 `<UNLINK` and R5 `IMPORT>` each stage onto
+`DL-SI-CONFIRM`, exactly like every other datalink write — nothing sends on
+the first press. All three refuse with `NEEDS ACTIVE FLIGHT` in leg scope,
+including the common pre-flight state of a SimBrief-prefiled leg with no
+engines running yet. This is not a CDU limitation: the server's SayIntentions
+routes require a `flights` row to bind the link to, and its own web client
+has no link control on a planned leg either — a leg-scoped import would land
+in the thread of whichever flight later happened to claim that leg, a
+correlation the operator never made. Row 11 shows `LINK AVAILABLE ONCE
+FLYING` while the refusal applies; the transition is automatic and needs no
+action once the flight starts.
+
+**`FROM NOW` versus `SESSION START`.** `DL-SI` R4 toggles the `LINK FROM`
+choice shown on row 8. `SESSION START` is the default, and the one to use
+normally: linking binds to whatever SayIntentions session the saved key
+currently holds, and `SESSION START` backfills that session's whole history,
+including the taxi and ready-to-taxi calls from before the link was pressed.
+`NOW` is the escape hatch for a pilot who has already been flying for a while
+across several legs and does not want the previous leg's radio chatter
+pulled into this flight's thread — pick it before pressing L4, because the
+choice is not recoverable after linking.
+
+**`IMPORT>` is a manual, operator-pressed action by design — not a missing
+poll.** Unlike the DATALINK thread, which polls the server every 20 seconds
+on its own, nothing on `DL-SI` imports automatically. Every import reaches
+the real SayIntentions upstream, which is undocumented, preview-status and
+carries no documented rate limits of its own; the server's own web client is
+manual for exactly that reason, and the msfslogger server team recommended
+the same restraint here. Press R5 `IMPORT>`, then `SEND*` on the confirm
+page, whenever fresh comms are wanted. A repeat import is always safe — the
+server dedups on its own cursor — but it is never triggered for you.
+Imported rows show up in the existing `DL-THREAD`, with no separate SayIntentions
+message view: an ATC row renders through the same unknown-category fallback
+every other unrecognized category already uses, `UP`/`DN` by the same
+ground-relative convention as everything else in the thread.
+
+**`NO_ACTIVE_SESSION` is a normal outcome, not a fault.** Pressing `SEND*`
+against SayIntentions (an import, or the PDC push below) while SayIntentions
+is simply not running that day shows `SAYINTENTIONS NOT RUNNING` — worded as
+an advisory, never as an error, because a pilot flying without SayIntentions
+open is expected and common, not broken. Start SayIntentions and press
+`SEND*` again; the staged action is not cleared by this outcome.
+
+**Pushing a PDC.** `DL-CLEARANCE` `R5` `SEND PDC>` (present once a clearance
+is on file) opens `DL-SI-PDC`, staging a push of that leg's on-file PDC as a
+real CPDLC message into the pilot's live SayIntentions session. `R6` `SEND*`
+sends once; while in flight the page reads `SENDING`. On success the
+scratchpad reads `PDC SENT` and `DL-SI-PDC` keeps the text actually sent as
+`LAST SENT`. `NO PDC ON FILE` means `REQUEST CLEARANCE` (`DL-INDEX` R5) has
+not been run for this leg yet. If the push times out, the CDU shows
+`PDC MAY HAVE BEEN SENT` rather than a "safe to retry" wording — a repeat
+press is a real decision, since it files a second CPDLC message into the live
+session, and neither the CDU nor the server can tell afterwards whether the
+first one arrived.
+
+**A note on `DL-CLEARANCE`'s paging.** Adding `SEND PDC>` cost the route
+block one line per page — page 1 now shows 4 route lines instead of 5, and
+page 2 onward shows 8 instead of 9 — so a clearance route of five to nine
+lines pages one more time than it used to. See
+[cdu-reference § Page map](cdu-reference.md) for the exact row layout.
+
+**Requirements**: SayIntentions needs a msfslogger server build with the six
+SayIntentions routes; on an older server `DL-SI` and the `SEND PDC>` prompt
+read `SAYINTENTIONS NOT SUPPORTED` / `SIDECAR UPDATE REQUIRED` as appropriate,
+with no effect on DATALINK, FPLN or the flight-data uplink. See
+[cdu-reference § SAYINTENTIONS vocabulary](cdu-reference.md) for every string
+and [api](api.md) for the six routes.
+
+## 11. FPLN: SimBrief prefile
 
 FPLN is a separate feature from DATALINK: it imports your latest SimBrief
 OFP into the msfslogger server as a new, trip-less planned leg, which
@@ -205,14 +292,17 @@ PREFILE simply replaces the leg already held.
 
 ## Server-side requirements summary
 
-DATALINK, FPLN and PDC clearance all use the same ingest token already set
-on `CFG NETWORK` — there is no separate login for any of them, and the token
-is never shown on the CDU. Each feature needs the msfslogger server to be
-running a build that has its corresponding route; on an older server the
-CDU shows the relevant `UNAVAILABLE` state (`DATALINK UNAVAILABLE`,
-`SIMBRIEF UNAVAILABLE`, or `CLEARANCE UNAVAILABLE`), and every other feature,
-including the base flight-data uplink, is unaffected. FPLN additionally
-requires a SimBrief Pilot ID configured on the msfslogger server itself
-(never on the CDU). See [cdu-reference](cdu-reference.md) for the exact CDU
-text and hints for every case, and [troubleshooting](troubleshooting.md) for
-diagnosing which one you are seeing.
+DATALINK, FPLN, PDC clearance and SayIntentions all use the same ingest token
+already set on `CFG NETWORK` — there is no separate login for any of them,
+and the token is never shown on the CDU. Each feature needs the msfslogger
+server to be running a build that has its corresponding route; on an older
+server the CDU shows the relevant `UNAVAILABLE`/`NOT SUPPORTED` state
+(`DATALINK UNAVAILABLE`, `SIMBRIEF UNAVAILABLE`, `CLEARANCE UNAVAILABLE`, or
+`SAYINTENTIONS NOT SUPPORTED`), and every other feature, including the base
+flight-data uplink, is unaffected. FPLN additionally requires a SimBrief
+Pilot ID configured on the msfslogger server itself, and SayIntentions
+additionally requires a SayIntentions API key saved on the server's own web
+Prefiles page (never on the CDU, for either). See
+[cdu-reference](cdu-reference.md) for the exact CDU text and hints for every
+case, and [troubleshooting](troubleshooting.md) for diagnosing which one you
+are seeing.

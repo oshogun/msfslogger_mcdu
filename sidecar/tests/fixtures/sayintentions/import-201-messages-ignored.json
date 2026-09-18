@@ -1,0 +1,58 @@
+{
+  "_sample": "import-201-messages-ignored",
+  "_why": "The imported rows carry the ingest token and are not read at all: they reach the CDU through the ACARS thread.",
+  "_op": "si-import",
+  "_route": "si-import",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/import",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "imported": 1,
+      "already_seen": 0,
+      "skipped": 0,
+      "since_id": 51225,
+      "messages": [
+        {
+          "id": 901,
+          "flight_id": 42,
+          "planned_leg_id": null,
+          "direction": "downlink",
+          "category": "atc",
+          "label": "SENTINEL-DATALINK-TOKEN-0000",
+          "body": "Ground, SENTINEL-DATALINK-TOKEN-0000, ready to taxi.",
+          "payload_json": "SENTINEL-DATALINK-TOKEN-0000",
+          "correlation_id": null,
+          "dedup_key": "sayintentions:comm:42:51221:out",
+          "sent_at": "2026-09-17T14:31:02.000Z",
+          "read_at": null
+        }
+      ]
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "flightId": 42,
+      "imported": 1,
+      "alreadySeen": 0,
+      "skipped": 0,
+      "sinceId": 51225,
+      "httpStatus": 201
+    }
+  }
+}

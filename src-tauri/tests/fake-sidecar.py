@@ -20,9 +20,10 @@ def emit(value):
 # datalinkMode: answer (default), answer-error, ignore, no-features (a sidecar
 # that predates the datalink), no-simbrief (a sidecar with the datalink but
 # without SimBrief; otherwise answer), no-clearance (a sidecar with the datalink
-# and SimBrief but without the clearance op; otherwise answer), slow-prefile
-# (answers simbrief-prefile after prefileDelayMs, every other op at once),
-# echo-token, exit-on-request or wrong-id.
+# and SimBrief but without the clearance op; otherwise answer), no-sayintentions
+# (a sidecar with everything except the SayIntentions ops; otherwise answer),
+# slow-prefile (answers simbrief-prefile after prefileDelayMs, every other op at
+# once), echo-token, exit-on-request or wrong-id.
 datalink_mode = config.get('datalinkMode', 'answer')
 hello = dict(v=1, type='hello', at=1, pid=os.getpid(), sidecarVersion='fixture',
              nodeVersion='fixture', configPath=str(config_path))
@@ -30,8 +31,10 @@ if datalink_mode == 'no-simbrief':
     hello['features'] = ['datalink']
 elif datalink_mode == 'no-clearance':
     hello['features'] = ['datalink', 'simbrief-prefile']
-elif datalink_mode != 'no-features':
+elif datalink_mode == 'no-sayintentions':
     hello['features'] = ['datalink', 'simbrief-prefile', 'pdc-clearance']
+elif datalink_mode != 'no-features':
+    hello['features'] = ['datalink', 'simbrief-prefile', 'pdc-clearance', 'sayintentions']
 emit(hello)
 
 def datalink_state(state, **members):

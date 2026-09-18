@@ -296,7 +296,9 @@ describe('datalink wiring', () => {
   });
 
   it('hello advertises the datalink feature and is followed by one idle datalink-state', () => {
-    expect(messages[0]).toMatchObject({ type: 'hello', features: ['datalink', 'simbrief-prefile', 'pdc-clearance'] });
+    expect(messages[0]).toMatchObject({
+      type: 'hello', features: ['datalink', 'simbrief-prefile', 'pdc-clearance', 'sayintentions'],
+    });
     expect(messages[1]).toEqual({
       v: 1, type: 'datalink-state', at: 60000, state: 'dl.idle', watching: false, httpStatus: null,
       serverCode: null, lastOkAt: null, lastErrorAt: null, nextPollAt: null, scope: null, thread: null,
@@ -575,5 +577,131 @@ describe('datalink wiring', () => {
     expect(messages.filter((m) => m.type === 'datalink-state').length).toBe(states);
     expect(JSON.stringify(messages)).not.toContain(SENTINEL);
     expect(JSON.stringify(messages)).not.toContain('PDC');
+  });
+
+  it('the five SayIntentions ops reach their own routes and are answered with the projected result only', async () => {
+    const link = {
+      flight_id: 42, upstream_flight_id: `8841207 ${SENTINEL}`, since_id: 51223, baseline_comm_id: 51220,
+      linked_at: '2026-09-17T14:30:00.000Z', last_import_at: null, imported_count: 4,
+    };
+    mocks.datalinkRequest.mockImplementation(async (route: { key: string; id?: number }) => {
+      switch (route.key) {
+        case 'si-settings':
+          return respond(200, { sayintentions_api_key_set: true, sayintentions_api_key_masked: `si_1 ${SENTINEL}` });
+        case 'si-link-status':
+          return respond(200, { flight_id: 42, api_key_set: true, linked: true, link });
+        case 'si-link-now':
+          return respond(201, { flight_id: 42, created: true, pending_messages: 4, link });
+        case 'si-unlink':
+          return respond(200, { flight_id: 42, unlinked: true });
+        case 'si-import':
+          return respond(201, {
+            flight_id: 42, imported: 4, already_seen: 0, skipped: 1, since_id: 51224,
+            messages: [{ id: 901, body: `Ground, ${SENTINEL}, ready to taxi.` }],
+          });
+        case 'si-pdc':
+          return respond(201, {
+            planned_leg_id: 29, sent_text: `PDC KSFO KLAX ${SENTINEL}`, message: { id: 905, body: SENTINEL },
+          });
+        default:
+          return respond(200, { currentFlightId: null });
+      }
+    });
+    // One action at a time: the four writes share one in-flight guard.
+    const ids: string[] = [];
+    for (const [op, params] of [
+      ['si-status', { flightId: null }],
+      ['si-status', { flightId: 42 }],
+      ['si-link', { flightId: 42, from: 'now' }],
+      ['si-unlink', { flightId: 42 }],
+      ['si-import', { flightId: 42 }],
+      ['si-pdc', { plannedLegId: 29 }],
+    ] as [string, unknown][]) {
+      ids.push(datalink(op, params));
+      await flush();
+    }
+    const results = ids.map((id) => {
+      const message = responseFor(id);
+      return message && message.type === 'datalink-response' && message.ok ? message.result : null;
+    });
+    expect(results[0]).toEqual({
+      answered: 'settings', flightId: null, apiKeySet: true, linked: null, link: null, httpStatus: 200,
+    });
+    expect(results[1]).toEqual({
+      answered: 'link', flightId: 42, apiKeySet: true, linked: true, httpStatus: 200,
+      link: {
+        upstreamFlightId: '8841207 [REDACTED]', sinceId: 51223, baselineCommId: 51220,
+        linkedAt: '2026-09-17T14:30:00.000Z', lastImportAt: null, importedCount: 4,
+      },
+    });
+    expect(results[2]).toMatchObject({ flightId: 42, created: true, pendingMessages: 4, httpStatus: 201 });
+    expect(results[3]).toEqual({ flightId: 42, unlinked: true, httpStatus: 200 });
+    expect(results[4]).toEqual({
+      flightId: 42, imported: 4, alreadySeen: 0, skipped: 1, sinceId: 51224, httpStatus: 201,
+    });
+    expect(results[5]).toEqual({ plannedLegId: 29, sentText: 'PDC KSFO KLAX [REDACTED]', httpStatus: 201 });
+
+    expect(mocks.datalinkRequest.mock.calls.map(([route]) => route)).toEqual([
+      { key: 'si-settings' },
+      { key: 'si-link-status', id: 42 },
+      { key: 'si-link-now', id: 42 },
+      { key: 'si-unlink', id: 42 },
+      { key: 'si-import', id: 42 },
+      { key: 'si-pdc', id: 29 },
+    ]);
+    const logs = messages.filter((m) => m.type === 'log').map((m) => m.message);
+    expect(logs.filter((line) => line.startsWith('SayIntentions '))).toEqual([
+      'SayIntentions status ok (HTTP 200)',
+      'SayIntentions status ok (HTTP 200)',
+      'SayIntentions link created (HTTP 201)',
+      'SayIntentions unlink unlinked (HTTP 200)',
+      'SayIntentions import ok (HTTP 201)',
+      'SayIntentions pdc sent (HTTP 201)',
+    ]);
+
+    // A second action pressed while one is out is refused, and sends nothing.
+    const made = mocks.datalinkRequest.mock.calls.length;
+    const first = datalink('si-import', { flightId: 42 });
+    const second = datalink('si-pdc', { plannedLegId: 29 });
+    await flush();
+    expect(responseFor(second)).toMatchObject({
+      ok: false, error: { code: 'sayintentions-in-progress', httpStatus: null, serverCode: null },
+    });
+    expect(responseFor(first)).toMatchObject({ ok: true });
+    expect(mocks.datalinkRequest.mock.calls.length).toBe(made + 1);
+    control('shutdown');
+    await flush();
+    const everything = JSON.stringify(messages);
+    expect(everything).not.toContain(SENTINEL);
+    expect(everything).not.toContain('SENTINEL-DATALINK');
+    expect(everything).not.toContain('masked');
+    expect(everything).not.toContain('taxi');
+  });
+
+  it('answers each malformed SayIntentions request with exactly the bad-request line, sending nothing', async () => {
+    const rejected: [string, string, unknown][] = [
+      ['dl-80', 'si-status', {}],
+      ['dl-81', 'si-status', { flightId: 0 }],
+      ['dl-82', 'si-status', { flightId: 1.5 }],
+      ['dl-83', 'si-status', { flightId: 42, plannedLegId: 29 }],
+      ['dl-84', 'si-link', { flightId: 42 }],
+      ['dl-85', 'si-link', { flightId: 42, from: 'session_start' }],
+      ['dl-86', 'si-link', { flightId: null, from: 'now' }],
+      ['dl-87', 'si-unlink', { flightId: '42' }],
+      ['dl-88', 'si-import', { flightId: 42, since: 1 }],
+      ['dl-89', 'si-pdc', { flightId: 42 }],
+      ['dl-90', 'si-pdc', null],
+    ];
+    const logsBefore = messages.filter((m) => m.type === 'log').length;
+    for (const [id, op, params] of rejected) datalink(op, params, id);
+    await flush();
+    for (const [id] of rejected) {
+      expect(responseFor(id)).toEqual({
+        v: 1, type: 'datalink-response', at: expect.any(Number), id, ok: false,
+        error: { code: 'bad-request', httpStatus: null, serverCode: null },
+      });
+    }
+    expect(messages.filter((m) => m.type === 'log').length).toBe(logsBefore);
+    expect(mocks.datalinkRequest).not.toHaveBeenCalled();
   });
 });

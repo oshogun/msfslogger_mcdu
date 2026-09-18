@@ -1,0 +1,40 @@
+{
+  "_sample": "status-200-not-linked",
+  "_why": "A key is on file and this flight is not linked yet.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "linked": false,
+      "link": null,
+      "api_key_set": true
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "answered": "link",
+      "flightId": 42,
+      "apiKeySet": true,
+      "linked": false,
+      "link": null,
+      "httpStatus": 200
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "_sample": "unlink-200-nothing-to-remove",
+  "_why": "There was no link. Still 200, and still a success.",
+  "_op": "si-unlink",
+  "_route": "si-unlink",
+  "_requested": 42,
+  "request": {
+    "method": "DELETE",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "unlinked": false
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "flightId": 42,
+      "unlinked": false,
+      "httpStatus": 200
+    }
+  }
+}

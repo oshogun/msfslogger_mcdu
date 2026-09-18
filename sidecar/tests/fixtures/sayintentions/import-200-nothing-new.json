@@ -1,0 +1,43 @@
+{
+  "_sample": "import-200-nothing-new",
+  "_why": "Nothing new since the last import: 200, and the counts are what the CDU shows.",
+  "_op": "si-import",
+  "_route": "si-import",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/import",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "flight_id": 42,
+      "imported": 0,
+      "already_seen": 3,
+      "skipped": 0,
+      "since_id": 51224,
+      "messages": []
+    }
+  },
+  "expect": {
+    "ok": true,
+    "result": {
+      "flightId": 42,
+      "imported": 0,
+      "alreadySeen": 3,
+      "skipped": 0,
+      "sinceId": 51224,
+      "httpStatus": 200
+    }
+  }
+}

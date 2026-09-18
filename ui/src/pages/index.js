@@ -11,6 +11,7 @@
 // unchanged on a host this build has never seen.
 import { forgetClearances, register as registerClearancePages } from './datalink-clearance-pages.js';
 import { register as registerDatalinkPages } from './datalink-pages.js';
+import { forgetSayIntentions, register as registerSayIntentionsPages } from './datalink-sayintentions-pages.js';
 import { register as registerDatalinkWritePages } from './datalink-write-pages.js';
 import { register as registerFplnPages } from './fpln-pages.js';
 
@@ -173,7 +174,10 @@ async function save() {
     // The token never reaches the panel, so any token entered counts as a
     // change; an untouched token is not in the patch at all.
     const saved = fmc.getConfigCache();
-    if (ingestToken !== undefined || !saved || saved.serverUrl !== safe.serverUrl) forgetClearances();
+    if (ingestToken !== undefined || !saved || saved.serverUrl !== safe.serverUrl) {
+      forgetClearances();
+      forgetSayIntentions();
+    }
     Object.assign(draft, safe);
     if (ingestToken) draft.tokenSet = true;
     pendingToken = undefined;
@@ -227,5 +231,7 @@ export function register(api) {
   const shared = registerDatalinkPages(api);
   registerDatalinkWritePages(api, shared);
   registerClearancePages(api, shared);
+  // After the clearance pages, because it hands them their R5 action.
+  registerSayIntentionsPages(api, shared);
   registerFplnPages(api);
 }

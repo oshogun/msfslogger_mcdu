@@ -1,0 +1,38 @@
+{
+  "_sample": "409-no-api-key",
+  "_why": "No key on file. The fix lives on the web Prefiles page, never on the CDU.",
+  "_op": "si-link",
+  "_route": "si-link",
+  "_requested": 42,
+  "request": {
+    "method": "POST",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json",
+      "content-length": "0"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW No SayIntentions API key is saved.",
+      "code": "NO_API_KEY"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "si-no-api-key",
+    "httpStatus": 409,
+    "serverCode": "NO_API_KEY",
+    "latch": false,
+    "cdu": "NO SAYINTENTIONS KEY",
+    "hint": "SET KEY ON WEB PREFILES PAGE",
+    "kind": "error"
+  }
+}

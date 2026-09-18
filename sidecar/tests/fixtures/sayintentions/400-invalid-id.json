@@ -1,0 +1,37 @@
+{
+  "_sample": "400-invalid-id",
+  "_why": "The CDU sent an id the server rejected. Not reachable through the op params.",
+  "_op": "si-status",
+  "_route": "si-link-status",
+  "_requested": 42,
+  "request": {
+    "method": "GET",
+    "path": "/api/flights/42/sayintentions/link",
+    "headers": {
+      "x-ingest-token": "SENTINEL-DATALINK-TOKEN-0000",
+      "accept": "application/json"
+    },
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-ingest-token-scope": "accepted"
+    },
+    "body": {
+      "error": "SENTINEL-SI-ERROR-TEXT-DO-NOT-SHOW The id in the path is not usable.",
+      "code": "INVALID_ID"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid-id",
+    "httpStatus": 400,
+    "serverCode": "INVALID_ID",
+    "latch": false,
+    "cdu": "DATALINK INVALID ID",
+    "hint": "",
+    "kind": "error"
+  }
+}

@@ -15,6 +15,8 @@ pub const FEATURE: &str = "datalink";
 pub const SIMBRIEF_FEATURE: &str = "simbrief-prefile";
 /// The clearance op; a sidecar without it would leave the request unanswered.
 pub const CLEARANCE_FEATURE: &str = "pdc-clearance";
+/// The SayIntentions ops; a sidecar without it would leave them unanswered.
+pub const SAYINTENTIONS_FEATURE: &str = "sayintentions";
 // Longer than the sidecar's own 8 s HTTP timeout, so a slow server is reported
 // by the sidecar with its real cause before the shell gives up on the answer.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_millis(12_000);
@@ -33,6 +35,19 @@ const _: () = assert!(
     PREFILE_REQUEST_TIMEOUT.as_millis()
         >= SIDECAR_PREFILE_HTTP_TIMEOUT.as_millis() + RELAY_SLACK_MIN.as_millis()
 );
+/// The sidecar's HTTP timeout for the three SayIntentions ops that reach the
+/// upstream through the server, mirrored here so the relay can be checked
+/// against it; tools/contract-check.mjs keeps the two equal.
+pub const SIDECAR_SAYINTENTIONS_HTTP_TIMEOUT: Duration = Duration::from_millis(20_000);
+// The server spends up to 20 s on SayIntentions before it answers with its own
+// upstream timeout. The relay outwaits that, so a write whose fate is knowable
+// is reported by the sidecar rather than as a shell timeout — the worst answer
+// available for something that may already have been sent.
+pub const SAYINTENTIONS_REQUEST_TIMEOUT: Duration = Duration::from_millis(25_000);
+const _: () = assert!(
+    SAYINTENTIONS_REQUEST_TIMEOUT.as_millis()
+        >= SIDECAR_SAYINTENTIONS_HTTP_TIMEOUT.as_millis() + RELAY_SLACK_MIN.as_millis()
+);
 // The CDU needs at most three requests at once; a runaway caller is refused
 // rather than queued without limit.
 pub const PENDING_MAX: usize = 8;
@@ -40,7 +55,7 @@ pub const STATE_OUTDATED: &str = "dl.sidecar-outdated";
 pub const STATE_UNAVAILABLE: &str = "dl.sidecar-unavailable";
 const SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
 const REQUEST_LINE_MAX: usize = 4096;
-pub const OPS: [&str; 11] = [
+pub const OPS: [&str; 16] = [
     "watch",
     "refresh",
     "thread",
@@ -52,29 +67,42 @@ pub const OPS: [&str; 11] = [
     "simbrief-prefile",
     "prefile-clear",
     "clearance",
+    "si-status",
+    "si-link",
+    "si-unlink",
+    "si-import",
+    "si-pdc",
 ];
 pub const SIMBRIEF_OPS: [&str; 3] = ["simbrief-settings", "simbrief-prefile", "prefile-clear"];
 pub const CLEARANCE_OPS: [&str; 1] = ["clearance"];
+pub const SAYINTENTIONS_OPS: [&str; 5] =
+    ["si-status", "si-link", "si-unlink", "si-import", "si-pdc"];
 
-/// How long the relay waits for an answer. Only the prefile, which can take
-/// the server 20 s, waits longer than every other op.
+/// How long the relay waits for an answer. Only the ops the server answers
+/// after talking to somebody else — the prefile, and the three SayIntentions
+/// ops that reach the upstream — wait longer than every other op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RelayTimeouts {
     pub default: Duration,
     pub prefile: Duration,
+    pub sayintentions: Duration,
 }
 
 impl RelayTimeouts {
     pub const PRODUCTION: RelayTimeouts = RelayTimeouts {
         default: REQUEST_TIMEOUT,
         prefile: PREFILE_REQUEST_TIMEOUT,
+        sayintentions: SAYINTENTIONS_REQUEST_TIMEOUT,
     };
 
     pub fn for_op(&self, op: &str) -> Duration {
-        if op == "simbrief-prefile" {
-            self.prefile
-        } else {
-            self.default
+        match op {
+            "simbrief-prefile" => self.prefile,
+            // The other two SayIntentions ops never reach the upstream: the
+            // settings and link reads and the unlink are answered out of the
+            // server's own database.
+            "si-link" | "si-import" | "si-pdc" => self.sayintentions,
+            _ => self.default,
         }
     }
 }
@@ -113,6 +141,16 @@ pub fn supports_clearance(hello: &Value) -> bool {
     hello["features"]
         .as_array()
         .is_some_and(|features| features.iter().any(|feature| feature == CLEARANCE_FEATURE))
+}
+
+/// A sidecar that predates the SayIntentions ops would leave them unanswered,
+/// so they are only sent to one that announced this feature.
+pub fn supports_sayintentions(hello: &Value) -> bool {
+    hello["features"].as_array().is_some_and(|features| {
+        features
+            .iter()
+            .any(|feature| feature == SAYINTENTIONS_FEATURE)
+    })
 }
 
 fn has_exact_keys(value: &Value, keys: &[&str]) -> Option<Map<String, Value>> {
@@ -176,6 +214,23 @@ pub fn valid_params(op: &str, params: &Value) -> bool {
         // Only the leg: a trip or flight id beside it could aim the request at
         // something other than the leg the CDU confirmed.
         "clearance" => has_exact_keys(params, &["plannedLegId"])
+            .is_some_and(|p| safe_integer(&p["plannedLegId"], 1)),
+        // A null flight id is the CDU's choice of question — the flight-free
+        // settings read — and not a missing value, so the key must still be
+        // there: {} asks nothing and is refused.
+        "si-status" => has_exact_keys(params, &["flightId"])
+            .is_some_and(|p| p["flightId"].is_null() || safe_integer(&p["flightId"], 1)),
+        // `from` is a closed set. An unknown word is refused here rather than
+        // forwarded: the server would read it as the session start, and the CDU
+        // must not depend on a default it did not choose.
+        "si-link" => has_exact_keys(params, &["flightId", "from"]).is_some_and(|p| {
+            safe_integer(&p["flightId"], 1)
+                && matches!(p["from"].as_str(), Some("now" | "session-start"))
+        }),
+        "si-unlink" | "si-import" => {
+            has_exact_keys(params, &["flightId"]).is_some_and(|p| safe_integer(&p["flightId"], 1))
+        }
+        "si-pdc" => has_exact_keys(params, &["plannedLegId"])
             .is_some_and(|p| safe_integer(&p["plannedLegId"], 1)),
         _ => false,
     }
@@ -487,7 +542,12 @@ mod tests {
                 "simbrief-settings",
                 "simbrief-prefile",
                 "prefile-clear",
-                "clearance"
+                "clearance",
+                "si-status",
+                "si-link",
+                "si-unlink",
+                "si-import",
+                "si-pdc"
             ]
         );
         for op in SIMBRIEF_OPS {
@@ -523,10 +583,10 @@ mod tests {
         assert!(PREFILE_REQUEST_TIMEOUT > SIDECAR_PREFILE_HTTP_TIMEOUT);
         assert!(REQUEST_TIMEOUT >= Duration::from_millis(8_000) + RELAY_SLACK_MIN);
         for op in OPS {
-            let expected = if op == "simbrief-prefile" {
-                PREFILE_REQUEST_TIMEOUT
-            } else {
-                REQUEST_TIMEOUT
+            let expected = match op {
+                "simbrief-prefile" => PREFILE_REQUEST_TIMEOUT,
+                "si-link" | "si-import" | "si-pdc" => SAYINTENTIONS_REQUEST_TIMEOUT,
+                _ => REQUEST_TIMEOUT,
             };
             assert_eq!(RelayTimeouts::PRODUCTION.for_op(op), expected, "{op}");
         }
@@ -536,7 +596,7 @@ mod tests {
     #[test]
     fn clearance_takes_exactly_a_safe_integer_leg_id() {
         assert!(CLEARANCE_OPS.iter().all(|op| OPS.contains(op)));
-        assert_eq!(OPS.last(), Some(&"clearance"));
+        assert_eq!(OPS[10], "clearance");
         for id in [json!(1), json!(12), json!(SAFE_INTEGER_MAX)] {
             let params = json!({"plannedLegId": id});
             assert!(valid_params("clearance", &params), "{params}");
@@ -581,6 +641,118 @@ mod tests {
             RelayTimeouts::PRODUCTION.for_op("clearance"),
             REQUEST_TIMEOUT
         );
+    }
+
+    /// The same table the sidecar validates, in the same order, so the two
+    /// implementations can be read side by side.
+    #[test]
+    fn sayintentions_params_follow_the_frozen_table() {
+        assert!(SAYINTENTIONS_OPS.iter().all(|op| OPS.contains(op)));
+        assert_eq!(
+            SAYINTENTIONS_OPS,
+            ["si-status", "si-link", "si-unlink", "si-import", "si-pdc"]
+        );
+        for (op, params) in [
+            // si-status: a flight id asks the link question, null asks the
+            // flight-free settings question.
+            ("si-status", json!({"flightId":92})),
+            ("si-status", json!({"flightId":1})),
+            ("si-status", json!({"flightId":SAFE_INTEGER_MAX})),
+            ("si-status", json!({"flightId":null})),
+            ("si-link", json!({"flightId":92, "from":"now"})),
+            ("si-link", json!({"flightId":1, "from":"session-start"})),
+            ("si-unlink", json!({"flightId":92})),
+            ("si-import", json!({"flightId":92})),
+            ("si-pdc", json!({"plannedLegId":12})),
+        ] {
+            assert!(valid_params(op, &params), "{op} {params}");
+            let line = request_line("dl-9", op, &params).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap(),
+                json!({"v":1, "type":"datalink-request", "id":"dl-9", "op":op, "params":params})
+            );
+        }
+        for (op, params) in [
+            // An extra key is how a second target or free text would travel
+            // beside a validated one, so it is a shape error.
+            ("si-status", json!({"flightId":92, "plannedLegId":12})),
+            ("si-status", json!({})),
+            ("si-status", json!({"flightId":"92"})),
+            ("si-status", json!({"flightId":0})),
+            ("si-status", json!({"flightId":1.5})),
+            ("si-status", json!({"flightId":-1})),
+            ("si-status", json!({"flightId":SAFE_INTEGER_MAX + 1})),
+            ("si-status", json!(null)),
+            ("si-link", json!({"flightId":92, "from":"now", "sinceId":1})),
+            ("si-link", json!({"flightId":92})),
+            ("si-link", json!({"from":"now"})),
+            ("si-link", json!({"flightId":"92", "from":"now"})),
+            ("si-link", json!({"flightId":0, "from":"now"})),
+            ("si-link", json!({"flightId":92, "from":"session_start"})),
+            ("si-link", json!({"flightId":92, "from":""})),
+            ("si-link", json!({"flightId":92, "from":null})),
+            ("si-link", json!({"flightId":92, "from":1})),
+            ("si-unlink", json!({"flightId":92, "force":true})),
+            ("si-unlink", json!({})),
+            ("si-unlink", json!({"flightId":"92"})),
+            ("si-unlink", json!({"flightId":null})),
+            ("si-unlink", json!({"flightId":0})),
+            ("si-import", json!({"flightId":92, "sinceId":1})),
+            ("si-import", json!({})),
+            ("si-import", json!({"flightId":"92"})),
+            ("si-import", json!({"flightId":null})),
+            ("si-import", json!({"flightId":0})),
+            ("si-pdc", json!({"plannedLegId":12, "text":"CLEARED"})),
+            ("si-pdc", json!({})),
+            ("si-pdc", json!({"plannedLegId":"12"})),
+            ("si-pdc", json!({"plannedLegId":null})),
+            ("si-pdc", json!({"plannedLegId":0})),
+            ("si-pdc", json!({"flightId":92})),
+        ] {
+            assert!(!valid_params(op, &params), "{op} {params}");
+        }
+    }
+
+    #[test]
+    fn sayintentions_support_needs_its_own_feature() {
+        let current =
+            json!({"features":["datalink", "simbrief-prefile", "pdc-clearance", "sayintentions"]});
+        assert!(supports_sayintentions(&current));
+        assert!(supports_datalink(&current));
+        assert!(!supports_sayintentions(
+            &json!({"features":["datalink", "simbrief-prefile", "pdc-clearance"]})
+        ));
+        assert!(!supports_sayintentions(
+            &json!({"features":"sayintentions"})
+        ));
+        assert!(!supports_sayintentions(&json!({})));
+    }
+
+    #[test]
+    fn the_three_upstream_ops_wait_longer_than_the_other_two() {
+        assert_eq!(
+            SIDECAR_SAYINTENTIONS_HTTP_TIMEOUT,
+            Duration::from_millis(20_000)
+        );
+        assert_eq!(SAYINTENTIONS_REQUEST_TIMEOUT, Duration::from_millis(25_000));
+        assert!(
+            SAYINTENTIONS_REQUEST_TIMEOUT >= SIDECAR_SAYINTENTIONS_HTTP_TIMEOUT + RELAY_SLACK_MIN
+        );
+        for op in ["si-link", "si-import", "si-pdc"] {
+            assert_eq!(
+                RelayTimeouts::PRODUCTION.for_op(op),
+                SAYINTENTIONS_REQUEST_TIMEOUT,
+                "{op}"
+            );
+        }
+        // Neither of these reaches the upstream, so neither needs the margin.
+        for op in ["si-status", "si-unlink"] {
+            assert_eq!(
+                RelayTimeouts::PRODUCTION.for_op(op),
+                REQUEST_TIMEOUT,
+                "{op}"
+            );
+        }
     }
 
     #[test]

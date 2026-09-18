@@ -121,8 +121,8 @@ try {
   }
 
   // interface-members: the thirteen original names, the nine datalink members,
-  // the three SimBrief members and the one clearance member must each appear
-  // as a property line in ui/src/app.js.
+  // the three SimBrief members, the one clearance member and the five
+  // SayIntentions members must each appear as a property line in ui/src/app.js.
   {
     const names = [
       'registerPage', 'showPage', 'setScratchpad', 'getScratchpad', 'hasScratchpadError',
@@ -132,12 +132,14 @@ try {
       'requestWeather', 'requestLoadsheet', 'setPageNumber',
       'getSimbriefSettings', 'prefileSimbrief', 'clearPrefiledLeg',
       'requestClearance',
+      'getSayIntentionsStatus', 'linkSayIntentions', 'unlinkSayIntentions',
+      'importSayIntentionsComms', 'sendSayIntentionsPdc',
     ];
     const appFile = files.find((f) => f.path === appJs);
     const lines = appFile ? appFile.body.split('\n') : [];
     const missing = names.filter((name) => !lines.some((line) => new RegExp(`^\\s*${name}[,:]`).test(line)));
     if (missing.length) fail('interface-members', [loc(appJs, 1)], `${missing.join(', ')} missing from the interface built in ui/src/app.js`);
-    else console.log('PASS interface-members: all twenty-six present in ui/src/app.js');
+    else console.log('PASS interface-members: all thirty-one present in ui/src/app.js');
   }
 
   process.exitCode = failed ? 1 : 0;

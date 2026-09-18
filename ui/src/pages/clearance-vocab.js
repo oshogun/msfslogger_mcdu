@@ -16,8 +16,13 @@ export const ROW_COLUMNS = TEXT_COLUMNS - 1;
 
 /** Clearances kept in memory, one per planned leg, most recent last. */
 export const RESULTS_KEPT = 4;
-export const PAGE1_ROUTE_LINES = 5;
-export const MORE_ROUTE_LINES = 9;
+/**
+ * Route lines per page. Row 10 of the result page is left for a prompt on every
+ * page, which costs the route block one line per page: the alternative was a
+ * key that works on page 1 and is clipped by a 48-column route line on page 2.
+ */
+export const PAGE1_ROUTE_LINES = 4;
+export const MORE_ROUTE_LINES = 8;
 
 const ROUTE_MAX_UNITS = 4096;
 const ICAO_MAX_UNITS = 8;
@@ -199,7 +204,7 @@ export function routeLines(route) {
   return paginateText(route).flat();
 }
 
-/** Page 1 holds five route lines under the clearance; each further page nine. */
+/** Page 1 holds four route lines under the clearance; each further page eight. */
 export function routePageCount(route) {
   if (route === null || route === undefined) return 1;
   const lines = routeLines(route).length;

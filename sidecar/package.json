@@ -10,6 +10,7 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
+    "better-sqlite3": "12.11.1",
     "node-simconnect": "4.2.0",
     "undici": "7.29.1"
   },

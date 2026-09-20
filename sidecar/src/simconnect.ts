@@ -119,6 +119,19 @@ export interface SimConnectCallbacks {
   onIngestEvent: (body: { type: string; flags?: number }) => void;
   onPause: (state: PauseStateId, flags: number, label: string, usingPauseEx1: boolean) => void;
   onTraffic: (objects: TrafficObject[]) => void;
+  /**
+   * The live handle, once the flight-data definition is registered and the 1 Hz
+   * request is in flight. Anything else that wants to talk to the simulator —
+   * the facilities API, which has its own definitions and its own request ids —
+   * attaches here, because a handle is only valid for one connection episode.
+   */
+  onConnected?: (handle: SimConnectConnection) => void;
+  /**
+   * The handle is gone. Everything holding it must settle what it had in flight
+   * and drop it: definition ids do not survive a reconnect, and a request that
+   * was interrupted by a disconnect learnt nothing about the simulator's data.
+   */
+  onDisconnected?: () => void;
 }
 
 export class SimConnectLink {
@@ -240,6 +253,10 @@ export class SimConnectLink {
     const handle = this.handle;
     this.handle = null;
     if (!handle) return;
+    // Closing deliberately — a stop, a cycled config — is as much a disconnect
+    // to anything else holding this handle as one the simulator initiates, and
+    // it must not be left waiting on replies that can no longer come.
+    this.notify(() => this.cb.onDisconnected?.());
     try {
       for (const event of ['simObjectData', 'simObjectDataByType', 'event', 'quit', 'close', 'error'] as const) {
         handle.removeAllListeners(event);
@@ -247,6 +264,21 @@ export class SimConnectLink {
       handle.close();
     } catch {
       // A handle that is already gone is not an error worth reporting.
+    }
+  }
+
+  /**
+   * Fires one of the optional observer callbacks. They belong to another part
+   * of the sidecar, and a throw from one must not be mistaken for a SimConnect
+   * failure: on the connect path that would schedule a reconnect and leak the
+   * handle that had just opened.
+   */
+  private notify(fire: () => void): void {
+    try {
+      fire();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.cb.onLog('error', `SimConnect observer callback threw: ${message}`);
     }
   }
 
@@ -318,6 +350,7 @@ export class SimConnectLink {
 
       this.registerDefinitions(handle);
       this.subscribe(handle);
+      this.notify(() => this.cb.onConnected?.(handle));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.lastError = message;
@@ -482,6 +515,7 @@ export class SimConnectLink {
       this.appName = null;
       this.appVersion = null;
       this.resetPause();
+      this.notify(() => this.cb.onDisconnected?.());
       this.cb.onIngestEvent({ type: 'disconnected' });
       this.scheduleReconnect(reason);
     };

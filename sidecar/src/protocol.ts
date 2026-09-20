@@ -80,8 +80,51 @@ export interface StatusMessage {
     lastBatchSize: number | null;
     lastError: string | null;
   };
+  /**
+   * Present only once the navdata store has opened, or once it has failed to.
+   * Its absence means this sidecar has no navdata, which is what an older
+   * sidecar — one that never writes the key at all — also means.
+   */
+  navdata?: NavdataStatusAxis;
   /** Redacted — the token is a type error here, not just a convention. */
   config: RedactedConfig | null;
+}
+
+// ── navdata ───────────────────────────────────────────────────────────────────
+//
+// Additive under protocol version 1: one optional axis on the status message
+// and one feature string. Nothing else about navdata crosses this boundary —
+// the extracted rows go from the sidecar to the server over HTTP and never
+// through the shell — so the 64 KiB line cap is a dozen scalars away from
+// being at risk.
+
+/**
+ * What this build knows how to do, not what it is doing: it is advertised
+ * unconditionally, before any store is opened, so a shell can tell a
+ * navdata-capable sidecar from one that predates navdata. Whether navdata is
+ * actually running is the status axis's answer, not this one's.
+ */
+export const NAVDATA_FEATURE = 'navdata';
+
+export interface NavdataStatusAxis {
+  /**
+   * 'nav.off' is a store that opened while the uplink is stopped,
+   * 'nav.unavailable' a store that could not open at all, 'nav.bulk' a pass in
+   * progress, 'nav.ready' the steady state and 'nav.error' a latched failure.
+   */
+  state: 'nav.off' | 'nav.unavailable' | 'nav.bulk' | 'nav.ready' | 'nav.error';
+  /** One line, no stack. Safe for the CDU scratchpad. Never a token or a path to the config. */
+  reason: string | null;
+  snapshotId: string | null;
+  /** Monotonic within one snapshotId; comparing across epochs is undefined. */
+  rev: number | null;
+  ackedRev: number | null;
+  airports: number;
+  navaids: number;
+  waypoints: number;
+  pendingDemand: number;
+  lastSyncAt: number | null;
+  lastSyncError: string | null;
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';

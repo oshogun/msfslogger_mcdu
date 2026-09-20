@@ -714,3 +714,102 @@ describe('the file on disk', () => {
     expect(second.count('nav_airport')).toBe(1);
   });
 });
+
+describe('a store built from a different simulator', () => {
+  const asideFiles = (dir: string): string[] =>
+    fs.readdirSync(path.join(dir, 'navdata')).filter((name) => name !== 'navdata.db');
+
+  it('is moved aside with its rows and replaced, never relabelled', () => {
+    const dir = scratchDir();
+    const first = openIn(dir, { simId: '2020' });
+    first.write((tx) => tx.upsert('nav_airport', { ident: 'ZZZA', lat: 1, lon: 2 }));
+    expect(first.meta().simId).toBe('2020');
+    first.close();
+
+    const logged: string[] = [];
+    const second = openIn(dir, {
+      simId: '2024',
+      log: (level: string, message: string) => logged.push(`${level} ${message}`),
+    });
+
+    // The new store is empty and honest about where it came from.
+    expect(second.meta().simId).toBe('2024');
+    expect(second.count('nav_airport')).toBe(0);
+    expect(second.meta().rev).toBe(0);
+
+    // The old one is still on disk, with its rows, and still says 2020.
+    const aside = asideFiles(dir).filter((name) => !name.endsWith('-wal') && !name.endsWith('-shm'));
+    expect(aside).toHaveLength(1);
+    expect(aside[0]).toMatch(/^navdata\.db\.sim2020-\d+$/);
+    const moved = openNavdataStore(path.join(dir, 'navdata', aside[0]), { simId: '2020' });
+    expect(moved).not.toBeNull();
+    opened.push(moved as NavdataStore);
+    expect((moved as NavdataStore).meta().simId).toBe('2020');
+    expect((moved as NavdataStore).count('nav_airport')).toBe(1);
+
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('2020');
+    expect(logged[0]).toContain('2024');
+    expect(logged[0]).toContain(aside[0]);
+  });
+
+  it('leaves a store alone when the simulator matches, or when none was named', () => {
+    const dir = scratchDir();
+    const first = openIn(dir, { simId: '2024' });
+    first.write((tx) => tx.upsert('nav_airport', { ident: 'ZZZB', lat: 3, lon: 4 }));
+    first.close();
+
+    const again = openIn(dir, { simId: '2024' });
+    expect(again.count('nav_airport')).toBe(1);
+    again.close();
+
+    // No configured simulator is not a claim that it changed.
+    const unnamed = openIn(dir);
+    expect(unnamed.meta().simId).toBe('2024');
+    expect(unnamed.count('nav_airport')).toBe(1);
+    expect(
+      asideFiles(dir).filter((name) => !name.endsWith('-wal') && !name.endsWith('-shm')),
+    ).toEqual([]);
+  });
+});
+
+describe('a detail fetch left in flight by a process that died', () => {
+  it('is cleared at the caller\'s request, and nothing else is touched', () => {
+    const dir = scratchDir();
+    const store = openIn(dir);
+    store.write((tx) => {
+      tx.upsert('nav_airport', { ident: 'ZPND', lat: 1, lon: 1, detail_state: 'pending' });
+      tx.upsert('nav_airport', { ident: 'ZIDX', lat: 2, lon: 2, detail_state: 'index' });
+      tx.upsert('nav_airport', { ident: 'ZDET', lat: 3, lon: 3, detail_state: 'detail' });
+      tx.upsert('nav_airport', { ident: 'ZABS', lat: 4, lon: 4, detail_state: 'absent' });
+      tx.upsert('nav_airport', { ident: 'ZFAI', lat: 5, lon: 5, detail_state: 'failed' });
+      tx.upsert('nav_navaid', {
+        kind: 'V', ident: 'ZZV', region: 'ZZ', lat: 6, lon: 6, detail_state: 'pending',
+      });
+      tx.upsert('nav_navaid', {
+        kind: 'N', ident: 'ZZN', region: 'ZZ', lat: 7, lon: 7, detail_state: 'detail',
+      });
+    });
+    const revBefore = store.meta().rev;
+
+    expect(store.resetPendingDetail()).toBe(2);
+
+    expect(store.row('nav_airport', { ident: 'ZPND' })?.detail_state).toBe('index');
+    expect(store.row('nav_navaid', { kind: 'V', ident: 'ZZV', region: 'ZZ' })?.detail_state)
+      .toBe('index');
+    for (const [ident, state] of [
+      ['ZIDX', 'index'], ['ZDET', 'detail'], ['ZABS', 'absent'], ['ZFAI', 'failed'],
+    ] as const) {
+      expect(store.row('nav_airport', { ident })?.detail_state).toBe(state);
+    }
+    expect(store.row('nav_navaid', { kind: 'N', ident: 'ZZN', region: 'ZZ' })?.detail_state)
+      .toBe('detail');
+
+    // One transaction, one rev — the replica has to learn the rows changed.
+    expect(store.meta().rev).toBe(revBefore + 1);
+
+    // Nothing is pending any more, so a second pass changes nothing at all.
+    expect(store.resetPendingDetail()).toBe(0);
+    expect(store.meta().rev).toBe(revBefore + 1);
+  });
+});

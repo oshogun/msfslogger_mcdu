@@ -63,6 +63,9 @@ const NAVDATA_FILE_NAME = 'navdata.db';
 /** Codes that mean the file is not a database this build can read. */
 const CORRUPT_CODES = ['SQLITE_CORRUPT', 'SQLITE_NOTADB'];
 
+/** The tables whose detail fetch a dead process can leave marked as running. */
+const PENDING_DETAIL_TABLES = ['nav_airport', 'nav_navaid'] as const;
+
 /** A row as it comes back from SQLite. */
 export type NavdataRow<T extends NavdataTable> = Record<NavdataColumn<T>, NavdataValue>;
 
@@ -159,6 +162,14 @@ export interface NavdataStore {
   count(table: NavdataTable): number;
   /** One transaction, one rev. Rolls back and rethrows if the body throws. */
   write<T>(fn: (tx: NavdataTx) => T): T;
+  /**
+   * Clears every detail fetch the store still believes is in flight, and
+   * returns how many rows that was. 'pending' means a request is out with the
+   * simulator right now, which cannot be true of a store that has just been
+   * opened: the process that made the request is gone. Left alone the row
+   * would look busy for ever and never be re-fetched.
+   */
+  resetPendingDetail(): number;
   /** Folds the write-ahead log back into the file. Any copy of the file needs
    *  this first, or it captures a database older than the store. */
   checkpoint(): void;
@@ -429,48 +440,90 @@ export function openNavdataStore(
   }
 
   let meta = readMeta(db);
-  if (meta !== null && meta.schemaVersion !== NAVDATA_SCHEMA_VERSION) {
-    // The store is a cache of the simulator's own data and rebuilding it costs
-    // a fraction of a second, so a version this build does not understand is
-    // moved aside and replaced rather than refused: refusing would leave
-    // navdata off for good on the next version bump, until someone deleted a
-    // file they have no reason to know exists. The old file is kept, never
-    // deleted, so a later build can migrate out of it. This is only true of
-    // the local file — two peers disagreeing on the wire still needs a human.
-    const stored = meta.schemaVersion;
+
+  /**
+   * Replaces the file with a fresh one, keeping the old.
+   *
+   * Every reason for doing it is the same reason: the local store is a cache
+   * of the simulator's own data, rebuilding it costs a fraction of a second,
+   * and refusing to open would leave navdata off until someone deleted a file
+   * they have no reason to know exists. The old file is never deleted — it is
+   * the only copy of whatever was in it — and if it cannot even be moved, the
+   * caller's refusal stands and nothing here is touched.
+   */
+  const rebuildStore = (
+    asidePath: string,
+    refusal: NavdataUnavailable,
+    announce: (movedTo: string) => string,
+  ): NavdataUnavailable | null => {
     db.close();
-    const movedTo = moveStoreAside(dbPath, `${dbPath}.v${stored}-${now()}`);
-    if (movedTo === null) {
-      return fail({
-        code: 'NAVDATA_SCHEMA_UNSUPPORTED',
-        reason:
-          `navdata disabled: the store under ${directory} is schema version ` +
-          `${stored}, this build speaks ${NAVDATA_SCHEMA_VERSION}, and it could not be moved aside`,
-      });
-    }
-    options.log?.(
-      'info',
-      `Navdata store is schema version ${stored} and this build speaks ` +
-        `${NAVDATA_SCHEMA_VERSION}; moved it to ${movedTo} and started a new one`,
-    );
+    const movedTo = moveStoreAside(dbPath, asidePath);
+    if (movedTo === null) return refusal;
+    options.log?.('info', announce(movedTo));
     try {
       db = openDatabase(loaded.driver, dbPath, now);
     } catch (err) {
       const code = errorCode(err) ?? 'UNKNOWN';
-      return fail({
+      return {
         code,
         reason: `navdata disabled: the store under ${directory} could not be opened (${code})`,
-      });
+      };
     }
     const replacement = verifySchema(db);
     if (replacement !== null) {
       db.close();
-      return fail({
+      return {
         code: 'NAVDATA_SCHEMA_MISMATCH',
         reason: `navdata disabled: the embedded schema does not match the database (${replacement})`,
-      });
+      };
     }
     meta = readMeta(db);
+    return null;
+  };
+
+  // A version this build does not understand is moved aside rather than
+  // refused: refusing would fire for every user on the next version bump and
+  // leave navdata off for good. A later build can still migrate out of the
+  // file that was kept. This is only true of the local file — two peers
+  // disagreeing on the wire still needs a human.
+  if (meta !== null && meta.schemaVersion !== NAVDATA_SCHEMA_VERSION) {
+    const stored = meta.schemaVersion;
+    const failure = rebuildStore(
+      `${dbPath}.v${stored}-${now()}`,
+      {
+        code: 'NAVDATA_SCHEMA_UNSUPPORTED',
+        reason:
+          `navdata disabled: the store under ${directory} is schema version ` +
+          `${stored}, this build speaks ${NAVDATA_SCHEMA_VERSION}, and it could not be moved aside`,
+      },
+      (movedTo) =>
+        `Navdata store is schema version ${stored} and this build speaks ` +
+        `${NAVDATA_SCHEMA_VERSION}; moved it to ${movedTo} and started a new one`,
+    );
+    if (failure !== null) return fail(failure);
+  }
+
+  // A store built from a different simulator goes the same way, and is
+  // deliberately NOT relabelled: the rows in it are one simulator's own
+  // navdata, and 2020 and 2024 do not ship the same database. Rewriting sim_id
+  // would leave real rows claiming a provenance they do not have, which is
+  // worse than the cost of rebuilding — and the old file is kept, so switching
+  // back finds its cache still there.
+  if (meta !== null && options.simId !== undefined && meta.simId !== options.simId) {
+    const stored = meta.simId;
+    const failure = rebuildStore(
+      `${dbPath}.sim${stored}-${now()}`,
+      {
+        code: 'NAVDATA_SIM_MISMATCH',
+        reason:
+          `navdata disabled: the store under ${directory} was built from simulator ` +
+          `${stored}, this session is ${options.simId}, and it could not be moved aside`,
+      },
+      (movedTo) =>
+        `Navdata store was built from simulator ${stored} and this session is ` +
+        `${options.simId}; moved it to ${movedTo} and started a new one`,
+    );
+    if (failure !== null) return fail(failure);
   }
 
   if (meta === null) {
@@ -743,6 +796,27 @@ function createStore(db: SqliteDatabase, dbPath: string, now: () => number): Nav
       } finally {
         inTransaction = false;
       }
+    },
+
+    resetPendingDetail(): number {
+      requireOpen();
+      return store.write((tx) => {
+        let cleared = 0;
+        for (const table of PENDING_DETAIL_TABLES) {
+          const spec = specFor(table);
+          const keys = spec.keys.join(', ');
+          const stale = db
+            .prepare(`SELECT ${keys} FROM ${table} WHERE detail_state = 'pending'`)
+            .all();
+          for (const row of stale) {
+            // Back to the weakest claim the table has: a row whose detail never
+            // arrived knows only what the index put there.
+            const reset = { ...row, detail_state: 'index' } as NavdataRowInput<typeof table>;
+            if (tx.upsert(table, reset)) cleared++;
+          }
+        }
+        return cleared;
+      });
     },
 
     checkpoint(): void {

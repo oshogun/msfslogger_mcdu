@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigLoadResult, EffectiveConfig } from '../src/config';
 import type { SimConnectCallbacks } from '../src/simconnect';
 import type { SidecarMessage, StatusMessage } from '../src/protocol';
@@ -70,7 +73,15 @@ const failure: UplinkResult = {
 const standby: UplinkResult = { ok: true, state: 'net.standby', httpStatus: 401, message: null };
 let stdin: EventEmitter;
 let messages: SidecarMessage[];
+/** Every line exactly as it was written, so a line's size can be measured. */
+let lines: string[];
 let exitCode: typeof process.exitCode;
+// The navdata store is created beside the config file. Every test in this file
+// points that at a throwaway directory, so nothing here can touch the real one.
+let configDir: string;
+let previousConfigEnv: string | undefined;
+/** Set by the suite that wants the navdata store to fail to open. */
+let blockNavdata = false;
 
 function control(type: string): void {
   stdin.emit('data', JSON.stringify({ v: 1, type }) + '\n');
@@ -103,6 +114,17 @@ function sendFrame(): void {
 }
 
 beforeEach(async () => {
+  configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-index-'));
+  previousConfigEnv = process.env.MSFSLOGGER_CONFIG;
+  if (blockNavdata) {
+    // A file where the config's directory should be: the navdata directory
+    // beside it cannot be created, which is how a store that will not open
+    // looks from here.
+    fs.writeFileSync(path.join(configDir, 'blocked'), 'not a directory');
+    process.env.MSFSLOGGER_CONFIG = path.join(configDir, 'blocked', 'config.json');
+  } else {
+    process.env.MSFSLOGGER_CONFIG = path.join(configDir, 'config.json');
+  }
   vi.resetModules();
   vi.resetAllMocks();
   vi.useFakeTimers();
@@ -110,6 +132,7 @@ beforeEach(async () => {
   exitCode = process.exitCode;
   stdin = new EventEmitter();
   messages = [];
+  lines = [];
   mocks.callbacks = null;
   mocks.loadConfig.mockReturnValue(good);
   mocks.postFrame.mockResolvedValue(success);
@@ -125,6 +148,7 @@ beforeEach(async () => {
   vi.spyOn(process.stdin, 'pause').mockReturnValue(process.stdin);
   vi.spyOn(process, 'on').mockReturnValue(process);
   vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+    lines.push(String(chunk));
     messages.push(JSON.parse(String(chunk)) as SidecarMessage);
     return true;
   });
@@ -138,6 +162,9 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   process.exitCode = exitCode;
+  if (previousConfigEnv === undefined) delete process.env.MSFSLOGGER_CONFIG;
+  else process.env.MSFSLOGGER_CONFIG = previousConfigEnv;
+  fs.rmSync(configDir, { recursive: true, force: true });
 });
 
 describe('sidecar config recovery and lifecycle through control messages', () => {
@@ -297,7 +324,8 @@ describe('datalink wiring', () => {
 
   it('hello advertises the datalink feature and is followed by one idle datalink-state', () => {
     expect(messages[0]).toMatchObject({
-      type: 'hello', features: ['datalink', 'simbrief-prefile', 'pdc-clearance', 'sayintentions'],
+      type: 'hello',
+      features: ['datalink', 'simbrief-prefile', 'pdc-clearance', 'sayintentions', 'navdata'],
     });
     expect(messages[1]).toEqual({
       v: 1, type: 'datalink-state', at: 60000, state: 'dl.idle', watching: false, httpStatus: null,
@@ -703,5 +731,139 @@ describe('datalink wiring', () => {
     }
     expect(messages.filter((m) => m.type === 'log').length).toBe(logsBefore);
     expect(mocks.datalinkRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe('navdata wiring', () => {
+  const navdataDir = (): string => path.join(configDir, 'navdata');
+
+  it('has no axis before START, publishes one while running and keeps the store on STOP', async () => {
+    expect(status().navdata).toBeUndefined();
+    expect(fs.existsSync(navdataDir())).toBe(false);
+
+    await start();
+    expect(status().navdata).toMatchObject({
+      state: 'nav.ready',
+      reason: null,
+      airports: 0,
+      navaids: 0,
+      waypoints: 0,
+      ackedRev: null,
+      pendingDemand: 0,
+      lastSyncAt: null,
+      lastSyncError: null,
+    });
+    expect(status().navdata?.snapshotId).toEqual(expect.any(String));
+    expect(status().navdata?.rev).toBe(0);
+    expect(fs.existsSync(path.join(navdataDir(), 'navdata.db'))).toBe(true);
+
+    control('stop');
+    await flush();
+    // The store belongs to the process, not to the run: it stays open.
+    expect(status().navdata?.state).toBe('nav.off');
+    expect(fs.existsSync(path.join(navdataDir(), 'navdata.db'))).toBe(true);
+  });
+
+  it('names navdata in hello as a capability, before any store exists', () => {
+    // hello is the first line written, long before a store could be opened, so
+    // the feature says what this build knows how to do and nothing more.
+    expect(messages[0]).toMatchObject({ type: 'hello' });
+    expect((messages[0] as { features: string[] }).features.at(-1)).toBe('navdata');
+    expect(status().navdata).toBeUndefined();
+  });
+
+  it('hands the navdata gate the name the simulator answered with', async () => {
+    await start();
+    const connected = {
+      state: 'sim.connected' as const, attempt: 0, nextRetryAt: null, retryDelayMs: null,
+      protocol: 'KittyHawk', appVersion: '11.0', lastError: null,
+    };
+    let listRequests = 0;
+    const handle = {
+      on: () => undefined,
+      off: () => undefined,
+      addToFacilityDefinition: () => 1,
+      requestFacilityData: () => 1,
+      requestFacilitiesList: () => { listRequests++; return 1; },
+    } as never;
+
+    // A simulator that is not the one this client is configured for. Asking it
+    // for a facility list would be parsed with the wrong row size and take the
+    // connection down, frames and all, so navdata must refuse and say which
+    // two disagreed.
+    mocks.callbacks!.onSimState({ ...connected, appName: 'SunRise' });
+    mocks.callbacks!.onConnected!(handle);
+    await flush();
+    expect(listRequests).toBe(0);
+    expect(status().navdata?.state).toBe('nav.error');
+    expect(status().navdata?.reason).toContain('SunRise');
+    expect(status().backend.state).not.toBe('net.idle');
+
+    // The same client against the simulator it IS configured for: the request
+    // goes out. So the gate reads the live name, not a constant.
+    mocks.callbacks!.onDisconnected!();
+    mocks.callbacks!.onSimState({ ...connected, appName: 'KittyHawk' });
+    mocks.callbacks!.onConnected!(handle);
+    await flush();
+    expect(listRequests).toBe(1);
+  });
+
+  it('adds the axis to a line that still fits what the shell reads', async () => {
+    await start();
+    const line = lines[lines.length - 1];
+    expect(JSON.parse(line).navdata.state).toBe('nav.ready');
+    expect(Buffer.byteLength(line, 'utf8')).toBeLessThan(65536);
+  });
+
+  it('opens the store once and hands the connection to the facility session', async () => {
+    await start();
+    expect(mocks.callbacks?.onConnected).toBeTypeOf('function');
+    expect(mocks.callbacks?.onDisconnected).toBeTypeOf('function');
+    // A disconnect with nothing in flight is not an error and not a reason to
+    // drop the store.
+    mocks.callbacks?.onDisconnected?.();
+    await flush();
+    expect(status().navdata?.state).toBe('nav.ready');
+    expect(status().navdata?.reason).toBeNull();
+  });
+});
+
+describe('navdata when the store cannot open', () => {
+  beforeAll(() => {
+    blockNavdata = true;
+  });
+  afterAll(() => {
+    blockNavdata = false;
+  });
+
+  it('reports nav.unavailable and leaves frames, traffic, the datalink and the backend axis alone', async () => {
+    await start();
+    const axis = status().navdata;
+    expect(axis?.state).toBe('nav.unavailable');
+    expect(axis?.reason).toContain('navdata disabled');
+    expect(axis?.reason).not.toContain('config.json');
+    expect(axis?.reason).not.toContain(config.ingestToken);
+
+    // A capability is still a capability when the store will not open: the
+    // feature says what this build speaks, the axis says whether it is running.
+    expect((messages[0] as { features: string[] }).features).toContain('navdata');
+
+    sendFrame();
+    await flush();
+    expect(status().backend.state).toBe('net.ok');
+    mocks.callbacks!.onIngestEvent({ type: 'connected' });
+    await flush();
+    expect(mocks.postEvent).toHaveBeenCalledWith({ type: 'connected' });
+    mocks.callbacks!.onTraffic([{ id: 1 } as never]);
+    await flush();
+    expect(status().traffic.lastBatchSize).toBe(1);
+    expect(status().navdata?.state).toBe('nav.unavailable');
+
+    // Warned once, with no path to the config and no token in it.
+    const warnings = messages.filter(
+      (message) => message.type === 'log' && message.level === 'warn',
+    );
+    expect(warnings).toHaveLength(1);
+    expect(JSON.stringify(messages)).not.toContain(config.ingestToken);
   });
 });

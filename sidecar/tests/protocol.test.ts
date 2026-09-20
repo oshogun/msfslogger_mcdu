@@ -17,13 +17,16 @@ import {
   encodeSidecarMessage,
   isBlankLine,
   MAX_LINE_BYTES,
+  NAVDATA_FEATURE,
   PROTOCOL_VERSION,
   CLEARANCE_FEATURE,
   DATALINK_OPS,
   SAYINTENTIONS_FEATURE,
   SIMBRIEF_FEATURE,
   type ControlMessage,
+  type NavdataStatusAxis,
   type SidecarMessage,
+  type StatusMessage,
 } from '../src/protocol';
 
 const AT = 1757600000000;
@@ -750,5 +753,61 @@ describe('SayIntentions datalink ops', () => {
     const encoded = encodeDatalinkResponse(wide);
     expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(MAX_LINE_BYTES);
     expect(decodeSidecarMessage(encoded.trim())).toEqual({ ok: true, message: wide });
+  });
+});
+
+describe('the navdata status axis', () => {
+  const plain = SIDECAR_MESSAGES.find(
+    (message): message is StatusMessage => message.type === 'status',
+  ) as StatusMessage;
+
+  const axis: NavdataStatusAxis = {
+    state: 'nav.bulk',
+    reason: 'the airport index is being rebuilt',
+    snapshotId: 'S-1757600000000-9f2c1a4b',
+    rev: 41871,
+    ackedRev: 40000,
+    airports: 41871,
+    navaids: 1408,
+    waypoints: 12345,
+    pendingDemand: 7,
+    lastSyncAt: AT,
+    lastSyncError: null,
+  };
+
+  it('is a feature string a shell that has never heard of it can ignore', () => {
+    const hello = SIDECAR_MESSAGES.find(
+      (message) => message.type === 'hello',
+    ) as Extract<SidecarMessage, { type: 'hello' }>;
+    const older = ['datalink', 'simbrief-prefile', 'pdc-clearance', 'sayintentions'];
+    const advertised = { ...hello, features: [...older, NAVDATA_FEATURE] };
+    const decoded = decodeSidecarMessage(encodeSidecarMessage(advertised).trim());
+
+    expect(decoded).toEqual({ ok: true, message: advertised });
+    // A shell reads the features it knows and finds them unmoved; the one it
+    // does not know is a string in a list and means nothing to it.
+    expect((decoded as { message: typeof advertised }).message.features?.slice(0, 4)).toEqual(older);
+  });
+
+  it('moves neither the protocol version nor the line cap', () => {
+    expect(PROTOCOL_VERSION).toBe(1);
+    expect(MAX_LINE_BYTES).toBe(65536);
+    expect(NAVDATA_FEATURE).toBe('navdata');
+  });
+
+  it('rides one status line, well inside what the shell will read', () => {
+    const withAxis: StatusMessage = { ...plain, navdata: axis };
+    const encoded = encodeSidecarMessage(withAxis);
+    expect(encoded.endsWith('\n')).toBe(true);
+    expect(encoded.trimEnd()).not.toContain('\n');
+    expect(Buffer.byteLength(encoded, 'utf8')).toBeLessThan(MAX_LINE_BYTES / 8);
+    expect(decodeSidecarMessage(encoded.trim())).toEqual({ ok: true, message: withAxis });
+  });
+
+  it('is optional: a status without it is still a valid status', () => {
+    expect(plain.navdata).toBeUndefined();
+    const decoded = decodeSidecarMessage(encodeSidecarMessage(plain).trim());
+    expect(decoded).toEqual({ ok: true, message: plain });
+    expect(JSON.parse(encodeSidecarMessage(plain))).not.toHaveProperty('navdata');
   });
 });

@@ -32,6 +32,7 @@ import {
   encodeSidecarMessage,
   isBlankLine,
   MAX_LINE_BYTES,
+  NAVDATA_FEATURE,
   PROTOCOL_VERSION,
   SAYINTENTIONS_FEATURE,
   SIMBRIEF_FEATURE,
@@ -52,6 +53,7 @@ import { SimConnectLink, type SimLinkSnapshot } from './simconnect';
 import { Uplink } from './uplink';
 import { DatalinkClient } from './datalink-client';
 import { DatalinkService } from './datalink-service';
+import { NavdataService } from './navdata-service';
 
 const SIDECAR_VERSION = '1.0.0';
 
@@ -141,6 +143,20 @@ class Sidecar {
     log: (level, message) => this.log(level, message),
   });
 
+  // Navdata is the one axis allowed to fail: it reads the simulator's own
+  // facility database into a local cache and reports on its own axis, never on
+  // the backend one, and never starts or stops the uplink.
+  private readonly navdata = new NavdataService({
+    configPath: () => this.configPath,
+    simId: () => this.config?.sim ?? null,
+    protocols: () => ({
+      ours: SIM_PROTOCOL_NAME[this.config?.sim ?? '2020'],
+      sim: this.sim.appName,
+    }),
+    log: (level, message) => this.log(level, message),
+    onChange: () => this.touch(),
+  });
+
   private statusTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private probeTimer: NodeJS.Timeout | null = null;
@@ -163,6 +179,7 @@ class Sidecar {
   }
 
   private buildStatus(): StatusMessage {
+    const navdata = this.navdata.snapshot();
     return {
       v: PROTOCOL_VERSION as 1,
       type: 'status',
@@ -175,6 +192,9 @@ class Sidecar {
       backend: { ...this.backend },
       pause: { ...this.pause },
       traffic: { ...this.traffic },
+      // Omitted until there is something to say: an absent axis means this
+      // sidecar has no navdata, which is also what an older one means.
+      ...(navdata ? { navdata } : {}),
       config: this.config ? redact(this.config) : null,
     };
   }
@@ -208,7 +228,16 @@ class Sidecar {
       sidecarVersion: SIDECAR_VERSION,
       nodeVersion: process.version,
       configPath: this.configPath,
-      features: [DATALINK_FEATURE, SIMBRIEF_FEATURE, CLEARANCE_FEATURE, SAYINTENTIONS_FEATURE],
+      // What this build knows how to do, not what is running: navdata is
+      // named here so a shell can tell a navdata-capable sidecar from an older
+      // one, while whether it is actually running is the status axis's answer.
+      features: [
+        DATALINK_FEATURE,
+        SIMBRIEF_FEATURE,
+        CLEARANCE_FEATURE,
+        SAYINTENTIONS_FEATURE,
+        NAVDATA_FEATURE,
+      ],
     });
     this.send(this.datalink.buildState());
 
@@ -263,6 +292,7 @@ class Sidecar {
     this.appState = wasRunning ? 'app.running' : 'app.stopped';
     if (wasRunning) this.startUplink();
     this.datalink.onConfigApplied(true);
+    this.navdata.onConfigApplied();
     this.touch();
   }
 
@@ -291,10 +321,13 @@ class Sidecar {
           this.touch();
         },
         onTraffic: (objects) => void this.postTraffic(objects),
+        onConnected: (handle) => this.navdata.onSimConnected(handle),
+        onDisconnected: () => this.navdata.onSimDisconnected(),
       });
     }
 
     if (this.backend.state === 'net.idle') this.backend.state = 'net.pending';
+    this.navdata.start();
     this.link.start();
     this.startProbe();
     this.touch();
@@ -305,6 +338,7 @@ class Sidecar {
     this.running = false;
     this.runGeneration++;
     if (this.link) this.link.stop();
+    this.navdata.stop();
     this.stopProbe();
     // Best effort: the server should hear about this before we go quiet.
     const disconnected = wasRunning && this.uplink
@@ -504,6 +538,7 @@ class Sidecar {
 
     const disconnected = this.stopUplink();
     this.datalink.shutdown();
+    this.navdata.shutdown();
     if (this.statusTimer) clearTimeout(this.statusTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.statusTimer = null;

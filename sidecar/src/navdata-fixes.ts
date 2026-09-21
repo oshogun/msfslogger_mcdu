@@ -17,6 +17,16 @@
 // fix on no airway is a real answer (most fixes are), and a short set of routes
 // stored as 'fetched' would never be asked for again.
 //
+// A REGION IN THE REQUEST DOES NOT SELECT THE ANSWER. Measured: asked for a
+// VOR ident with its region, the waypoint database answered with a same-ident
+// station in another region, thousands of kilometres away. So when the request
+// named a region, the answer is used only if it names the same ident in the
+// same region; otherwise it is another station, nothing is stored, and the want
+// is reported as mismatched — the same question gets the same wrong answer every
+// time. A request without a region has no region to compare with, so its answer
+// is stored under the region it gives — but only if it names the ident asked
+// for, or names none.
+//
 // AN AMBIGUOUS IDENT IS AN ANSWER, NOT A FAILURE. With no region, an ident
 // several fixes share comes back as a minimal list of candidates and then
 // nothing else; the request is over. Each candidate's position is stored, and
@@ -270,6 +280,8 @@ export type FixRoutesStatus =
   | 'fetched'
   /** No region, several fixes: their positions are written, no routes. */
   | 'ambiguous'
+  /** The request named a region and the answer was another station: nothing is written. */
+  | 'mismatched'
   /** The simulator refused at once with exception 1: `nav_absent` kind 'W'. */
   | 'absent'
   /** Any other refusal, a timeout, or a partial answer twice. Nothing is claimed. */
@@ -437,11 +449,18 @@ export async function fetchFixRoutes(
 
   // Completed. Anything still wrong is ours.
   const at = now();
-  const rows = decoder.undecoded > 0 ? null : decoder.rows(ident, at);
+  // With a region to compare against, an answer that does not name itself is
+  // not taken to be the fix asked for; without one, the request's ident stands.
+  const rows = decoder.undecoded > 0 ? null : decoder.rows(region === null ? ident : '', at);
   if (rows === null) {
     const reason = `the ${label} fix record(s) did not match the definition this build sent`;
     log('warn', `navdata: ${reason} — nothing was stored for it`);
     return { ...base, status: 'undecodable', reason };
+  }
+  if (rows.waypoint.ident !== ident || (region !== null && rows.waypoint.region !== region)) {
+    const reason = `the answer for ${label} was another station`;
+    log('info', `navdata: ${reason}; nothing was stored for it`);
+    return { ...base, status: 'mismatched', reason };
   }
   if (rows.routeRecords !== rows.declaredRoutes) {
     const reason =

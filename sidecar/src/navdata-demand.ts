@@ -1,8 +1,9 @@
 // ── Navdata demand: the airports and fixes the server wants in detail ────────
 //
 // The server lists what it would draw and does not yet hold — airports named by
-// a filed plan, the one a user asked for with "Fetch detail", and the fixes a
-// route's airways run through — and this module collects that list, fetches
+// a filed plan, the one a user asked for with "Fetch detail", the fixes a
+// route's airways run through, and the plan's VORs and NDBs — and this module
+// collects that list, fetches
 // each item in turn and lets the incremental sync carry the result back.
 // Nothing here talks to the server about what it did: rows go back as rows, and
 // something the simulator does not have goes back as a `nav_absent` row in the
@@ -18,7 +19,7 @@
 // again at once when the last page added work; otherwise it is polled again
 // when the queue has drained, and after that at the normal interval.
 //
-// ONE ITEM AT A TIME, AIRPORTS FIRST. A large airport's whole procedure tree is
+// ONE ITEM AT A TIME: AIRPORTS, THEN FIXES, THEN NAVAIDS. A large airport's whole procedure tree is
 // written in one transaction on the thread that also runs the 1 Hz frame loop,
 // so the queue never has more than one fetch out and yields a turn between
 // items. Fixes are cheap — a few dozen in well under two seconds, one after the
@@ -56,6 +57,17 @@ import {
   type FixRoutesOptions,
   type FixRoutesResult,
 } from './navdata-fixes';
+import {
+  fetchNavaid,
+  NDB_DEFINITION,
+  ndbDetailSpec,
+  navaidDefinitionUsable,
+  VOR_DEFINITION,
+  vorDetailSpec,
+  type NavaidKind,
+  type NavaidOptions,
+  type NavaidResult,
+} from './navdata-navaids';
 import type { NavdataStore } from './navdata-store';
 import {
   busyWaitMs,
@@ -72,8 +84,9 @@ export const NAVDATA_DEMAND_POLL_MS = 60_000;
 export const NAVDATA_DEMAND_BACKOFF_MAX_MS = 600_000;
 /**
  * The most items of ONE kind the queue holds, and the size under which a
- * truncated list is read again at once. Airports and fixes each have their own
- * allowance, so fixes that cannot be fetched never keep an airport out.
+ * truncated list is read again at once. Airports, fixes and navaids each have
+ * their own allowance, so one kind that cannot be fetched never keeps another
+ * out.
  */
 export const DEMAND_QUEUE_HIGH_WATER = 200;
 /** Consecutive attempts that fail in this build's own code before an airport is set aside. */
@@ -219,6 +232,16 @@ export type FetchFix = (
   options?: FixRoutesOptions,
 ) => Promise<FixRoutesResult>;
 
+export type FetchNavaid = (
+  session: FacilitySession,
+  store: NavdataStore | null,
+  definition: FacilityDefinition,
+  kind: NavaidKind,
+  ident: string,
+  region: string | null,
+  options?: NavaidOptions,
+) => Promise<NavaidResult>;
+
 export interface NavdataDemandDeps {
   /** The uplink, or null while there is no valid config. */
   transport(): NavdataTransport | null;
@@ -237,6 +260,7 @@ export interface NavdataDemandDeps {
   client?: NavdataDemandRequester;
   fetchDetail?: FetchDetail;
   fetchFix?: FetchFix;
+  fetchNavaid?: FetchNavaid;
 }
 
 /** What the service needs from the queue, so a test can stand in for it. */
@@ -247,32 +271,47 @@ export interface NavdataDemandLike {
   onConfigApplied(): void;
   /** A session may have become usable: fetch whatever is queued. */
   wake(): void;
-  /** Airports queued or being fetched. Fixes are not counted. */
+  /** Airports queued or being fetched. Fixes and navaids are not counted. */
   pending(): number;
   /** One line worth showing while nothing is wrong, or null. */
   note(): string | null;
 }
 
-/** One thing the server asked for. A fix's region is null when the server did not know it. */
-type DemandItem = { readonly kind: 'A'; readonly ident: string } | { readonly kind: 'W'; readonly ident: string; readonly region: string | null };
+/**
+ * One thing the server asked for: an airport, a fix ('W'), a VOR ('V') or an
+ * NDB ('N'). A point's region is null when the server did not know it.
+ */
+type DemandItem =
+  | { readonly kind: 'A'; readonly ident: string }
+  | { readonly kind: 'W' | NavaidKind; readonly ident: string; readonly region: string | null };
+
+/** The queues: airports, then fixes, then navaids, each bounded on its own. */
+type Lane = 'A' | 'W' | 'NAV';
+
+function laneOf(item: DemandItem): Lane {
+  return item.kind === 'A' || item.kind === 'W' ? item.kind : 'NAV';
+}
 
 /**
- * The queue's key for an item. A fix asked for without a region is its own
+ * The queue's key for an item. A point asked for without a region is its own
  * item, distinct from the same ident in any region: what comes back for it may
- * be a different fix, or several.
+ * be a different facility, or several.
  */
 function itemKey(item: DemandItem): string {
-  return item.kind === 'A' ? `A:${item.ident}` : `W:${item.ident}|${item.region ?? ''}`;
+  return item.kind === 'A' ? `A:${item.ident}` : `${item.kind}:${item.ident}|${item.region ?? ''}`;
 }
 
 function itemLabel(item: DemandItem): string {
-  return item.kind === 'W' && item.region !== null ? `${item.ident}/${item.region}` : item.ident;
+  const noun = item.kind === 'V' ? 'VOR ' : item.kind === 'N' ? 'NDB ' : '';
+  return item.kind !== 'A' && item.region !== null ? `${noun}${item.ident}/${item.region}` : `${noun}${item.ident}`;
 }
 
-/** The two prepared definitions of one session; either may be missing. */
+/** The prepared definitions of one session; any may be missing. */
 interface SessionDefinitions {
   readonly airport: FacilityDefinition | null;
   readonly fix: FacilityDefinition | null;
+  readonly vor: FacilityDefinition | null;
+  readonly ndb: FacilityDefinition | null;
 }
 
 export class NavdataDemand implements NavdataDemandLike {
@@ -281,6 +320,7 @@ export class NavdataDemand implements NavdataDemandLike {
   private readonly client: NavdataDemandRequester;
   private readonly fetchDetail: FetchDetail;
   private readonly fetchFix: FetchFix;
+  private readonly fetchNavaid: FetchNavaid;
 
   private running = false;
   private shuttingDown = false;
@@ -305,6 +345,7 @@ export class NavdataDemand implements NavdataDemandLike {
   /** Airports go first: they are what a map draws at both ends of a route. */
   private readonly airports: DemandItem[] = [];
   private readonly fixes: DemandItem[] = [];
+  private readonly navaids: DemandItem[] = [];
   private readonly queued = new Set<string>();
   private inFlight: DemandItem | null = null;
   private pumping = false;
@@ -312,6 +353,14 @@ export class NavdataDemand implements NavdataDemandLike {
   /** Consecutive attempts per item that failed in this build's own code. */
   private readonly faults = new Map<string, number>();
   private readonly parked = new Map<string, DemandItem>();
+  /**
+   * Parked items the server is NOT told about. A fix answered by another
+   * station is one: its ident is very likely a VOR's, and `skipWaypoints` names
+   * idents alone for fixes, VORs and NDBs together, so skipping it would hide
+   * the VOR the plan also wants. It is dropped here instead, when the server
+   * lists it again, for the cost of one lookup and one slot on the page.
+   */
+  private readonly parkedLocally = new Set<string>();
   /** The session and store the counts above were earned on. */
   private faultSession: FacilitySession | null = null;
   private faultStore: NavdataStore | null = null;
@@ -323,22 +372,6 @@ export class NavdataDemand implements NavdataDemandLike {
   private readonly collidedAirports = new Set<string>();
   /** Whether the last poll had to cut a skip list short, so that is said once. */
   private readonly skipTruncated = { A: false, W: false };
-  /**
-   * VOR and NDB idents the server named. This build cannot fetch a navaid, so
-   * they are not queued; they are asked to be skipped instead, so that they do
-   * not fill the server's cap ahead of fixes it can fetch. Not a fault, so a new
-   * session leaves them alone.
-   *
-   * THE SERVER DROPS A SKIPPED IDENT BEFORE IT ANSWERS, so a list read with
-   * these skipped can never show which of them are still wanted. A timed poll
-   * therefore reads the list WITHOUT them and rebuilds the set from what it
-   * sees; the immediate re-reads of the same cycle send them and add any new
-   * ones the next page reveals. An ident the plan no longer names is gone at the
-   * next timed poll.
-   */
-  private readonly navaidSkips = new Set<string>();
-  /** The navaid count last logged, so a steady count is said once. */
-  private navaidsLogged = 0;
 
   constructor(deps: NavdataDemandDeps) {
     this.deps = deps;
@@ -352,6 +385,7 @@ export class NavdataDemand implements NavdataDemandLike {
     this.client = deps.client ?? new NavdataSyncClient(() => deps.transport());
     this.fetchDetail = deps.fetchDetail ?? fetchAirportDetail;
     this.fetchFix = deps.fetchFix ?? fetchFixRoutes;
+    this.fetchNavaid = deps.fetchNavaid ?? fetchNavaid;
   }
 
   /**
@@ -365,13 +399,16 @@ export class NavdataDemand implements NavdataDemandLike {
 
   /** Everything queued or in flight. */
   private size(): number {
-    return this.airports.length + this.fixes.length + (this.inFlight === null ? 0 : 1);
+    return this.airports.length + this.fixes.length + this.navaids.length + (this.inFlight === null ? 0 : 1);
   }
 
-  /** Queued or in flight of one kind: each kind is bounded on its own. */
-  private sizeOf(kind: 'A' | 'W'): number {
-    const queue = kind === 'A' ? this.airports : this.fixes;
-    return queue.length + (this.inFlight?.kind === kind ? 1 : 0);
+  private queueOf(lane: Lane): DemandItem[] {
+    return lane === 'A' ? this.airports : lane === 'W' ? this.fixes : this.navaids;
+  }
+
+  /** Queued or in flight in one lane: each is bounded on its own. */
+  private sizeOf(lane: Lane): number {
+    return this.queueOf(lane).length + (this.inFlight !== null && laneOf(this.inFlight) === lane ? 1 : 0);
   }
 
   note(): string | null {
@@ -446,7 +483,7 @@ export class NavdataDemand implements NavdataDemandLike {
     if (!repoll) this.unansweredThisCycle.clear();
     let delay = NAVDATA_DEMAND_POLL_MS;
     try {
-      delay = await this.poll(repoll);
+      delay = await this.poll();
     } catch (err) {
       delay = this.fail(`the demand poll failed (${describe(err)})`);
     } finally {
@@ -456,15 +493,15 @@ export class NavdataDemand implements NavdataDemandLike {
     this.schedule(delay, delay === 0);
   }
 
-  private async poll(repoll: boolean): Promise<number> {
+  private async poll(): Promise<number> {
     // Only while there is a server to ask and a store to hold the answer.
     if (this.serverUrl() === null || this.deps.store() === null) return NAVDATA_DEMAND_POLL_MS;
 
     // A new connection forgives what was parked on the last one, and that has
     // to happen before the skip lists are built, not after the answer arrives.
     this.noticeContext();
-    const skipAirports = this.skipList('A', false);
-    const skipWaypoints = this.skipList('W', repoll);
+    const skipAirports = this.skipList('A');
+    const skipWaypoints = this.skipList('W');
     const skip: DemandSkip = {
       ...(skipAirports.length > 0 ? { airports: skipAirports } : {}),
       ...(skipWaypoints.length > 0 ? { waypoints: skipWaypoints } : {}),
@@ -515,27 +552,24 @@ export class NavdataDemand implements NavdataDemandLike {
       waypoints = waypoints.slice(0, demand.cap);
     }
 
-    const fixes = waypoints.filter((w) => (w.kind ?? 'W') === 'W');
-    const navaids = waypoints.filter((w) => w.kind === 'V' || w.kind === 'N');
-    if (!repoll) this.navaidSkips.clear();
-    const sent = new Set(skipWaypoints);
-    let learned = 0;
-    for (const navaid of navaids) {
-      if (this.navaidSkips.has(navaid.ident)) continue;
-      this.navaidSkips.add(navaid.ident);
-      if (!sent.has(navaid.ident)) learned++;
-    }
-
     const addedAirports = this.enqueue(airports.map((ident): DemandItem => ({ kind: 'A', ident })));
+    // A point the server gives no kind is a fix: that is what an older server meant.
     const addedFixes = this.enqueue(
-      fixes.map((w): DemandItem => ({ kind: 'W', ident: w.ident, region: w.region ?? null })),
+      waypoints
+        .filter((w) => (w.kind ?? 'W') === 'W')
+        .map((w): DemandItem => ({ kind: 'W', ident: w.ident, region: w.region ?? null })),
     );
-    const added = addedAirports + addedFixes;
+    const addedNavaids = this.enqueue(
+      waypoints
+        .filter((w) => w.kind === 'V' || w.kind === 'N')
+        .map((w): DemandItem => ({ kind: w.kind as NavaidKind, ident: w.ident, region: w.region ?? null })),
+    );
+    const added = addedAirports + addedFixes + addedNavaids;
     if (added > 0) {
       this.log(
         'info',
-        `navdata: the server wants ${addedAirports} more airport(s) in detail and ${addedFixes} more fix(es) ` +
-          `with their airways (${this.pending()} airport(s) pending, cap ${demand.cap})`,
+        `navdata: the server wants ${addedAirports} more airport(s) in detail, ${addedFixes} more fix(es) ` +
+          `with their airways and ${addedNavaids} more VOR/NDB(s) (${this.pending()} airport(s) pending, cap ${demand.cap})`,
       );
       this.deps.onChange();
       this.wake();
@@ -543,32 +577,19 @@ export class NavdataDemand implements NavdataDemandLike {
 
     if (!demand.more) {
       this.moreWaiting = false;
-      this.noteNavaids();
       return NAVDATA_DEMAND_POLL_MS;
     }
     // The server truncated. Asking again at once only helps when this page
-    // brought something new: new work, or navaids that can now be skipped to
-    // make room. An unchanged page means the rest of the list is behind work
-    // this side has queued and the server has not yet heard about.
-    const room = this.sizeOf('A') < DEMAND_QUEUE_HIGH_WATER && this.sizeOf('W') < DEMAND_QUEUE_HIGH_WATER;
-    if ((added > 0 || learned > 0) && room) return 0;
+    // brought something new: an unchanged page means the rest of the list is
+    // behind work this side has queued and the server has not yet heard about.
+    const room = (['A', 'W', 'NAV'] as const).every((lane) => this.sizeOf(lane) < DEMAND_QUEUE_HIGH_WATER);
+    if (added > 0 && room) return 0;
     this.moreWaiting = true;
     if (this.size() === 0) {
       // Nothing is queued, so there is no drain to wait for.
       this.moreWaiting = false;
     }
     return NAVDATA_DEMAND_POLL_MS;
-  }
-
-  /** Said when the list is complete for this cycle, and only when the count changed. */
-  private noteNavaids(): void {
-    if (this.navaidSkips.size === this.navaidsLogged) return;
-    this.navaidsLogged = this.navaidSkips.size;
-    this.log(
-      'info',
-      `navdata: the server wants ${this.navaidsLogged} VOR/NDB point(s); this build does not fetch navaids ` +
-        'and asks the server to skip them',
-    );
   }
 
   private fail(reason: string): number {
@@ -591,35 +612,34 @@ export class NavdataDemand implements NavdataDemandLike {
   }
 
   /**
-   * The idents of one kind for the server to leave out of its answer: the
-   * parked ones and, for fixes on a re-read, the navaids this build cannot
-   * fetch. Without this a stateless server that sorts them first hands back the
-   * same full page for ever and whatever is behind them is never reached.
-   * Sorted, so a list cut at the limit is the same list every time. A point is
-   * named by its ident alone, which is all the parameter carries.
-   *
-   * Whether the list is cut is judged on everything that could be in it, sent
-   * this time or not, so the warning does not come and go between a timed poll
-   * and the re-reads that follow it.
+   * The parked idents the server should leave out of its answer: airports in
+   * `skipAirports`, and fixes, VORs and NDBs together in `skipWaypoints`, which
+   * is where the server lists all three. Without this a stateless server that
+   * sorts them first hands back the same full page for ever and whatever is
+   * behind them is never reached. Sorted, so a list cut at the limit is the
+   * same list every time. A point is named by its ident alone, which is all
+   * the parameter carries.
    */
-  private skipList(kind: 'A' | 'W', navaids: boolean): string[] {
-    const parked = new Set<string>();
-    for (const item of this.parked.values()) if (item.kind === kind) parked.add(item.ident);
-    const everything = kind === 'W' ? new Set([...parked, ...this.navaidSkips]) : parked;
-    const sent = [...(navaids ? everything : parked)].sort();
-    if (everything.size <= DEMAND_SKIP_MAX) {
-      this.skipTruncated[kind] = false;
-      return sent;
+  private skipList(param: 'A' | 'W'): string[] {
+    const idents = new Set<string>();
+    for (const [key, item] of this.parked) {
+      if (this.parkedLocally.has(key)) continue;
+      if ((item.kind === 'A') === (param === 'A')) idents.add(item.ident);
     }
-    if (!this.skipTruncated[kind]) {
-      this.skipTruncated[kind] = true;
+    const parked = [...idents].sort();
+    if (parked.length <= DEMAND_SKIP_MAX) {
+      this.skipTruncated[param] = false;
+      return parked;
+    }
+    if (!this.skipTruncated[param]) {
+      this.skipTruncated[param] = true;
       this.log(
         'warn',
-        `navdata: ${everything.size} ${kind === 'A' ? 'airports are set aside' : 'fixes are set aside or skipped as navaids'}; ` +
+        `navdata: ${parked.length} ${param === 'A' ? 'airports' : 'fixes and navaids'} are set aside; ` +
           `the server is told about the first ${DEMAND_SKIP_MAX}`,
       );
     }
-    return sent.slice(0, DEMAND_SKIP_MAX);
+    return parked.slice(0, DEMAND_SKIP_MAX);
   }
 
   /** Adds what is new and returns how many that was. */
@@ -633,12 +653,12 @@ export class NavdataDemand implements NavdataDemandLike {
       if (this.queued.has(key) || this.parked.has(key) || this.unansweredThisCycle.has(key)) continue;
       if (this.inFlight !== null && itemKey(this.inFlight) === key) continue;
       if (store !== null && this.held(store, item)) continue;
-      if (this.sizeOf(item.kind) >= DEMAND_QUEUE_HIGH_WATER) {
+      if (this.sizeOf(laneOf(item)) >= DEMAND_QUEUE_HIGH_WATER) {
         // Not lost: the server names it again on a later poll.
         overflow++;
         continue;
       }
-      (item.kind === 'A' ? this.airports : this.fixes).push(item);
+      this.queueOf(laneOf(item)).push(item);
       this.queued.add(key);
       added++;
     }
@@ -664,6 +684,13 @@ export class NavdataDemand implements NavdataDemandLike {
         if (store.row('nav_airport', { ident: item.ident })?.detail_state === 'detail') return true;
         return store.row('nav_absent', { kind: 'A', ident: item.ident, region: '' }) !== null;
       }
+      if (item.kind !== 'W') {
+        // A VOR or NDB is answered by its detail or its absence, in the region
+        // asked for, or in any region when none was given.
+        const navaids = store.navaids(item.kind, item.ident, item.region);
+        if (navaids.some((row) => row.detail_state === 'detail' || row.detail_state === 'absent')) return true;
+        return store.row('nav_absent', { kind: item.kind, ident: item.ident, region: item.region ?? '' }) !== null;
+      }
       const fixes = store.waypoints(item.ident, item.region);
       if (fixes.some((row) => row.routes_state === 'fetched' || row.routes_state === 'absent')) return true;
       return store.row('nav_absent', { kind: 'W', ident: item.ident, region: item.region ?? '' }) !== null;
@@ -676,13 +703,23 @@ export class NavdataDemand implements NavdataDemandLike {
   // ── fetching ────────────────────────────────────────────────────────────────
 
   private next(): DemandItem | null {
-    return this.airports[0] ?? this.fixes[0] ?? null;
+    return this.airports[0] ?? this.fixes[0] ?? this.navaids[0] ?? null;
   }
 
-  private take(): DemandItem {
-    const item = (this.airports.length > 0 ? this.airports : this.fixes).shift() as DemandItem;
-    this.queued.delete(itemKey(item));
-    return item;
+  /**
+   * The first item, in lane order, whose definition this session has. An item
+   * whose kind cannot be fetched on this session is passed over, not taken: it
+   * stays queued and counts against its lane, but nothing behind it waits on it.
+   */
+  private takeRunnable(definitions: SessionDefinitions): { item: DemandItem; definition: FacilityDefinition } | null {
+    for (const queue of [this.airports, this.fixes, this.navaids]) {
+      const index = queue.findIndex((candidate) => definitionOf(definitions, candidate.kind) !== null);
+      if (index === -1) continue;
+      const [item] = queue.splice(index, 1);
+      this.queued.delete(itemKey(item));
+      return { item, definition: definitionOf(definitions, item.kind) as FacilityDefinition };
+    }
+    return null;
   }
 
   private async pump(): Promise<void> {
@@ -701,15 +738,11 @@ export class NavdataDemand implements NavdataDemandLike {
           await yieldTurn();
           continue;
         }
-        const upcoming = this.next();
-        if (upcoming === null) break;
-        const definition = upcoming.kind === 'A' ? definitions.airport : definitions.fix;
-        // Without its definition nothing of this kind can be fetched on this
-        // session. Airports go first, so a missing fix definition holds up
-        // nothing but fixes.
-        if (definition === null) break;
-
-        const item = this.take();
+        // Nothing whose definition is missing is fetched on this session, and
+        // nothing else waits for it.
+        const runnable = this.takeRunnable(definitions);
+        if (runnable === null) break;
+        const { item, definition } = runnable;
         if (this.held(store, item)) {
           this.deps.onChange();
           continue;
@@ -722,8 +755,14 @@ export class NavdataDemand implements NavdataDemandLike {
           if (item.kind === 'A') {
             const result = await this.fetchDetail(session, store, definition, item.ident, { log: this.log });
             outcome = { status: result.status, reason: result.reason, collisions: result.collisions };
-          } else {
+          } else if (item.kind === 'W') {
             const result = await this.fetchFix(session, store, definition, item.ident, item.region, { log: this.log });
+            outcome = { status: result.status, reason: result.reason, collisions: 0 };
+          } else {
+            const result = await this.fetchNavaid(session, store, definition, item.kind, item.ident, item.region, {
+              log: this.log,
+              waypointDefinition: definitions.fix,
+            });
             outcome = { status: result.status, reason: result.reason, collisions: 0 };
           }
         } catch (err) {
@@ -751,6 +790,9 @@ export class NavdataDemand implements NavdataDemandLike {
     const key = itemKey(item);
     switch (outcome.status) {
       case 'detail':
+        // An airport's detail, or a navaid's. A navaid's detail is its answer
+        // with or without a station position: a VOR's may only arrive later,
+        // from a list.
         this.faults.delete(key);
         if (outcome.collisions > 0) {
           this.collisions += outcome.collisions;
@@ -788,6 +830,12 @@ export class NavdataDemand implements NavdataDemandLike {
         this.faults.delete(key);
         this.park(item, `because ${outcome.reason ?? 'it matched more than one fix'}`);
         return;
+      case 'mismatched':
+        // Deterministic too — the same question gets the same other station —
+        // but parked here only, and not named to the server: see parkedLocally.
+        this.faults.delete(key);
+        this.park(item, `because ${outcome.reason ?? 'another station answered'}`, true);
+        return;
       default:
         // undecodable or failed: nothing was stored as an answer to the
         // request. The server names it again on its next poll if it still
@@ -816,6 +864,7 @@ export class NavdataDemand implements NavdataDemandLike {
       this.log('info', `navdata: giving ${this.parked.size} parked item(s) a fresh chance on this connection`);
     }
     this.parked.clear();
+    this.parkedLocally.clear();
     this.faults.clear();
   }
 
@@ -836,15 +885,16 @@ export class NavdataDemand implements NavdataDemandLike {
     if (requeue) this.requeue(item, false);
   }
 
-  private park(item: DemandItem, why: string): void {
+  private park(item: DemandItem, why: string, locally = false): void {
     this.parked.set(itemKey(item), item);
+    if (locally) this.parkedLocally.add(itemKey(item));
     this.log('warn', `navdata: ${itemLabel(item)} is set aside ${why}; it is not fetched again on this connection`);
   }
 
   private requeue(item: DemandItem, front: boolean): void {
     const key = itemKey(item);
     if (this.queued.has(key) || this.parked.has(key)) return;
-    const queue = item.kind === 'A' ? this.airports : this.fixes;
+    const queue = this.queueOf(laneOf(item));
     if (front) queue.unshift(item);
     else queue.push(item);
     this.queued.add(key);
@@ -858,19 +908,29 @@ export class NavdataDemand implements NavdataDemandLike {
    */
   private definitionsFor(session: FacilitySession): Promise<SessionDefinitions> {
     if (this.definitions === null || this.definitions.session !== session) {
-      const ready = session.prepare([airportDetailSpec(), fixRoutesSpec()]).then(
+      const ready = session.prepare([airportDetailSpec(), fixRoutesSpec(), vorDetailSpec(), ndbDetailSpec()]).then(
         (definitions): SessionDefinitions => {
           const airport = definitions.find((d) => d.name === AIRPORT_DETAIL_DEFINITION) ?? null;
           let fix = definitions.find((d) => d.name === FIX_ROUTES_DEFINITION) ?? null;
+          let vor = definitions.find((d) => d.name === VOR_DEFINITION) ?? null;
+          let ndb = definitions.find((d) => d.name === NDB_DEFINITION) ?? null;
+          if (vor !== null && !navaidDefinitionUsable(vor, 'V')) {
+            this.log('warn', 'navdata: the simulator changed the VOR definition; VORs are not fetched on this connection');
+            vor = null;
+          }
+          if (ndb !== null && !navaidDefinitionUsable(ndb, 'N')) {
+            this.log('warn', 'navdata: the simulator changed the NDB definition; NDBs are not fetched on this connection');
+            ndb = null;
+          }
           if (fix !== null && !fixDefinitionUsable(fix)) {
             this.log('warn', 'navdata: the simulator changed the fix definition; fixes are not fetched on this connection');
             fix = null;
           }
-          return { airport, fix };
+          return { airport, fix, vor, ndb };
         },
         (err: unknown): SessionDefinitions => {
           this.log('warn', `navdata: the facility definitions could not be prepared (${describe(err)})`);
-          return { airport: null, fix: null };
+          return { airport: null, fix: null, vor: null, ndb: null };
         },
       );
       this.definitions = { session, ready };
@@ -879,9 +939,22 @@ export class NavdataDemand implements NavdataDemandLike {
   }
 }
 
+function definitionOf(definitions: SessionDefinitions, kind: DemandItem['kind']): FacilityDefinition | null {
+  switch (kind) {
+    case 'A':
+      return definitions.airport;
+    case 'W':
+      return definitions.fix;
+    case 'V':
+      return definitions.vor;
+    default:
+      return definitions.ndb;
+  }
+}
+
 /** What one fetch came to, whichever kind it was. */
 interface Settled {
-  readonly status: AirportDetailResult['status'] | FixRoutesResult['status'] | 'thrown';
+  readonly status: AirportDetailResult['status'] | FixRoutesResult['status'] | NavaidResult['status'] | 'thrown';
   readonly reason: string | null;
   readonly collisions: number;
 }

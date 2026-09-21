@@ -125,6 +125,8 @@ interface FixValues {
   magvarBytes?: 4 | 8;
   /** The width ICAO is written at; the measured layout has 8. */
   icaoBytes?: number;
+  /** The waypoint TYPE; a VOR in the waypoint database is 3. */
+  type?: number;
 }
 
 /** LATITUDE LONGITUDE ALTITUDE f64, TYPE N_ROUTES i32, ICAO REGION s8, IS_TERMINAL_WPT i32, MAGVAR f32: 56 bytes as measured. */
@@ -133,7 +135,7 @@ function fixRecord(v: FixValues): Buffer {
     f64(v.lat),
     f64(v.lon),
     f64(v.alt ?? 250),
-    i32(1),
+    i32(v.type ?? 1),
     i32(v.nRoutes),
     text(v.ident, v.icaoBytes ?? 8),
     text(v.region, 8),
@@ -516,5 +518,80 @@ describe('a fix left pending by an earlier process', () => {
     );
     expect(store.resetPendingDetail()).toBe(1);
     expect(store.row('nav_waypoint', { wpt_key: key })?.routes_state).toBe('unknown');
+  });
+});
+
+describe('a fix asked for with a region, answered by another station', () => {
+  // Measured: a waypoint request does not select by region. Asked for one VOR
+  // ident in its region, the simulator answered with a same-ident station in
+  // another region.
+  it.each([
+    ['another region', 'ZZFXA', 'ZY'],
+    ['another ident', 'ZZFXQ', 'ZZ'],
+    ['no ident at all', '', 'ZZ'],
+  ])('stores nothing when the answer names %s', async (_label, answeredIdent, answeredRegion) => {
+    const store = freshStore();
+    const handle = new FakeFacilityConnection();
+    const { session, definition } = await preparedSession(handle);
+    const pending = fetchFixRoutes(session, store, definition, 'ZZFXA', 'ZZ', { log });
+    emitFix(
+      handle,
+      await sentRequestId(handle),
+      fixRecord({ ...SELF, ident: answeredIdent, region: answeredRegion, lat: -44.25, lon: -69.75 }),
+      [routeRecord('ZZJ1', 2, NEXT_C, PREV_B), routeRecord('ZZK2', 3, NEXT_D, NO_END)],
+    );
+    const result = await pending;
+    expect(result.status).toBe('mismatched');
+    expect(store.count('nav_waypoint')).toBe(0);
+    expect(store.count('nav_airway_leg')).toBe(0);
+    const said = logged.filter((line) => line.includes('was another station'));
+    expect(said).toEqual(['info navdata: the answer for ZZFXA/ZZ was another station; nothing was stored for it']);
+  });
+
+  it('stores a matching answer that is a VOR in the waypoint database as a fix, with its airways', async () => {
+    const store = freshStore();
+    const handle = new FakeFacilityConnection();
+    const { session, definition } = await preparedSession(handle);
+    const pending = fetchFixRoutes(session, store, definition, 'ZZFXA', 'ZZ', { log });
+    emitFix(handle, await sentRequestId(handle), fixRecord({ ...SELF, type: 3 }), [
+      routeRecord('ZZJ1', 2, NEXT_C, PREV_B),
+      routeRecord('ZZK2', 3, NEXT_D, NO_END),
+    ]);
+    const result = await pending;
+    expect(result).toMatchObject({ status: 'fetched', legs: 3 });
+    expect(store.row('nav_waypoint', { wpt_key: wptKey('ZZFXA', 'ZZ', 12.5, 34.25) })).toMatchObject({ wpt_type: 3, routes_state: 'fetched' });
+    expect(store.count('nav_airway_leg')).toBe(3);
+  });
+
+  it('keeps a region-less request as it was: the answer is the station, under the region it gives', async () => {
+    const store = freshStore();
+    const handle = new FakeFacilityConnection();
+    const { session, definition } = await preparedSession(handle);
+    const named = fetchFixRoutes(session, store, definition, 'ZZFXF', null, { log });
+    emitFix(handle, await sentRequestId(handle), fixRecord({ ident: 'ZZFXF', region: 'ZY', lat: 3.5, lon: 4.5, nRoutes: 0 }), []);
+    expect(await named).toMatchObject({ status: 'fetched' });
+    expect(store.waypoints('ZZFXF', 'ZY')).toHaveLength(1);
+
+    // An answer that does not name itself is still taken as the ident asked for.
+    const nameless = fetchFixRoutes(session, store, definition, 'ZZFXG', null, { log });
+    emitFix(handle, await sentRequestId(handle), fixRecord({ ident: '', region: 'ZY', lat: 5.5, lon: 6.5, nRoutes: 0 }), []);
+    expect(await nameless).toMatchObject({ status: 'fetched' });
+    expect(store.waypoints('ZZFXG', 'ZY')).toHaveLength(1);
+
+    expect(logged.some((line) => line.includes('was another station'))).toBe(false);
+  });
+
+  it('refuses a region-less answer that names another ident, and stores nothing', async () => {
+    const store = freshStore();
+    const handle = new FakeFacilityConnection();
+    const { session, definition } = await preparedSession(handle);
+    const pending = fetchFixRoutes(session, store, definition, 'ZZFXH', null, { log });
+    emitFix(handle, await sentRequestId(handle), fixRecord({ ident: 'ZZFXJ', region: 'ZY', lat: 7.5, lon: 8.5, nRoutes: 1 }), [
+      routeRecord('ZZJ1', 2, NEXT_C, NO_END),
+    ]);
+    expect((await pending).status).toBe('mismatched');
+    expect(store.count('nav_waypoint')).toBe(0);
+    expect(store.count('nav_airway_leg')).toBe(0);
+    expect(logged).toContain('info navdata: the answer for ZZFXH was another station; nothing was stored for it');
   });
 });

@@ -165,6 +165,8 @@ export interface NavdataStore {
    * is keyed by position as well, so an ident and region can name several.
    */
   waypoints(ident: string, region: string | null): NavdataRow<'nav_waypoint'>[];
+  /** The navaids of one kind stored under an ident, in one region or in any. */
+  navaids(kind: 'V' | 'N', ident: string, region: string | null): NavdataRow<'nav_navaid'>[];
   /** One transaction, one rev. Rolls back and rethrows if the body throws. */
   write<T>(fn: (tx: NavdataTx) => T): T;
   /**
@@ -663,6 +665,7 @@ function createStore(db: SqliteDatabase, dbPath: string, now: () => number): Nav
   const countStatements = new Map<NavdataTable, SqliteStatement>();
   let waypointsInRegion: SqliteStatement | null = null;
   let waypointsAnyRegion: SqliteStatement | null = null;
+  let navaidsAnyRegion: SqliteStatement | null = null;
 
   let inTransaction = false;
   let closed = false;
@@ -704,6 +707,16 @@ function createStore(db: SqliteDatabase, dbPath: string, now: () => number): Nav
       }
       waypointsInRegion ??= db.prepare('SELECT * FROM nav_waypoint WHERE ident = ? AND region = ?');
       return waypointsInRegion.all(ident, region) as NavdataRow<'nav_waypoint'>[];
+    },
+
+    navaids(kind: 'V' | 'N', ident: string, region: string | null): NavdataRow<'nav_navaid'>[] {
+      requireOpen();
+      if (region === null) {
+        navaidsAnyRegion ??= db.prepare('SELECT * FROM nav_navaid WHERE kind = ? AND ident = ?');
+        return navaidsAnyRegion.all(kind, ident) as NavdataRow<'nav_navaid'>[];
+      }
+      const row = readRow('nav_navaid', { kind, ident, region });
+      return row === null ? [] : [row as NavdataRow<'nav_navaid'>];
     },
 
     write<T>(fn: (tx: NavdataTx) => T): T {

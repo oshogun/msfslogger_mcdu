@@ -3,7 +3,9 @@
 // Three POSTs and one cursor. The snapshot resets the server's replica
 // wholesale, incremental batches carry everything written since, and a state
 // report tells the server what this sidecar's navdata is doing — including
-// that it is doing nothing at all.
+// that it is doing nothing at all. The client also carries the one GET navdata
+// makes, the demand list, so that every navdata request leaves through the
+// same door; what is done with that list lives in `navdata-demand.ts`.
 //
 // THE EPOCH BEATS THE REV. `snapshot_id` identifies one extraction; `rev` is
 // monotonic only within it, and comparing revs across epochs is undefined. So a
@@ -49,6 +51,7 @@ import type { LogSink } from './uplink';
 export const NAVDATA_SNAPSHOT_PATH = '/api/navdata/snapshot';
 export const NAVDATA_ROWS_PATH = '/api/navdata/rows';
 export const NAVDATA_STATE_PATH = '/api/navdata/state';
+export const NAVDATA_DEMAND_PATH = '/api/navdata/demand';
 
 /** The multipart field name. The server tells its uploads apart by it. */
 export const NAVDATA_SNAPSHOT_FIELD = 'navdataSnapshot';
@@ -63,6 +66,14 @@ export const NAVDATA_STATE_HEARTBEAT_MS = 300000;
 /** What a 503 costs when the server names no Retry-After. */
 export const NAVDATA_BUSY_DEFAULT_MS = 5000;
 export const NAVDATA_BUSY_MAX_MS = 300000;
+/** The least a busy server is given, whatever it says: `Retry-After: 0` is not a licence to hammer it. */
+export const NAVDATA_BUSY_MIN_MS = 1000;
+
+/** How long to leave a server that answered NAVDATA_BUSY, from its Retry-After if it sent one. */
+export function busyWaitMs(retryAfterMs: number | null): number {
+  const asked = retryAfterMs ?? NAVDATA_BUSY_DEFAULT_MS;
+  return Math.max(NAVDATA_BUSY_MIN_MS, Number.isFinite(asked) ? asked : NAVDATA_BUSY_DEFAULT_MS);
+}
 export const NAVDATA_SYNC_BACKOFF_MAX_MS = 120000;
 
 export const NAVDATA_HTTP_TIMEOUT_MS = 15000;
@@ -148,6 +159,11 @@ export interface NavdataRequester {
   postState(report: NavdataStateReport): Promise<NavdataOutcome>;
 }
 
+/** The one read: what the server wants fetched in detail. */
+export interface NavdataDemandRequester {
+  getDemand(): Promise<NavdataOutcome>;
+}
+
 /** Node nests the useful code a few `cause` levels down. */
 function stringCodeOf(err: unknown): string | null {
   let current: unknown = err;
@@ -198,10 +214,10 @@ function codeOf(body: unknown): NavdataErrorCode | null {
 }
 
 /**
- * The only navdata code that talks to the network. Three routes, no path is
+ * The only navdata code that talks to the network. Four routes, no path is
  * ever composed from a value, and every attempt resolves to an outcome.
  */
-export class NavdataSyncClient implements NavdataRequester {
+export class NavdataSyncClient implements NavdataRequester, NavdataDemandRequester {
   private readonly transport: () => NavdataTransport | null;
   private readonly timeouts: { rows: number; snapshot: number; state: number };
 
@@ -243,9 +259,13 @@ export class NavdataSyncClient implements NavdataRequester {
     return this.send(NAVDATA_STATE_PATH, JSON.stringify(report), this.timeouts.state, true);
   }
 
+  getDemand(): Promise<NavdataOutcome> {
+    return this.send(NAVDATA_DEMAND_PATH, null, this.timeouts.rows, false);
+  }
+
   private async send(
     routePath: string,
-    body: string | FormData,
+    body: string | FormData | null,
     timeoutMs: number,
     json: boolean,
   ): Promise<NavdataOutcome> {
@@ -260,10 +280,12 @@ export class NavdataSyncClient implements NavdataRequester {
     // A multipart body sets its own content type, boundary and all.
     if (json) headers['content-type'] = 'application/json';
 
+    // No body is a read. The token still travels in the header, never in a
+    // query string, where a proxy log would keep it.
     const init: Record<string, unknown> = {
-      method: 'POST',
+      method: body === null ? 'GET' : 'POST',
       headers,
-      body,
+      ...(body === null ? {} : { body }),
       // A 3xx is a fault, not a hop: the token is never sent to its target.
       redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
@@ -1005,7 +1027,7 @@ export class NavdataSync {
   ): number {
     if (outcome.kind === 'response' && outcome.code === 'NAVDATA_BUSY') {
       // Not a failure. The server is mid-swap and says when to come back.
-      const wait = outcome.retryAfterMs ?? NAVDATA_BUSY_DEFAULT_MS;
+      const wait = busyWaitMs(outcome.retryAfterMs);
       this.nextAllowedAt = this.now() + wait;
       this.log('debug', `navdata: the server is importing a snapshot; retrying in ${wait} ms`);
       return wait;

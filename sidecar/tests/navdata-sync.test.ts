@@ -30,6 +30,9 @@ import * as path from 'path';
 import { openNavdataReader, type NavdataReader } from '../src/navdata-export';
 import {
   buildBatch,
+  busyWaitMs,
+  NAVDATA_BUSY_DEFAULT_MS,
+  NAVDATA_BUSY_MIN_MS,
   NavdataSync,
   NavdataSyncClient,
   NAVDATA_BATCH_MIN_INTERVAL_MS,
@@ -700,6 +703,24 @@ describe('the navdata sync state machine', { timeout: 20000 }, () => {
     sync.shutdown();
   });
 
+  it('gives a busy server that says Retry-After: 0 a second, not a tight loop', async () => {
+    const store = openStore();
+    populate(store);
+    const client = fakeClient();
+    client.onSnapshot = () => response(503, { ok: false, code: 'NAVDATA_BUSY', message: 'importing' }, 0);
+    const sync = makeSync(store, client);
+
+    sync.start();
+    await pump();
+    expect(client.snapshots).toHaveLength(1);
+    await pump(NAVDATA_BUSY_MIN_MS - 50);
+    expect(client.snapshots).toHaveLength(1);
+    await pump(100);
+    expect(client.snapshots).toHaveLength(2);
+
+    sync.shutdown();
+  });
+
   it('halves a batch the server calls too large, and skips one it cannot halve', async () => {
     const store = openStore();
     populate(store);
@@ -962,5 +983,17 @@ describe('the navdata sync state machine', { timeout: 20000 }, () => {
     expect(sync.status().lastSyncError ?? '').not.toContain(SENTINEL_TOKEN);
     const directory = path.dirname(store.path);
     for (const entry of fs.readdirSync(directory)) expect(entry).not.toContain(SENTINEL_TOKEN);
+  });
+});
+
+describe('busyWaitMs', () => {
+  it('takes the Retry-After, never below a second, and a default when there is none', () => {
+    expect(busyWaitMs(0)).toBe(NAVDATA_BUSY_MIN_MS);
+    expect(busyWaitMs(250)).toBe(NAVDATA_BUSY_MIN_MS);
+    expect(busyWaitMs(NAVDATA_BUSY_MIN_MS)).toBe(NAVDATA_BUSY_MIN_MS);
+    expect(busyWaitMs(7000)).toBe(7000);
+    expect(busyWaitMs(null)).toBe(NAVDATA_BUSY_DEFAULT_MS);
+    expect(busyWaitMs(Number.NaN)).toBe(NAVDATA_BUSY_DEFAULT_MS);
+    expect(busyWaitMs(-5)).toBe(NAVDATA_BUSY_MIN_MS);
   });
 });

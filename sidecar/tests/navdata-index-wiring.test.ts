@@ -27,7 +27,12 @@ import type { SimConnectConnection } from 'node-simconnect';
 import type { SimConnectCallbacks, SimLinkSnapshot } from '../src/simconnect';
 import { openNavdataReader, type SnapshotHeaderLine } from '../src/navdata-export';
 import { navdataDatabasePath } from '../src/navdata-store';
-import { NAVDATA_SNAPSHOT_PATH, NAVDATA_STATE_PATH, type NavdataStateReport } from '../src/navdata-sync';
+import {
+  NAVDATA_DEMAND_PATH,
+  NAVDATA_SNAPSHOT_PATH,
+  NAVDATA_STATE_PATH,
+  type NavdataStateReport,
+} from '../src/navdata-sync';
 import {
   multipart,
   SENTINEL_TOKEN,
@@ -78,6 +83,10 @@ beforeEach(async () => {
       };
     },
     'GET /api/status': () => ({ status: 401, body: { error: 'unauthenticated' } }),
+    [`GET ${NAVDATA_DEMAND_PATH}`]: () => ({
+      status: 200,
+      body: { v: 1, airports: [], waypoints: [], cap: 50, more: false, generatedAt: 1 },
+    }),
   });
 
   configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'navdata-wiring-'));
@@ -164,6 +173,16 @@ describe('the sidecar hands navdata an uplink', () => {
     const request = server.requests.find((entry) => entry.path === NAVDATA_STATE_PATH);
     expect(request?.headers['x-ingest-token']).toBe(SENTINEL_TOKEN);
     expect(request?.body.toString('utf8')).not.toContain(SENTINEL_TOKEN);
+  });
+
+  it('reads the demand list from the configured server, with the token in the header only', async () => {
+    stdin.emit('data', `${JSON.stringify({ v: 1, type: 'start' })}\n`);
+    await waitFor(() => server.requests.some((entry) => entry.path === NAVDATA_DEMAND_PATH));
+
+    const request = server.requests.find((entry) => entry.path === NAVDATA_DEMAND_PATH);
+    expect(request?.method).toBe('GET');
+    expect(request?.headers['x-ingest-token']).toBe(SENTINEL_TOKEN);
+    expect(request?.body.length).toBe(0);
   });
 
   it('sends a snapshot whose header names this build, not "unknown"', async () => {

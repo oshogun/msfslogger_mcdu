@@ -1,9 +1,10 @@
 // ── Navdata service ───────────────────────────────────────────────────────────
 //
 // Owns the navdata store's lifetime and the facility session that rides one
-// SimConnect connection, and reports both on the status axis. Today it runs one
-// thing — the bulk airport index, once per connection episode — and everything
-// else the store is built for hangs off the same lifecycle later.
+// SimConnect connection, and reports both on the status axis. It runs the bulk
+// airport index once per connection episode, and serves the server's demand
+// list — one airport's detail at a time — on the same session once that index
+// has finished.
 //
 // The rules that shape it:
 //
@@ -32,6 +33,7 @@ import type { SimConnectConnection } from 'node-simconnect';
 
 import type { SimId } from './config';
 import { BulkAirportIndex, type BulkResult } from './navdata-bulk';
+import { NavdataDemand, type NavdataDemandDeps, type NavdataDemandLike } from './navdata-demand';
 import { asFacilityConnection, FacilitySession } from './navdata-facilities';
 import {
   NavdataSync,
@@ -81,6 +83,7 @@ export interface NavdataServiceDeps {
   createSession?: (handle: SimConnectConnection) => FacilitySession;
   bulk?: BulkAirportIndex;
   sync?: NavdataSyncLike;
+  createDemand?: (deps: NavdataDemandDeps) => NavdataDemandLike;
 }
 
 /** What the service needs from the sync client, so a test can stand in for it. */
@@ -101,6 +104,7 @@ export class NavdataService {
   private readonly createSession: (handle: SimConnectConnection) => FacilitySession;
   private readonly bulk: BulkAirportIndex;
   private readonly sync: NavdataSyncLike;
+  private readonly demand: NavdataDemandLike;
 
   private store: NavdataStore | null = null;
   private storePath: string | null = null;
@@ -141,6 +145,16 @@ export class NavdataService {
         log: this.log,
         onChange: () => this.publish(),
       });
+    const demandDeps: NavdataDemandDeps = {
+      transport: () => deps.transport?.() ?? null,
+      store: () => this.store,
+      // A bulk pass has the connection to itself: it may mint an epoch, and
+      // minting wipes the very absences a detail fetch would have recorded.
+      session: () => (this.passing ? null : this.session),
+      log: this.log,
+      onChange: () => this.publish(),
+    };
+    this.demand = deps.createDemand?.(demandDeps) ?? new NavdataDemand(demandDeps);
   }
 
   // ── what the shell sees ─────────────────────────────────────────────────────
@@ -165,6 +179,7 @@ export class NavdataService {
     // Before the publish, so the first state report carries the state the
     // store's open just settled rather than the one before it.
     this.guard('starting the navdata sync', () => this.sync.start());
+    this.guard('starting the demand poll', () => this.demand.start());
     this.publish();
   }
 
@@ -176,6 +191,7 @@ export class NavdataService {
     // Rows stop; the state report does not. A stopped uplink is exactly the
     // thing the server has no other way of hearing about.
     this.guard('stopping the navdata sync', () => this.sync.stop());
+    this.guard('stopping the demand poll', () => this.demand.stop());
     this.publish();
   }
 
@@ -211,6 +227,7 @@ export class NavdataService {
       // The sync cursor is keyed by server URL, so a config naming a different
       // server resumes against whatever that one last acknowledged.
       this.sync.onConfigApplied();
+      this.demand.onConfigApplied();
     });
     this.publish();
   }
@@ -293,6 +310,9 @@ export class NavdataService {
   shutdown(): void {
     this.running = false;
     this.handle = null;
+    // Before the session closes, so the fetch it aborts is not re-queued into
+    // a process that is on its way out.
+    this.guard('stopping the demand poll', () => this.demand.shutdown());
     this.closeSession('the sidecar is shutting down');
     this.guard('stopping the navdata sync', () => this.sync.shutdown());
     // The axis is computed while the store can still answer, so the last status
@@ -427,6 +447,9 @@ export class NavdataService {
         break;
     }
     this.publish();
+    // The session is free again; whatever the server asked for meanwhile is
+    // fetched now.
+    this.guard('resuming the demand queue', () => this.demand.wake());
   }
 
   // ── the axis ────────────────────────────────────────────────────────────────
@@ -483,19 +506,33 @@ export class NavdataService {
     const sync = this.syncStatus();
     return {
       state: this.state(sync),
-      reason: this.latched ?? sync.latched,
+      reason: this.latched ?? sync.latched ?? this.demandNote(),
       snapshotId,
       rev,
       ackedRev: sync.ackedRev,
       airports: this.count('nav_airport'),
       navaids: this.count('nav_navaid'),
       waypoints: this.count('nav_waypoint'),
-      // The demand queue does not exist yet; this stays at its empty value
-      // until it does.
-      pendingDemand: 0,
+      pendingDemand: this.pendingDemand(),
       lastSyncAt: sync.lastSyncAt,
       lastSyncError: sync.lastSyncError,
     };
+  }
+
+  private pendingDemand(): number {
+    try {
+      return this.demand.pending();
+    } catch {
+      return 0;
+    }
+  }
+
+  private demandNote(): string | null {
+    try {
+      return this.demand.note();
+    } catch {
+      return null;
+    }
   }
 
   private syncStatus(): NavdataSyncStatus {

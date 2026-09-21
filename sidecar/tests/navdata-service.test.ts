@@ -28,6 +28,7 @@ import * as path from 'path';
 
 import type { SimConnectConnection } from 'node-simconnect';
 
+import type { NavdataDemandDeps, NavdataDemandLike } from '../src/navdata-demand';
 import { FacilitySession, type FacilityConnection } from '../src/navdata-facilities';
 import { listParseIsSafe, NavdataService, type NavdataServiceDeps } from '../src/navdata-service';
 import {
@@ -643,5 +644,123 @@ describe('a log sink that throws', () => {
     const store = openNavdataStore(navdataDatabasePath(configPath), { simId: '2024' });
     opened.push(store as NavdataStore);
     expect((store as NavdataStore).count('nav_airport')).toBe(3);
+  });
+});
+
+describe('the demand queue', () => {
+  interface FakeDemand extends NavdataDemandLike {
+    calls: string[];
+    deps: NavdataDemandDeps | null;
+    count: number;
+    text: string | null;
+  }
+
+  function fakeDemand(overrides: Partial<NavdataDemandLike> = {}): FakeDemand {
+    const demand: FakeDemand = {
+      calls: [],
+      deps: null,
+      count: 0,
+      text: null,
+      start: () => demand.calls.push('start'),
+      stop: () => demand.calls.push('stop'),
+      shutdown: () => demand.calls.push('shutdown'),
+      onConfigApplied: () => demand.calls.push('onConfigApplied'),
+      wake: () => demand.calls.push('wake'),
+      pending: () => demand.count,
+      note: () => demand.text,
+      ...overrides,
+    };
+    return demand;
+  }
+
+  function withDemand(demand: FakeDemand): Pick<NavdataServiceDeps, 'createDemand'> {
+    return {
+      createDemand: (deps) => {
+        demand.deps = deps;
+        return demand;
+      },
+    };
+  }
+
+  it('is driven through the lifecycle with the uplink', () => {
+    const demand = fakeDemand();
+    const service = newService(scratchConfigPath(), withDemand(demand));
+    service.start();
+    service.onConfigApplied();
+    service.stop();
+    service.shutdown();
+    services.pop();
+    expect(demand.calls).toEqual(['start', 'onConfigApplied', 'stop', 'shutdown']);
+  });
+
+  it('shows what is pending, and the collision note while nothing is wrong', () => {
+    const demand = fakeDemand();
+    const service = newService(scratchConfigPath(), withDemand(demand));
+    service.start();
+    expect(service.snapshot()).toMatchObject({ state: 'nav.ready', pendingDemand: 0, reason: null });
+
+    demand.count = 4;
+    demand.text = '2 procedure(s) at 1 airport(s) shared a key with another and were stored apart';
+    demand.deps?.onChange();
+    expect(service.snapshot()).toMatchObject({
+      state: 'nav.ready',
+      pendingDemand: 4,
+      reason: '2 procedure(s) at 1 airport(s) shared a key with another and were stored apart',
+    });
+  });
+
+  it('lets a real failure take the reason over from the note', () => {
+    const demand = fakeDemand();
+    demand.text = 'a note';
+    const service = newService(scratchConfigPath(), {
+      ...withDemand(demand),
+      createSession: () => {
+        throw new Error('no session today');
+      },
+    });
+    service.start();
+    service.onSimConnected(new FakeFacilityConnection() as unknown as SimConnectConnection);
+    expect(service.snapshot()?.state).toBe('nav.error');
+    expect(service.snapshot()?.reason).toContain('no session today');
+  });
+
+  it('survives a queue that throws from every entry point', async () => {
+    const boom = (): never => {
+      throw new Error('queue broke');
+    };
+    const demand = fakeDemand({ start: boom, stop: boom, shutdown: boom, onConfigApplied: boom, wake: boom, pending: boom, note: boom });
+    const service = newService(scratchConfigPath(), { ...withDemand(demand), createSession: sessionFactory() });
+    expect(() => service.start()).not.toThrow();
+    expect(() => service.onConfigApplied()).not.toThrow();
+    const handle = new FakeFacilityConnection();
+    await connect(service, handle, WORLD);
+    await settled(service);
+    expect(service.snapshot()?.pendingDemand).toBe(0);
+    expect(() => service.stop()).not.toThrow();
+    expect(() => service.shutdown()).not.toThrow();
+    services.pop();
+  });
+
+  it('gets the session only once the bulk pass has let go of it, and is woken then', async () => {
+    const demand = fakeDemand();
+    const service = newService(scratchConfigPath(), { ...withDemand(demand), createSession: sessionFactory() });
+    service.start();
+    expect(demand.deps?.session()).toBeNull();
+
+    const handle = new FakeFacilityConnection();
+    service.onSimConnected(handle as unknown as SimConnectConnection);
+    // The pass has the connection to itself.
+    expect(service.snapshot()?.state).toBe('nav.bulk');
+    expect(demand.deps?.session()).toBeNull();
+    expect(demand.calls).not.toContain('wake');
+
+    await answerList(service, handle, WORLD);
+    await settled(service);
+    expect(demand.deps?.session()).toBeInstanceOf(FacilitySession);
+    expect(demand.calls).toContain('wake');
+    expect(demand.deps?.store()).not.toBeNull();
+
+    service.onSimDisconnected();
+    expect(demand.deps?.session()).toBeNull();
   });
 });

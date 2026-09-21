@@ -159,9 +159,31 @@ export interface NavdataRequester {
   postState(report: NavdataStateReport): Promise<NavdataOutcome>;
 }
 
+/**
+ * Idents the server is asked to leave out of this one answer: ones this side
+ * has stopped fetching. Validated by the caller; an empty list is not sent.
+ */
+export interface DemandSkip {
+  readonly airports?: readonly string[];
+  readonly waypoints?: readonly string[];
+}
+
 /** The one read: what the server wants fetched in detail. */
 export interface NavdataDemandRequester {
-  getDemand(): Promise<NavdataOutcome>;
+  getDemand(skip?: DemandSkip): Promise<NavdataOutcome>;
+}
+
+/**
+ * The demand route with its skip lists as a query string. Built with
+ * URLSearchParams so nothing in an ident can change the shape of the URL, and a
+ * list that is empty leaves its parameter out altogether.
+ */
+export function demandPath(skip: DemandSkip = {}): string {
+  const query = new URLSearchParams();
+  if (skip.airports && skip.airports.length > 0) query.set('skipAirports', skip.airports.join(','));
+  if (skip.waypoints && skip.waypoints.length > 0) query.set('skipWaypoints', skip.waypoints.join(','));
+  const text = query.toString();
+  return text === '' ? NAVDATA_DEMAND_PATH : `${NAVDATA_DEMAND_PATH}?${text}`;
 }
 
 /** Node nests the useful code a few `cause` levels down. */
@@ -259,8 +281,8 @@ export class NavdataSyncClient implements NavdataRequester, NavdataDemandRequest
     return this.send(NAVDATA_STATE_PATH, JSON.stringify(report), this.timeouts.state, true);
   }
 
-  getDemand(): Promise<NavdataOutcome> {
-    return this.send(NAVDATA_DEMAND_PATH, null, this.timeouts.rows, false);
+  getDemand(skip?: DemandSkip): Promise<NavdataOutcome> {
+    return this.send(demandPath(skip), null, this.timeouts.rows, false);
   }
 
   private async send(

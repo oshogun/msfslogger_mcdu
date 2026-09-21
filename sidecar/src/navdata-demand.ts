@@ -28,7 +28,9 @@
 // link went away, are counted per airport, and one that reaches the limit is
 // parked with a single log line until the next connection or store, which gives
 // it one fresh chance. An abort caused by a disconnect says nothing about the
-// airport and is not counted.
+// airport and is not counted. Every poll names the parked airports to the server
+// so it can leave them out before it applies its cap; otherwise a server that
+// sorts them first would fill every page with them.
 //
 // FIXES ARE LISTED, NOT FETCHED. The response names waypoints too; they are
 // validated and their number is logged when it changes, and nothing else is
@@ -63,6 +65,8 @@ export const NAVDATA_DEMAND_BACKOFF_MAX_MS = 600_000;
 export const DEMAND_QUEUE_HIGH_WATER = 200;
 /** Consecutive attempts that fail in this build's own code before an airport is set aside. */
 export const DEMAND_FAULT_PARK_AFTER = 3;
+/** The most parked idents one poll reports; the server refuses a longer list. */
+export const DEMAND_SKIP_MAX = 200;
 
 /** 60 s while healthy, doubling per consecutive failure, capped at 600 s. */
 export function nextDemandDelayMs(consecutiveFailures: number): number {
@@ -248,6 +252,8 @@ export class NavdataDemand implements NavdataDemandLike {
   private collisions = 0;
   private readonly collidedAirports = new Set<string>();
   private waypointsLogged = 0;
+  /** Whether the last poll had to cut its skip list short, so that is said once. */
+  private skipTruncated = false;
 
   constructor(deps: NavdataDemandDeps) {
     this.deps = deps;
@@ -346,9 +352,14 @@ export class NavdataDemand implements NavdataDemandLike {
     // Only while there is a server to ask and a store to hold the answer.
     if (this.serverUrl() === null || this.deps.store() === null) return NAVDATA_DEMAND_POLL_MS;
 
+    // A new connection forgives what was parked on the last one, and that has
+    // to happen before the skip list is built, not after the answer arrives.
+    this.noticeContext();
+    const skipAirports = this.skipList();
+
     let outcome: NavdataOutcome;
     try {
-      outcome = await this.client.getDemand();
+      outcome = await this.client.getDemand(skipAirports.length > 0 ? { airports: skipAirports } : undefined);
     } catch (err) {
       outcome = { kind: 'transport', errorName: describe(err), errorCode: null };
     }
@@ -363,7 +374,8 @@ export class NavdataDemand implements NavdataDemandLike {
       return this.fail(`the demand list could not be read (${outcome.errorCode ?? outcome.errorName ?? 'unknown'})`);
     }
     if (outcome.status < 200 || outcome.status >= 300) {
-      return this.fail(`the demand list was refused (HTTP ${outcome.status})`);
+      const code = outcome.code === null ? '' : ` ${outcome.code}`;
+      return this.fail(`the demand list was refused (HTTP ${outcome.status}${code})`);
     }
 
     const parsed = parseDemand(outcome.body);
@@ -435,6 +447,28 @@ export class NavdataDemand implements NavdataDemandLike {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The parked airports, for the server to leave out of its answer. Without
+   * this a stateless server that sorts them first hands back the same full
+   * page for ever and the airports behind them are never reached. Sorted, so
+   * a list cut at the limit is the same list every time.
+   */
+  private skipList(): string[] {
+    const parked = [...this.parked].sort();
+    if (parked.length <= DEMAND_SKIP_MAX) {
+      this.skipTruncated = false;
+      return parked;
+    }
+    if (!this.skipTruncated) {
+      this.skipTruncated = true;
+      this.log(
+        'warn',
+        `navdata: ${parked.length} airports are set aside; the server is told about the first ${DEMAND_SKIP_MAX}`,
+      );
+    }
+    return parked.slice(0, DEMAND_SKIP_MAX);
   }
 
   /** Adds what is new and returns how many that was. */

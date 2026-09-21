@@ -31,6 +31,7 @@ import {
 import {
   DEMAND_FAULT_PARK_AFTER,
   DEMAND_QUEUE_HIGH_WATER,
+  DEMAND_SKIP_MAX,
   NAVDATA_DEMAND_BACKOFF_MAX_MS,
   NAVDATA_DEMAND_POLL_MS,
   NavdataDemand,
@@ -49,6 +50,8 @@ import {
   NAVDATA_BUSY_MIN_MS,
   NAVDATA_DEMAND_PATH,
   NavdataSyncClient,
+  demandPath,
+  type DemandSkip,
   type NavdataOutcome,
   type NavdataTransport,
 } from '../src/navdata-sync';
@@ -91,9 +94,12 @@ class FakeClient {
   readonly replies: NavdataOutcome[] = [];
   fallback: NavdataOutcome = ok(body([]));
   calls = 0;
+  /** What each poll asked the server to leave out. */
+  readonly skips: (DemandSkip | undefined)[] = [];
 
-  getDemand(): Promise<NavdataOutcome> {
+  getDemand(skip?: DemandSkip): Promise<NavdataOutcome> {
     this.calls++;
+    this.skips.push(skip);
     return Promise.resolve(this.replies.shift() ?? this.fallback);
   }
 }
@@ -982,5 +988,128 @@ describe('the demand request', () => {
     expect(logged.join('\n')).not.toContain(SENTINEL_TOKEN);
     expect(logged.join('\n').toLowerCase()).not.toContain(SENTINEL_TOKEN.toLowerCase());
     expect(logged[0]).toBe('warn navdata: the demand list was refused (HTTP 500)');
+  });
+});
+
+// ── telling the server what is parked ─────────────────────────────────────────
+
+describe('the skip list', () => {
+  it('builds the query with URLSearchParams and leaves an empty list out', () => {
+    expect(demandPath()).toBe(NAVDATA_DEMAND_PATH);
+    expect(demandPath({ airports: [], waypoints: [] })).toBe(NAVDATA_DEMAND_PATH);
+    expect(demandPath({ airports: ['ZZAA', 'ZZAB'] })).toBe(`${NAVDATA_DEMAND_PATH}?skipAirports=ZZAA%2CZZAB`);
+    expect(demandPath({ waypoints: ['ZZWPA'] })).toBe(`${NAVDATA_DEMAND_PATH}?skipWaypoints=ZZWPA`);
+    // Nothing in a value can change the shape of the URL.
+    const odd = new URL(`http://127.0.0.1${demandPath({ airports: ['ZZ&x=1#'] })}`);
+    expect([...odd.searchParams.keys()]).toEqual(['skipAirports']);
+    expect(odd.searchParams.get('skipAirports')).toBe('ZZ&x=1#');
+  });
+
+  it('is not sent while nothing is parked', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.fallback = ok(body(['ZZAA']));
+    const { session } = fakeSession();
+    const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) => result(ident, 'detail'));
+    const demand = newDemand({ client, session: () => session, fetchDetail });
+    demand.start();
+    await flush();
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    expect(client.calls).toBeGreaterThanOrEqual(2);
+    expect(client.skips.every((skip) => skip === undefined)).toBe(true);
+  });
+
+  it('names the parked airports, sorted, on every poll after they are parked', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.fallback = ok(body(['ZZAD', 'ZZAC', 'ZZAB']));
+    const { session } = fakeSession();
+    const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) =>
+      result(ident, ident === 'ZZAB' ? 'detail' : 'aborted'),
+    );
+    const demand = newDemand({ client, session: () => session, fetchDetail });
+    demand.start();
+    await flush();
+    expect(client.skips).toEqual([undefined]);
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    expect(client.skips.slice(1)).toEqual([{ airports: ['ZZAC', 'ZZAD'] }, { airports: ['ZZAC', 'ZZAD'] }]);
+  });
+
+  it(`never names more than ${DEMAND_SKIP_MAX}, cuts the list the same way each time, and says so once`, async () => {
+    vi.useFakeTimers();
+    const many = Array.from({ length: DEMAND_SKIP_MAX + 50 }, (_, i) => `ZZ${String(1000 + i)}`);
+    // Handed out in reverse, so sorting is what puts them in order.
+    const client = new FakeClient();
+    client.fallback = ok(body([...many].reverse(), false, { cap: many.length }));
+    const { session } = fakeSession();
+    const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) => result(ident, 'aborted'));
+    const demand = newDemand({ client, session: () => session, fetchDetail });
+    demand.start();
+    await flush();
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await flush();
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    const [third, fourth] = client.skips.slice(2);
+    expect(third?.airports).toEqual([...many].sort().slice(0, DEMAND_SKIP_MAX));
+    expect(fourth).toEqual(third);
+    expect(logged.filter((line) => line.includes('the server is told about the first'))).toEqual([
+      `warn navdata: ${many.length} airports are set aside; the server is told about the first ${DEMAND_SKIP_MAX}`,
+    ]);
+  });
+
+  it('is dropped once a new connection forgives what was parked', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.fallback = ok(body(['ZZAA']));
+    let session: FacilitySession | null = fakeSession().session;
+    const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) => result(ident, 'aborted'));
+    const demand = newDemand({ client, session: () => session, fetchDetail });
+    demand.start();
+    await flush();
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    expect(client.skips.at(-1)).toEqual({ airports: ['ZZAA'] });
+
+    session = fakeSession().session;
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    expect(client.skips.at(-1)).toBeUndefined();
+  });
+
+  it('reaches the server as one URL-encoded parameter, with the token still only in the header', async () => {
+    const server = await startNavdataServer({});
+    servers.push(server);
+    const client = new NavdataSyncClient(() => transportFor(server.baseUrl));
+    await client.getDemand({ airports: ['ZZAB', 'ZZAC'] });
+    await client.getDemand();
+    expect(server.requests.map((request) => request.path)).toEqual([
+      `${NAVDATA_DEMAND_PATH}?skipAirports=ZZAB%2CZZAC`,
+      NAVDATA_DEMAND_PATH,
+    ]);
+    for (const request of server.requests) {
+      expect(request.path).not.toContain(SENTINEL_TOKEN);
+      expect(request.headers['x-ingest-token']).toBe(SENTINEL_TOKEN);
+    }
+  });
+
+  it('backs off on a 400 NAVDATA_BAD_BATCH like any other failure, naming the code and not the body', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.replies.push({
+      kind: 'response',
+      status: 400,
+      code: 'NAVDATA_BAD_BATCH',
+      retryAfterMs: null,
+      body: { ok: false, code: 'NAVDATA_BAD_BATCH', message: `skip list refused ${SENTINEL_TOKEN}` },
+    });
+    const demand = newDemand({ client });
+    demand.start();
+    await settle();
+    expect(client.calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(120_000 - 1);
+    expect(client.calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.calls).toBe(2);
+    expect(logged).toEqual(['warn navdata: the demand list was refused (HTTP 400 NAVDATA_BAD_BATCH)']);
   });
 });

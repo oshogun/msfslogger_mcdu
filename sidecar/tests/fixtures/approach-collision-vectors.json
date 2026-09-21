@@ -153,6 +153,25 @@
       }
     },
     {
+      "name": "ZZBF 15 — a mixed-case FAF: code units decide, not the locale",
+      "note": "B's FAF 'ZZB' sorts before A's 'ZZa' because 'B' (U+0042) is below 'a' (U+0061) as a code unit. localeCompare puts 'ZZa' first, and an implementation that used it would hand the base key to A. A arrives first and every lower-ranked field favours it, so only the first level taken as code units gets this right.",
+      "baseKey": "ZZBF|APPROACH|2-15|15|0|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": "ZZa", "nTransitions": 1, "missedLegCount": 1, "missedAltM": 450.5 },
+        { "id": "B", "fafIdent": "ZZB", "nTransitions": 7, "missedLegCount": 5, "missedAltM": 1450.5 }
+      ],
+      "first": "B",
+      "expected": {
+        "B": "ZZBF|APPROACH|2-15|15|0|0",
+        "A": "ZZBF|APPROACH|2-15|15|0|0#2"
+      },
+      "expectedReversed": {
+        "B": "ZZBF|APPROACH|2-15|15|0|0",
+        "A": "ZZBF|APPROACH|2-15|15|0|0#2"
+      }
+    },
+    {
       "name": "ZZAB 09 — an empty string is absent, exactly like null",
       "note": "C has a FAF and wins, even though its transition count is the highest. A's FAF is an empty string and B's is null: both are ABSENT, so neither outranks the other and the second discriminator separates them. If an empty string were treated as a value, '' < 'ZZF' would give A the base key — so C holding it is what proves the rule.",
       "baseKey": "ZZAB|APPROACH|2-09|9|0|0",

@@ -99,9 +99,13 @@ class FakeClient {
   /** What each poll asked the server to leave out. */
   readonly skips: (DemandSkip | undefined)[] = [];
 
+  /** When set, answers every poll from what that poll asked to skip. */
+  respond: ((skip: DemandSkip | undefined) => NavdataOutcome) | null = null;
+
   getDemand(skip?: DemandSkip): Promise<NavdataOutcome> {
     this.calls++;
     this.skips.push(skip);
+    if (this.respond !== null) return Promise.resolve(this.respond(skip));
     return Promise.resolve(this.replies.shift() ?? this.fallback);
   }
 }
@@ -220,6 +224,11 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(1);
 }
 
+/** Several flushes: for a queue that works through dozens of items, one turn apiece. */
+async function drain(times = 10): Promise<void> {
+  for (let i = 0; i < times; i++) await flush();
+}
+
 /** Lets resolved promises run without moving the fake clock at all. */
 async function settle(): Promise<void> {
   for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(0);
@@ -297,6 +306,32 @@ describe('parseDemand', () => {
     expect(parsed.droppedAirports).toBe(6);
     expect(parsed.demand.waypoints).toEqual([{ ident: 'ZZWPT', region: null }]);
     expect(parsed.droppedWaypoints).toBe(3);
+  });
+
+  it('keeps the kind of a point when it is W, V or N, treats an omitted kind as a fix, and drops any other', () => {
+    const parsed = parseDemand(
+      body([], false, {
+        waypoints: [
+          { ident: 'ZZWPA' },
+          { ident: 'ZZWPB', region: 'ZZ', kind: 'W' },
+          { ident: 'ZZVOR', kind: 'V' },
+          { ident: 'ZZNDB', region: null, kind: 'N' },
+          { ident: 'ZZWPC', kind: 'X' },
+          { ident: 'ZZWPD', kind: 'w' },
+          { ident: 'ZZWPE', kind: null },
+          { ident: 'ZZWPF', kind: 3 },
+        ],
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.demand.waypoints).toEqual([
+      { ident: 'ZZWPA' },
+      { ident: 'ZZWPB', region: 'ZZ', kind: 'W' },
+      { ident: 'ZZVOR', kind: 'V' },
+      { ident: 'ZZNDB', region: null, kind: 'N' },
+    ]);
+    expect(parsed.droppedWaypoints).toBe(4);
   });
 });
 
@@ -1490,5 +1525,213 @@ describe('an item that fails while the list is truncated', () => {
     expect(client.skips.at(-1)).toEqual({ airports: ['ZZAA'] });
     await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
     expect(tries()).toBe(3);
+  });
+});
+
+// ── VOR and NDB points on the demand list ─────────────────────────────────────
+
+describe('VOR and NDB points on the demand list', () => {
+  interface Want {
+    ident: string;
+    region?: string | null;
+    kind?: 'W' | 'V' | 'N';
+  }
+
+  /**
+   * A stateless server as the contract describes it: it drops every skipped
+   * ident, then applies the cap, and says whether it cut the list.
+   */
+  function serve(wanted: () => Want[], cap: number): (skip: DemandSkip | undefined) => NavdataOutcome {
+    return (skip) => {
+      const skipped = new Set(skip?.waypoints ?? []);
+      const need = wanted().filter((w) => !skipped.has(w.ident));
+      return ok(body([], need.length > cap, { cap, waypoints: need.slice(0, cap) }));
+    };
+  }
+
+  const spec = fixRoutesSpec();
+  const FIX_DEFINITION: FacilityDefinition = {
+    name: FIX_ROUTES_DEFINITION,
+    definitionId: 101,
+    members: new Map([
+      [spec.root.entry, spec.root.aliases.map((a) => a[0])],
+      ...(spec.root.children ?? []).map((c): [string, string[]] => [c.entry, c.aliases.map((a) => a[0])]),
+    ]),
+    rejectedEntries: [],
+    rejectedMembers: [],
+  };
+
+  function newSession(): FacilitySession {
+    return {
+      isOpen: () => true,
+      prepare: () => Promise.resolve([DEFINITION, FIX_DEFINITION]),
+    } as unknown as FacilitySession;
+  }
+
+  function fixAnswer(ident: string, region: string | null, status: FixRoutesStatus): FixRoutesResult {
+    return { ident, region, status, routes: 0, legs: 0, written: 0, candidates: 0, messages: 0, ms: 0, exceptionCode: null, reason: null };
+  }
+
+  it('fetches a point with no kind as a fix, and never asks the simulator for a VOR or an NDB', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.respond = serve(
+      () => [{ ident: 'ZZWPA' }, { ident: 'ZZWPB', kind: 'W' }, { ident: 'ZZVOA', kind: 'V' }, { ident: 'ZZNDA', kind: 'N' }],
+      50,
+    );
+    const { store, fixes } = fakeStore();
+    const session = newSession();
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => {
+      fixes.push({ ident, region: region ?? '', routes_state: 'fetched' });
+      return fixAnswer(ident, region, 'fetched');
+    });
+    const demand = newDemand({ client, store: () => store, session: () => session, fetchFix });
+    demand.start();
+    await drain();
+    await vi.advanceTimersByTimeAsync(2 * NAVDATA_DEMAND_POLL_MS);
+    expect(fetchFix.mock.calls.map((call) => call[3])).toEqual(['ZZWPA', 'ZZWPB']);
+    expect(demand.pending()).toBe(0);
+    expect(logged.filter((line) => line.includes('VOR/NDB point(s)'))).toEqual([
+      'info navdata: the server wants 2 VOR/NDB point(s); this build does not fetch navaids and asks the server to skip them',
+    ]);
+  });
+
+  it('asks the server to skip them on the re-read, so they do not fill the cap ahead of fixes', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    // The server sorts the navaids first: without the skip, a cap of two would
+    // hand back nothing but them for ever.
+    client.respond = serve(
+      () => [
+        { ident: 'ZZVOA', kind: 'V' },
+        { ident: 'ZZNDA', kind: 'N' },
+        { ident: 'ZZWPA', region: 'ZZ' },
+        { ident: 'ZZWPB', region: 'ZZ' },
+      ],
+      2,
+    );
+    const { store, fixes } = fakeStore();
+    const session = newSession();
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => {
+      fixes.push({ ident, region: region ?? '', routes_state: 'fetched' });
+      return fixAnswer(ident, region, 'fetched');
+    });
+    const demand = newDemand({ client, store: () => store, session: () => session, fetchFix });
+    demand.start();
+    await drain();
+    expect(client.skips.slice(0, 2)).toEqual([undefined, { waypoints: ['ZZNDA', 'ZZVOA'] }]);
+    expect(fetchFix.mock.calls.map((call) => call[3]).sort()).toEqual(['ZZWPA', 'ZZWPB']);
+  });
+
+  it('merges them with the parked fixes, sorted and at most 200, and warns once', async () => {
+    vi.useFakeTimers();
+    const parkedFixes = Array.from({ length: 20 }, (_, i) => ({ ident: `ZZF${String(100 + i)}`, region: 'ZZ' }));
+    // One more navaid than the cap, so every timed poll comes back truncated
+    // and is followed by a re-read that sends the whole combined list.
+    const navaids = Array.from({ length: 191 }, (_, i) => ({ ident: `ZZN${String(300 + i)}`, kind: 'N' as const }));
+    let phase = 1;
+    const client = new FakeClient();
+    client.respond = serve(() => (phase === 1 ? parkedFixes : navaids), 190);
+    const session = newSession();
+    // Aborted on a live link: retried at once and parked within the pass.
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => fixAnswer(ident, region, 'aborted'));
+    const demand = newDemand({ client, session: () => session, fetchFix });
+    demand.start();
+    await drain();
+    expect(logged.filter((line) => line.includes('is set aside after'))).toHaveLength(20);
+
+    phase = 2;
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await drain();
+    const everything = [...parkedFixes.map((f) => f.ident), ...navaids.map((n) => n.ident)].sort();
+    const reread = client.skips.find((skip) => (skip?.waypoints?.length ?? 0) > 20);
+    expect(reread?.waypoints).toEqual(everything.slice(0, DEMAND_SKIP_MAX));
+    // The timed poll before it named only the parked fixes.
+    expect(client.skips.some((skip) => skip?.waypoints?.length === 20)).toBe(true);
+    await vi.advanceTimersByTimeAsync(2 * NAVDATA_DEMAND_POLL_MS);
+    await drain();
+    // Said once, although every cycle since has sent the parked fixes alone on
+    // its timed poll and the cut combined list on its re-read.
+    expect(client.skips.filter((skip) => skip?.waypoints?.length === DEMAND_SKIP_MAX).length).toBeGreaterThanOrEqual(3);
+    expect(logged.filter((line) => line.includes('skipped as navaids'))).toEqual([
+      `warn navdata: 210 fixes are set aside or skipped as navaids; the server is told about the first ${DEMAND_SKIP_MAX}`,
+    ]);
+  });
+
+  it('keeps skipping navaids across a new session, which clears only the parking', async () => {
+    vi.useFakeTimers();
+    let session: FacilitySession = newSession();
+    const client = new FakeClient();
+    let polls = 0;
+    const answer = serve(
+      () => [
+        { ident: 'ZZVOA', kind: 'V' },
+        { ident: 'ZZVOB', kind: 'V' },
+        { ident: 'ZZWPF', region: 'ZZ' },
+        { ident: 'ZZWPG', region: 'ZZ' },
+      ],
+      1,
+    );
+    client.respond = (skip) => {
+      polls++;
+      return answer(skip);
+    };
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => fixAnswer(ident, region, 'aborted'));
+    const demand = newDemand({ client, session: () => session, fetchFix });
+    demand.start();
+    await drain();
+    // Both fixes were reached past the navaids, and both are parked. The last
+    // re-read skipped the navaids and the first of them; the second was parked
+    // after the list came back complete.
+    expect(logged.filter((line) => line.includes('is set aside after'))).toHaveLength(2);
+    expect(client.skips.at(-1)?.waypoints).toEqual(['ZZVOA', 'ZZVOB', 'ZZWPF']);
+
+    // A new connection, arriving while the next timed poll is out: the re-read
+    // that follows is the first poll to see it, and it must still skip the
+    // navaid while the parked fixes get their fresh chance.
+    client.respond = (skip) => {
+      polls++;
+      session = newSession();
+      client.respond = (next) => {
+        polls++;
+        return answer(next);
+      };
+      return answer(skip);
+    };
+    const before = polls;
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await drain();
+    const cycle = client.skips.slice(before);
+    // The timed poll: no navaid (it is read to see what is still wanted); the
+    // old session's parked fixes are still named, since it had not changed yet.
+    expect(cycle[0]?.waypoints).toEqual(['ZZWPF', 'ZZWPG']);
+    // Its re-read, on the new session: the navaid is skipped, the parking is gone.
+    expect(cycle[1]?.waypoints).toEqual(['ZZVOA']);
+    expect(logged.filter((line) => line.includes('parked item(s) a fresh chance'))).toHaveLength(1);
+  });
+
+  it('stops skipping a navaid once the server no longer names it', async () => {
+    vi.useFakeTimers();
+    let wanted: Want[] = [
+      { ident: 'ZZVOA', kind: 'V' },
+      { ident: 'ZZVOB', kind: 'V' },
+      { ident: 'ZZWPA', region: 'ZZ' },
+    ];
+    const client = new FakeClient();
+    client.respond = serve(() => wanted, 2);
+    const session = newSession();
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => fixAnswer(ident, region, 'failed'));
+    const demand = newDemand({ client, session: () => session, fetchFix });
+    demand.start();
+    await drain();
+    expect(client.skips.find((skip) => skip?.waypoints !== undefined)?.waypoints).toEqual(['ZZVOA', 'ZZVOB']);
+
+    wanted = [{ ident: 'ZZVOA', kind: 'V' }, { ident: 'ZZWPA', region: 'ZZ' }, { ident: 'ZZWPB', region: 'ZZ' }];
+    const before = client.skips.length;
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await drain();
+    const cycle = client.skips.slice(before);
+    expect(cycle.some((skip) => skip?.waypoints?.includes('ZZVOB'))).toBe(false);
+    expect(cycle.some((skip) => skip?.waypoints?.includes('ZZVOA'))).toBe(true);
   });
 });

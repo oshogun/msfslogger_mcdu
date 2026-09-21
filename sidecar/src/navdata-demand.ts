@@ -107,7 +107,15 @@ export interface DemandWaypoint {
   ident: string;
   /** Omitted or null when the server does not know it — a legal, common case. */
   region?: string | null;
+  /**
+   * What the plan says this point is: 'W' is an enroute fix, 'V' a VOR and 'N'
+   * an NDB. Omitted by an older server, and then the point is a fix.
+   */
+  kind?: 'W' | 'V' | 'N';
 }
+
+/** The kinds of point the server may name, as the `kind` field spells them. */
+const WAYPOINT_KINDS: readonly string[] = ['W', 'V', 'N'];
 
 export type ParsedDemand =
   | {
@@ -180,12 +188,16 @@ export function parseDemand(body: unknown): ParsedDemand {
 
 function parseWaypoint(entry: unknown): DemandWaypoint | null {
   if (typeof entry !== 'object' || entry === null) return null;
-  const { ident, region } = entry as { ident?: unknown; region?: unknown };
+  const { ident, region, kind } = entry as { ident?: unknown; region?: unknown; kind?: unknown };
   if (typeof ident !== 'string' || !IDENT.test(ident)) return null;
-  if (region === undefined) return { ident };
-  if (region === null) return { ident, region: null };
+  // A kind this build does not know is not guessed at: asking for a VOR as a
+  // fix is exactly the mistake the field exists to prevent.
+  if (kind !== undefined && (typeof kind !== 'string' || !WAYPOINT_KINDS.includes(kind))) return null;
+  const typed = kind === undefined ? {} : { kind: kind as 'W' | 'V' | 'N' };
+  if (region === undefined) return { ident, ...typed };
+  if (region === null) return { ident, region: null, ...typed };
   if (typeof region !== 'string' || !IDENT.test(region)) return null;
-  return { ident, region };
+  return { ident, region, ...typed };
 }
 
 // ── The queue ─────────────────────────────────────────────────────────────────
@@ -311,6 +323,22 @@ export class NavdataDemand implements NavdataDemandLike {
   private readonly collidedAirports = new Set<string>();
   /** Whether the last poll had to cut a skip list short, so that is said once. */
   private readonly skipTruncated = { A: false, W: false };
+  /**
+   * VOR and NDB idents the server named. This build cannot fetch a navaid, so
+   * they are not queued; they are asked to be skipped instead, so that they do
+   * not fill the server's cap ahead of fixes it can fetch. Not a fault, so a new
+   * session leaves them alone.
+   *
+   * THE SERVER DROPS A SKIPPED IDENT BEFORE IT ANSWERS, so a list read with
+   * these skipped can never show which of them are still wanted. A timed poll
+   * therefore reads the list WITHOUT them and rebuilds the set from what it
+   * sees; the immediate re-reads of the same cycle send them and add any new
+   * ones the next page reveals. An ident the plan no longer names is gone at the
+   * next timed poll.
+   */
+  private readonly navaidSkips = new Set<string>();
+  /** The navaid count last logged, so a steady count is said once. */
+  private navaidsLogged = 0;
 
   constructor(deps: NavdataDemandDeps) {
     this.deps = deps;
@@ -418,7 +446,7 @@ export class NavdataDemand implements NavdataDemandLike {
     if (!repoll) this.unansweredThisCycle.clear();
     let delay = NAVDATA_DEMAND_POLL_MS;
     try {
-      delay = await this.poll();
+      delay = await this.poll(repoll);
     } catch (err) {
       delay = this.fail(`the demand poll failed (${describe(err)})`);
     } finally {
@@ -428,15 +456,15 @@ export class NavdataDemand implements NavdataDemandLike {
     this.schedule(delay, delay === 0);
   }
 
-  private async poll(): Promise<number> {
+  private async poll(repoll: boolean): Promise<number> {
     // Only while there is a server to ask and a store to hold the answer.
     if (this.serverUrl() === null || this.deps.store() === null) return NAVDATA_DEMAND_POLL_MS;
 
     // A new connection forgives what was parked on the last one, and that has
     // to happen before the skip lists are built, not after the answer arrives.
     this.noticeContext();
-    const skipAirports = this.skipList('A');
-    const skipWaypoints = this.skipList('W');
+    const skipAirports = this.skipList('A', false);
+    const skipWaypoints = this.skipList('W', repoll);
     const skip: DemandSkip = {
       ...(skipAirports.length > 0 ? { airports: skipAirports } : {}),
       ...(skipWaypoints.length > 0 ? { waypoints: skipWaypoints } : {}),
@@ -473,7 +501,7 @@ export class NavdataDemand implements NavdataDemandLike {
       this.log(
         'warn',
         `navdata: left out ${parsed.droppedAirports} airport(s) and ${parsed.droppedWaypoints} fix(es) ` +
-          'the server named with an ident this client does not accept',
+          'the server named in a form this client does not accept (an ident, a region or a kind)',
       );
     }
     let airports = demand.airports;
@@ -487,9 +515,20 @@ export class NavdataDemand implements NavdataDemandLike {
       waypoints = waypoints.slice(0, demand.cap);
     }
 
+    const fixes = waypoints.filter((w) => (w.kind ?? 'W') === 'W');
+    const navaids = waypoints.filter((w) => w.kind === 'V' || w.kind === 'N');
+    if (!repoll) this.navaidSkips.clear();
+    const sent = new Set(skipWaypoints);
+    let learned = 0;
+    for (const navaid of navaids) {
+      if (this.navaidSkips.has(navaid.ident)) continue;
+      this.navaidSkips.add(navaid.ident);
+      if (!sent.has(navaid.ident)) learned++;
+    }
+
     const addedAirports = this.enqueue(airports.map((ident): DemandItem => ({ kind: 'A', ident })));
     const addedFixes = this.enqueue(
-      waypoints.map((w): DemandItem => ({ kind: 'W', ident: w.ident, region: w.region ?? null })),
+      fixes.map((w): DemandItem => ({ kind: 'W', ident: w.ident, region: w.region ?? null })),
     );
     const added = addedAirports + addedFixes;
     if (added > 0) {
@@ -504,19 +543,32 @@ export class NavdataDemand implements NavdataDemandLike {
 
     if (!demand.more) {
       this.moreWaiting = false;
+      this.noteNavaids();
       return NAVDATA_DEMAND_POLL_MS;
     }
     // The server truncated. Asking again at once only helps when this page
-    // brought something new: an unchanged page means the rest of the list is
-    // behind work this side has queued and the server has not yet heard about.
+    // brought something new: new work, or navaids that can now be skipped to
+    // make room. An unchanged page means the rest of the list is behind work
+    // this side has queued and the server has not yet heard about.
     const room = this.sizeOf('A') < DEMAND_QUEUE_HIGH_WATER && this.sizeOf('W') < DEMAND_QUEUE_HIGH_WATER;
-    if (added > 0 && room) return 0;
+    if ((added > 0 || learned > 0) && room) return 0;
     this.moreWaiting = true;
     if (this.size() === 0) {
       // Nothing is queued, so there is no drain to wait for.
       this.moreWaiting = false;
     }
     return NAVDATA_DEMAND_POLL_MS;
+  }
+
+  /** Said when the list is complete for this cycle, and only when the count changed. */
+  private noteNavaids(): void {
+    if (this.navaidSkips.size === this.navaidsLogged) return;
+    this.navaidsLogged = this.navaidSkips.size;
+    this.log(
+      'info',
+      `navdata: the server wants ${this.navaidsLogged} VOR/NDB point(s); this build does not fetch navaids ` +
+        'and asks the server to skip them',
+    );
   }
 
   private fail(reason: string): number {
@@ -539,29 +591,35 @@ export class NavdataDemand implements NavdataDemandLike {
   }
 
   /**
-   * The parked idents of one kind, for the server to leave out of its answer.
-   * Without this a stateless server that sorts them first hands back the same
-   * full page for ever and whatever is behind them is never reached. Sorted, so
-   * a list cut at the limit is the same list every time. A fix is named by its
-   * ident alone, which is all the parameter carries.
+   * The idents of one kind for the server to leave out of its answer: the
+   * parked ones and, for fixes on a re-read, the navaids this build cannot
+   * fetch. Without this a stateless server that sorts them first hands back the
+   * same full page for ever and whatever is behind them is never reached.
+   * Sorted, so a list cut at the limit is the same list every time. A point is
+   * named by its ident alone, which is all the parameter carries.
+   *
+   * Whether the list is cut is judged on everything that could be in it, sent
+   * this time or not, so the warning does not come and go between a timed poll
+   * and the re-reads that follow it.
    */
-  private skipList(kind: 'A' | 'W'): string[] {
-    const idents = new Set<string>();
-    for (const item of this.parked.values()) if (item.kind === kind) idents.add(item.ident);
-    const parked = [...idents].sort();
-    if (parked.length <= DEMAND_SKIP_MAX) {
+  private skipList(kind: 'A' | 'W', navaids: boolean): string[] {
+    const parked = new Set<string>();
+    for (const item of this.parked.values()) if (item.kind === kind) parked.add(item.ident);
+    const everything = kind === 'W' ? new Set([...parked, ...this.navaidSkips]) : parked;
+    const sent = [...(navaids ? everything : parked)].sort();
+    if (everything.size <= DEMAND_SKIP_MAX) {
       this.skipTruncated[kind] = false;
-      return parked;
+      return sent;
     }
     if (!this.skipTruncated[kind]) {
       this.skipTruncated[kind] = true;
       this.log(
         'warn',
-        `navdata: ${parked.length} ${kind === 'A' ? 'airports' : 'fixes'} are set aside; ` +
+        `navdata: ${everything.size} ${kind === 'A' ? 'airports are set aside' : 'fixes are set aside or skipped as navaids'}; ` +
           `the server is told about the first ${DEMAND_SKIP_MAX}`,
       );
     }
-    return parked.slice(0, DEMAND_SKIP_MAX);
+    return sent.slice(0, DEMAND_SKIP_MAX);
   }
 
   /** Adds what is new and returns how many that was. */

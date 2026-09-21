@@ -57,8 +57,13 @@ export interface NavdataServiceDeps {
    * The protocol this client opened the connection with, and the one the
    * simulator answered as — `null` until a connection has been made. A facility
    * list is only safe to ask for when the two agree; see `listParseIsSafe`.
+   *
+   * `simVersion` is the build the simulator reported alongside its name. It is
+   * recorded with the rows it produced so a snapshot can say where they came
+   * from; it is not part of the safety comparison, and a caller that does not
+   * know it leaves it out.
    */
-  protocols(): { ours: string; sim: string | null };
+  protocols(): { ours: string; sim: string | null; simVersion?: string | null };
   /** The sidecar's log path. Nothing under navdata may write to stdout itself. */
   log: LogSink;
   /** Something the axis shows has changed and a status line is due. */
@@ -232,7 +237,7 @@ export class NavdataService {
    * and all, so navdata says why and does nothing.
    */
   private startPass(handle: SimConnectConnection, store: NavdataStore): void {
-    const { ours, sim } = this.deps.protocols();
+    const { ours, sim, simVersion } = this.deps.protocols();
     if (!listParseIsSafe(ours, sim)) {
       this.closeSession('the simulator is not the one this client is configured for');
       const reason =
@@ -243,10 +248,34 @@ export class NavdataService {
       return;
     }
     this.latched = null;
+    this.recordSimIdentity(store, sim, simVersion ?? null);
     this.closeSession('a new connection replaced it');
     const session = this.createSession(handle);
     this.session = session;
     void this.runBulk(session, store);
+  }
+
+  /**
+   * Records which simulator answered the handshake, on the store holding the
+   * rows that simulator is about to produce. The snapshot header carries it,
+   * and an export happens long after the connection has gone, so it is kept in
+   * the store rather than in a field of this process.
+   *
+   * It is written only once the protocol gate has passed: a connection this
+   * client cannot read a list from tells us which simulator is running, but
+   * nothing about where the rows already in the store came from.
+   */
+  private recordSimIdentity(store: NavdataStore, sim: string | null, version: string | null): void {
+    if (sim === null) return;
+    try {
+      const meta = store.meta();
+      if (meta.simAppName === sim && meta.simAppVersion === version) return;
+      store.write((tx) => tx.updateMeta({ simAppName: sim, simAppVersion: version }));
+    } catch (err) {
+      // Provenance is worth recording and not worth a pass: the index is the
+      // job, and a snapshot without the simulator's name is still usable.
+      this.log('debug', `navdata: the simulator's identity was not recorded (${describe(err)})`);
+    }
   }
 
   /**

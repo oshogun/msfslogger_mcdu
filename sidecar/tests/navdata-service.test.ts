@@ -502,6 +502,98 @@ describe('the simulator this client is configured for', () => {
   });
 });
 
+describe('the simulator recorded on the store', () => {
+  /** The store as a later export sees it: the service's own is closed first. */
+  function reopen(configPath: string): NavdataMeta {
+    const store = openNavdataStore(navdataDatabasePath(configPath), { simId: '2024' });
+    expect(store).not.toBeNull();
+    opened.push(store as NavdataStore);
+    return (store as NavdataStore).meta();
+  }
+
+  it('keeps what the simulator answered, for a snapshot taken long after', async () => {
+    const configPath = scratchConfigPath();
+    const service = newService(configPath, {
+      createSession: sessionFactory(),
+      protocols: () => ({ ours: 'KittyHawk', sim: 'KittyHawk', simVersion: '11.0' }),
+    });
+    service.start();
+    await connect(service, new FakeFacilityConnection(), WORLD);
+    await settled(service);
+    service.shutdown();
+
+    const meta = reopen(configPath);
+    expect(meta.simAppName).toBe('KittyHawk');
+    expect(meta.simAppVersion).toBe('11.0');
+  });
+
+  it('names no simulator while none has connected', () => {
+    const configPath = scratchConfigPath();
+    const service = newService(configPath);
+    service.start();
+    service.shutdown();
+
+    const meta = reopen(configPath);
+    expect(meta.simAppName).toBeNull();
+    expect(meta.simAppVersion).toBeNull();
+  });
+
+  it('names none either when the connection is one it cannot read a list from', async () => {
+    const configPath = scratchConfigPath();
+    const service = newService(configPath, {
+      createSession: sessionFactory(),
+      protocols: () => ({ ours: 'SunRise', sim: 'KittyHawk', simVersion: '11.0' }),
+    });
+    service.start();
+    await connect(service, new FakeFacilityConnection(), WORLD);
+    service.shutdown();
+
+    // The simulator running is not the simulator these rows came from, and the
+    // header says where the rows came from.
+    const meta = reopen(configPath);
+    expect(meta.simAppName).toBeNull();
+    expect(meta.simAppVersion).toBeNull();
+  });
+
+  it('follows the simulator to a new build', async () => {
+    const configPath = scratchConfigPath();
+    let version = '11.0';
+    const service = newService(configPath, {
+      createSession: sessionFactory(),
+      protocols: () => ({ ours: 'KittyHawk', sim: 'KittyHawk', simVersion: version }),
+    });
+    service.start();
+    await connect(service, new FakeFacilityConnection(), WORLD);
+    await settled(service);
+
+    version = '11.1';
+    service.onSimDisconnected();
+    await connect(service, new FakeFacilityConnection(), WORLD);
+    await settled(service);
+    service.shutdown();
+
+    expect(reopen(configPath).simAppVersion).toBe('11.1');
+  });
+
+  it('carries on when the identity cannot be written', () => {
+    const configPath = scratchConfigPath();
+    const dbPath = navdataDatabasePath(configPath);
+    const service = newService(configPath, {
+      createSession: sessionFactory(),
+      openStore: () => throwingStore(dbPath, 'the store is read-only'),
+    });
+    service.start();
+    service.onSimConnected(new FakeFacilityConnection() as unknown as SimConnectConnection);
+
+    // A write that throws is one unnamed simulator, not a pass that did not run
+    // and not an axis in error.
+    expect(service.snapshot()?.state).not.toBe('nav.error');
+    expect(logged.some((line) => line.includes("the simulator's identity was not recorded"))).toBe(
+      true,
+    );
+  });
+});
+
 describe('a simulator switched while the connection is up', () => {
   it('rebuilds the store and runs the pass again, without waiting for a reconnect', async () => {
     const configPath = scratchConfigPath();

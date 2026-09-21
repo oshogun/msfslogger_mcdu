@@ -152,6 +152,7 @@ class Sidecar {
     protocols: () => ({
       ours: SIM_PROTOCOL_NAME[this.config?.sim ?? '2020'],
       sim: this.sim.appName,
+      simVersion: this.sim.appVersion,
     }),
     log: (level, message) => this.log(level, message),
     onChange: () => this.touch(),

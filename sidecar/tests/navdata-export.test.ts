@@ -12,6 +12,10 @@
 // 3. The size guard is a guard. It aborts and leaves nothing behind.
 // 4. A world-sized index — 41 871 rows, the measured count — exports whole, in
 //    chunks, without holding the event loop.
+// 5. The header states the bulk facts rather than leaving the receiver to infer
+//    them: a replica decides whether its airport layer is world-complete from
+//    bulkCompletedAt, and an unfinished pass says so with a null that is still
+//    a key, because a missing key means only that the sender is older.
 //
 // Every store is under a fresh mkdtemp directory and every ident is synthetic.
 
@@ -31,6 +35,7 @@ import {
   type SnapshotFooterLine,
   type SnapshotHeaderLine,
 } from '../src/navdata-export';
+import { NAVDATA_SCHEMA_VERSION } from '../src/navdata-schema';
 import type { NavdataStore } from '../src/navdata-store';
 import {
   fillAirports,
@@ -158,6 +163,73 @@ describe('the snapshot export', () => {
     expect(runway?.secondary_threshold_m).toBeNull();
     expect(Object.prototype.hasOwnProperty.call(runway ?? {}, 'secondary_threshold_m')).toBe(true);
     expect(runway?.rev).toBe(store.row('nav_runway', { rwy_key: 'ZZAA|15|0' })?.rev);
+  });
+
+  it('states what the bulk pass did, and which simulator answered', async () => {
+    const { store, directory } = open();
+    populate(store);
+    store.write((tx) =>
+      tx.updateMeta({
+        simAppName: 'KittyHawk',
+        simAppVersion: '11.0',
+        bulkStartedAt: 1_758_300_000_000,
+        bulkCompletedAt: 1_758_300_040_000,
+        bulkRowCount: WORLD_AIRPORTS,
+      }),
+    );
+
+    const result = await runExport(store, directory);
+    const header = readLines(result.path)[0] as SnapshotHeaderLine;
+
+    expect(header.simAppName).toBe('KittyHawk');
+    expect(header.simAppVersion).toBe('11.0');
+    expect(header.bulkStartedAt).toBe(1_758_300_000_000);
+    // The one field a replica reads to decide that its airport layer is the
+    // whole world rather than part of one.
+    expect(header.bulkCompletedAt).toBe(1_758_300_040_000);
+    expect(header.bulkRowCount).toBe(WORLD_AIRPORTS);
+    // Additive fields on the payload; the schema is untouched.
+    expect(header.schemaVersion).toBe(NAVDATA_SCHEMA_VERSION);
+    expect(NAVDATA_SCHEMA_VERSION).toBe(2);
+  });
+
+  it('says an unfinished bulk pass with a null that is still a key', async () => {
+    const { store, directory } = open();
+    populate(store);
+    store.write((tx) => tx.updateMeta({ bulkStartedAt: 1_758_300_000_000, bulkCompletedAt: null }));
+
+    const result = await runExport(store, directory);
+    const emitted = zlib
+      .gunzipSync(fs.readFileSync(result.path))
+      .toString('utf8')
+      .split('\n')[0];
+    const header = JSON.parse(emitted) as Record<string, unknown>;
+
+    expect(header.bulkCompletedAt).toBeNull();
+    expect(header.bulkRowCount).toBe(0);
+    // A sender older than these fields omits them and is making no claim at
+    // all; this sender says "the pass has not finished". The two must not look
+    // alike on the wire, and JSON.stringify drops an undefined silently.
+    expect(Object.prototype.hasOwnProperty.call(header, 'bulkCompletedAt')).toBe(true);
+    expect(emitted).toContain('"bulkCompletedAt":null');
+    const older = { ...header };
+    delete older.bulkCompletedAt;
+    expect(Object.prototype.hasOwnProperty.call(older, 'bulkCompletedAt')).toBe(false);
+    expect(JSON.stringify(older)).not.toContain('bulkCompletedAt');
+  });
+
+  it('leaves the simulator unnamed when no session has ever connected', async () => {
+    const { store, directory } = open();
+    populate(store);
+
+    const result = await runExport(store, directory);
+    const header = readLines(result.path)[0] as SnapshotHeaderLine;
+
+    expect(header.simAppName).toBeNull();
+    expect(header.simAppVersion).toBeNull();
+    expect(header.bulkStartedAt).toBeNull();
+    expect(header.bulkCompletedAt).toBeNull();
+    expect(header.bulkRowCount).toBe(0);
   });
 
   it('abandons an export that passes the size guard and leaves no file', async () => {

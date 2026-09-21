@@ -1,10 +1,13 @@
 // tests/navdata-index-wiring.test.ts — the sidecar really does hand navdata an
-// uplink, and really does tell it what version it is.
+// uplink, really does tell it what version it is, and really does pass on what
+// the simulator answered with.
 //
-// Both are two lines in one object literal, and both fail silently: with no
-// transport the sync posts nothing at all and looks merely idle, and with no
-// version the snapshot header announces `sidecarVersion: "unknown"` — the first
-// thing anyone reads in a server log and the first thing to mislead them. So
+// All three are a line or two in one object literal, and all three fail
+// silently: with no transport the sync posts nothing at all and looks merely
+// idle; with no version the snapshot header announces `sidecarVersion:
+// "unknown"` — the first thing anyone reads in a server log and the first thing
+// to mislead them; and with the simulator's build left out the header names a
+// simulator with no build, which reads like a simulator that did not say. So
 // this drives the real entry point, with the real uplink and the real store,
 // and watches what arrives.
 //
@@ -19,8 +22,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import type { SimConnectCallbacks } from '../src/simconnect';
-import type { SnapshotHeaderLine } from '../src/navdata-export';
+import type { SimConnectConnection } from 'node-simconnect';
+
+import type { SimConnectCallbacks, SimLinkSnapshot } from '../src/simconnect';
+import { openNavdataReader, type SnapshotHeaderLine } from '../src/navdata-export';
+import { navdataDatabasePath } from '../src/navdata-store';
 import { NAVDATA_SNAPSHOT_PATH, NAVDATA_STATE_PATH, type NavdataStateReport } from '../src/navdata-sync';
 import {
   multipart,
@@ -30,6 +36,7 @@ import {
   type NavdataScratchServer,
 } from './helpers/navdata-scratch-server';
 import { openFixtureStore, populate } from './helpers/navdata-fixture-store';
+import { FakeFacilityConnection } from './helpers/fake-facility-connection';
 
 const mocks = vi.hoisted(() => ({ callbacks: null as SimConnectCallbacks | null }));
 
@@ -119,7 +126,11 @@ afterEach(async () => {
   await waitFor(() => false, 200);
   vi.restoreAllMocks();
   removed(configDir);
-});
+  // Longer than the waits inside it. The hook waits on something observable —
+  // the store file being released — and vitest's default 5 s budget is below
+  // the 8 s that wait is allowed, so a shutdown with a pass and an upload to
+  // settle would be killed mid-teardown rather than timing out honestly.
+}, 12000);
 
 /** True once the directory is gone; a locked store file answers false. */
 function removed(directory: string): boolean {
@@ -168,4 +179,49 @@ describe('the sidecar hands navdata an uplink', () => {
     expect(header.simId).toBe('2020');
     expect(JSON.stringify(header)).not.toContain(SENTINEL_TOKEN);
   });
+
+  it('passes on the name AND the build the simulator answered with', async () => {
+    stdin.emit('data', `${JSON.stringify({ v: 1, type: 'start' })}\n`);
+    await waitFor(() => states.length > 0);
+    const callbacks = mocks.callbacks as SimConnectCallbacks;
+    expect(callbacks).not.toBeNull();
+
+    // The link records what recvOpen answered and only then announces the
+    // connection, so by the time navdata is called both are there to be read.
+    // A version that arrived after the announcement would be null here, and a
+    // header naming a simulator with no build is the failure this pins.
+    const connected: SimLinkSnapshot = {
+      state: 'sim.connected',
+      attempt: 0,
+      nextRetryAt: null,
+      retryDelayMs: null,
+      protocol: 'KittyHawk',
+      appName: 'KittyHawk',
+      appVersion: '11.0',
+      lastError: null,
+    };
+    callbacks.onSimState(connected);
+    callbacks.onConnected?.(new FakeFacilityConnection() as unknown as SimConnectConnection);
+
+    await waitFor(() => meta()?.simAppName !== null);
+    expect(meta()).toMatchObject({ simAppName: 'KittyHawk', simAppVersion: '11.0' });
+
+    // The fake handle answers no list, so the pass this connection started is
+    // still waiting on one. A disconnect settles it as aborted, the way a real
+    // one does, rather than leaving the store held until its idle timeout.
+    callbacks.onDisconnected?.();
+    // What the simulator said outlives the connection that said it: the export
+    // that carries it happens long after.
+    expect(meta()).toMatchObject({ simAppName: 'KittyHawk', simAppVersion: '11.0' });
+  });
+
+  /** The store as the exporter reads it, through a connection of its own. */
+  function meta() {
+    const reader = openNavdataReader(navdataDatabasePath(path.join(configDir, 'config.json')));
+    try {
+      return reader.meta();
+    } finally {
+      reader.close();
+    }
+  }
 });

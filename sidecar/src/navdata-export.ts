@@ -102,6 +102,20 @@ export interface SnapshotHeaderLine {
   simAppVersion: string | null;
   sidecarVersion: string;
   createdAt: number;
+  /**
+   * What the bulk airport index did, copied from the store's metadata. A
+   * receiver reads `bulkCompletedAt` to decide whether the airport layer it
+   * has just been handed is the whole world or part of one — it cannot work
+   * that out from the rows, and guessing from a row count would be a rule
+   * nobody agreed.
+   *
+   * `null` means the pass has not finished. That is NOT the same as the key
+   * being absent, which is what a sender older than these fields writes and
+   * which says nothing either way; the exporter here always emits all three.
+   */
+  bulkStartedAt: number | null;
+  bulkCompletedAt: number | null;
+  bulkRowCount: number;
   counts: NavRowCounts;
 }
 
@@ -118,6 +132,9 @@ export interface NavdataReaderMeta {
   simId: SimId;
   simAppName: string | null;
   simAppVersion: string | null;
+  bulkStartedAt: number | null;
+  bulkCompletedAt: number | null;
+  bulkRowCount: number;
 }
 
 /**
@@ -238,6 +255,9 @@ export function openNavdataReader(dbPath: string, options: NavdataReaderOptions 
         simId: String(row.sim_id) as SimId,
         simAppName: row.sim_app_name === null ? null : String(row.sim_app_name),
         simAppVersion: row.sim_app_version === null ? null : String(row.sim_app_version),
+        bulkStartedAt: row.bulk_started_at === null ? null : Number(row.bulk_started_at),
+        bulkCompletedAt: row.bulk_completed_at === null ? null : Number(row.bulk_completed_at),
+        bulkRowCount: Number(row.bulk_row_count ?? 0),
       };
     },
 
@@ -421,6 +441,11 @@ export async function exportSnapshot(
         simAppVersion: meta.simAppVersion,
         sidecarVersion: options.sidecarVersion,
         createdAt: now(),
+        // Read in the same transaction as the rev and the counts, so the whole
+        // header describes one view of the store.
+        bulkStartedAt: meta.bulkStartedAt,
+        bulkCompletedAt: meta.bulkCompletedAt,
+        bulkRowCount: meta.bulkRowCount,
         counts,
       };
       await write(`${JSON.stringify(header)}\n`);

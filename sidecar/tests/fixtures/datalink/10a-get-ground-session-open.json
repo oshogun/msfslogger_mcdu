@@ -17,16 +17,16 @@
       "session": {
         "id": 4,
         "source": "auto",
-        "airport_icao": "EGLL",
-        "airport_name": "London Heathrow Airport",
-        "lat": 51.4775,
-        "lon": -0.4614,
+        "airport_icao": "ZZZA",
+        "airport_name": "Synthetic Test Field",
+        "lat": 10.5,
+        "lon": 20.25,
         "parking_position": null,
         "parking_position_source": null,
         "planned_leg_id": 12,
         "planned_leg_link_source": "auto",
         "aircraft": "A320",
-        "started_at": "2026-09-16T12:15:55.843Z",
+        "started_at": "2026-01-01T00:00:00.000Z",
         "ended_at": null
       }
     }

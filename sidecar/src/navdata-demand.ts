@@ -1,11 +1,12 @@
-// ── Navdata demand: the airports the server wants in detail ──────────────────
+// ── Navdata demand: the airports and fixes the server wants in detail ────────
 //
 // The server lists what it would draw and does not yet hold — airports named by
-// a filed plan, and the one a user asked for with "Fetch detail" — and this
-// module collects that list, fetches each airport in turn and lets the
-// incremental sync carry the result back. Nothing here talks to the server
-// about what it did: rows go back as rows, and an airport the simulator does
-// not have goes back as a `nav_absent` row in the same stream.
+// a filed plan, the one a user asked for with "Fetch detail", and the fixes a
+// route's airways run through — and this module collects that list, fetches
+// each item in turn and lets the incremental sync carry the result back.
+// Nothing here talks to the server about what it did: rows go back as rows, and
+// something the simulator does not have goes back as a `nav_absent` row in the
+// same stream.
 //
 // THE SERVER KEEPS NO BOOKKEEPING, SO THIS SIDE MUST. It answers with current
 // need only — its own planned legs minus what its replica holds — and truncates
@@ -17,24 +18,23 @@
 // again at once when the last page added work; otherwise it is polled again
 // when the queue has drained, and after that at the normal interval.
 //
-// ONE AIRPORT AT A TIME. A large airport's whole procedure tree is written in
-// one transaction on the thread that also runs the 1 Hz frame loop, so the queue
-// never has more than one fetch out and yields a turn between airports.
+// ONE ITEM AT A TIME, AIRPORTS FIRST. A large airport's whole procedure tree is
+// written in one transaction on the thread that also runs the 1 Hz frame loop,
+// so the queue never has more than one fetch out and yields a turn between
+// items. Fixes are cheap — a few dozen in well under two seconds, one after the
+// other — and could be fetched several at a time, but nothing has measured what
+// that does to the frame loop, so they are not.
 //
 // A FETCH THAT KEEPS FAILING IN OUR OWN CODE IS SET ASIDE. A decoder that throws
 // settles the request as aborted, and an aborted request goes back on the queue
 // — which on its own would fetch, throw and re-queue for ever at full speed. So
-// consecutive attempts that end without detail or absence, and not because the
-// link went away, are counted per airport, and one that reaches the limit is
+// consecutive attempts that end without an answer, and not because the link
+// went away, are counted per item, and one that reaches the limit is
 // parked with a single log line until the next connection or store, which gives
 // it one fresh chance. An abort caused by a disconnect says nothing about the
-// airport and is not counted. Every poll names the parked airports to the server
+// item and is not counted. Every poll names the parked items to the server
 // so it can leave them out before it applies its cap; otherwise a server that
 // sorts them first would fill every page with them.
-//
-// FIXES ARE LISTED, NOT FETCHED. The response names waypoints too; they are
-// validated and their number is logged when it changes, and nothing else is
-// done with them yet.
 //
 // NOTHING HERE THROWS AT ITS CALLER, nothing here logs the token or a response
 // body, and nothing here touches the backend status axis.
@@ -48,10 +48,19 @@ import {
 } from './navdata-detail';
 import { NAVDATA_WIRE_VERSION } from './navdata-export';
 import type { FacilityDefinition, FacilitySession } from './navdata-facilities';
+import {
+  FIX_ROUTES_DEFINITION,
+  fetchFixRoutes,
+  fixDefinitionUsable,
+  fixRoutesSpec,
+  type FixRoutesOptions,
+  type FixRoutesResult,
+} from './navdata-fixes';
 import type { NavdataStore } from './navdata-store';
 import {
   busyWaitMs,
   NavdataSyncClient,
+  type DemandSkip,
   type NavdataDemandRequester,
   type NavdataOutcome,
   type NavdataTransport,
@@ -61,7 +70,11 @@ import type { LogSink } from './uplink';
 /** How often the list is read while it has nothing new in it. */
 export const NAVDATA_DEMAND_POLL_MS = 60_000;
 export const NAVDATA_DEMAND_BACKOFF_MAX_MS = 600_000;
-/** A truncated list is read again at once only while the queue is under this. */
+/**
+ * The most items of ONE kind the queue holds, and the size under which a
+ * truncated list is read again at once. Airports and fixes each have their own
+ * allowance, so fixes that cannot be fetched never keep an airport out.
+ */
 export const DEMAND_QUEUE_HIGH_WATER = 200;
 /** Consecutive attempts that fail in this build's own code before an airport is set aside. */
 export const DEMAND_FAULT_PARK_AFTER = 3;
@@ -185,6 +198,15 @@ export type FetchDetail = (
   options?: AirportDetailOptions,
 ) => Promise<AirportDetailResult>;
 
+export type FetchFix = (
+  session: FacilitySession,
+  store: NavdataStore | null,
+  definition: FacilityDefinition,
+  ident: string,
+  region: string | null,
+  options?: FixRoutesOptions,
+) => Promise<FixRoutesResult>;
+
 export interface NavdataDemandDeps {
   /** The uplink, or null while there is no valid config. */
   transport(): NavdataTransport | null;
@@ -202,6 +224,7 @@ export interface NavdataDemandDeps {
   /** Test seams. */
   client?: NavdataDemandRequester;
   fetchDetail?: FetchDetail;
+  fetchFix?: FetchFix;
 }
 
 /** What the service needs from the queue, so a test can stand in for it. */
@@ -212,10 +235,32 @@ export interface NavdataDemandLike {
   onConfigApplied(): void;
   /** A session may have become usable: fetch whatever is queued. */
   wake(): void;
-  /** Airports queued or being fetched. */
+  /** Airports queued or being fetched. Fixes are not counted. */
   pending(): number;
   /** One line worth showing while nothing is wrong, or null. */
   note(): string | null;
+}
+
+/** One thing the server asked for. A fix's region is null when the server did not know it. */
+type DemandItem = { readonly kind: 'A'; readonly ident: string } | { readonly kind: 'W'; readonly ident: string; readonly region: string | null };
+
+/**
+ * The queue's key for an item. A fix asked for without a region is its own
+ * item, distinct from the same ident in any region: what comes back for it may
+ * be a different fix, or several.
+ */
+function itemKey(item: DemandItem): string {
+  return item.kind === 'A' ? `A:${item.ident}` : `W:${item.ident}|${item.region ?? ''}`;
+}
+
+function itemLabel(item: DemandItem): string {
+  return item.kind === 'W' && item.region !== null ? `${item.ident}/${item.region}` : item.ident;
+}
+
+/** The two prepared definitions of one session; either may be missing. */
+interface SessionDefinitions {
+  readonly airport: FacilityDefinition | null;
+  readonly fix: FacilityDefinition | null;
 }
 
 export class NavdataDemand implements NavdataDemandLike {
@@ -223,6 +268,7 @@ export class NavdataDemand implements NavdataDemandLike {
   private readonly log: LogSink;
   private readonly client: NavdataDemandRequester;
   private readonly fetchDetail: FetchDetail;
+  private readonly fetchFix: FetchFix;
 
   private running = false;
   private shuttingDown = false;
@@ -233,27 +279,38 @@ export class NavdataDemand implements NavdataDemandLike {
   private loggedError: string | null = null;
   /** A truncated list is waiting on the queue to drain before it is read again. */
   private moreWaiting = false;
+  /** Whether the poll now scheduled is an immediate re-read, not a timed one. */
+  private nextIsRepoll = false;
+  /**
+   * Items that ended without an answer since the last timed poll. A stateless
+   * server names them again on every re-read of a truncated list, and without
+   * this each re-read would count them as new work and try them again at once:
+   * measured live, a missing fix was tried three times and parked in 0.2 s.
+   * Holding them until the next timed poll makes it one attempt per cycle.
+   */
+  private readonly unansweredThisCycle = new Set<string>();
 
-  private readonly queue: string[] = [];
+  /** Airports go first: they are what a map draws at both ends of a route. */
+  private readonly airports: DemandItem[] = [];
+  private readonly fixes: DemandItem[] = [];
   private readonly queued = new Set<string>();
-  private inFlight: string | null = null;
+  private inFlight: DemandItem | null = null;
   private pumping = false;
 
-  /** Consecutive attempts per airport that failed in this build's own code. */
+  /** Consecutive attempts per item that failed in this build's own code. */
   private readonly faults = new Map<string, number>();
-  private readonly parked = new Set<string>();
+  private readonly parked = new Map<string, DemandItem>();
   /** The session and store the counts above were earned on. */
   private faultSession: FacilitySession | null = null;
   private faultStore: NavdataStore | null = null;
 
-  /** The detail definition, prepared once per session. */
-  private definition: { session: FacilitySession; ready: Promise<FacilityDefinition | null> } | null = null;
+  /** The definitions, prepared once per session. */
+  private definitions: { session: FacilitySession; ready: Promise<SessionDefinitions> } | null = null;
 
   private collisions = 0;
   private readonly collidedAirports = new Set<string>();
-  private waypointsLogged = 0;
-  /** Whether the last poll had to cut its skip list short, so that is said once. */
-  private skipTruncated = false;
+  /** Whether the last poll had to cut a skip list short, so that is said once. */
+  private readonly skipTruncated = { A: false, W: false };
 
   constructor(deps: NavdataDemandDeps) {
     this.deps = deps;
@@ -266,10 +323,27 @@ export class NavdataDemand implements NavdataDemandLike {
     };
     this.client = deps.client ?? new NavdataSyncClient(() => deps.transport());
     this.fetchDetail = deps.fetchDetail ?? fetchAirportDetail;
+    this.fetchFix = deps.fetchFix ?? fetchFixRoutes;
   }
 
+  /**
+   * Airports only. The axis says how much map detail is outstanding, and a fix
+   * is a fraction of a second of work that nobody watches for; counting fifty
+   * of them would make a queue with nothing visible in it look busy.
+   */
   pending(): number {
-    return this.queue.length + (this.inFlight === null ? 0 : 1);
+    return this.airports.length + (this.inFlight?.kind === 'A' ? 1 : 0);
+  }
+
+  /** Everything queued or in flight. */
+  private size(): number {
+    return this.airports.length + this.fixes.length + (this.inFlight === null ? 0 : 1);
+  }
+
+  /** Queued or in flight of one kind: each kind is bounded on its own. */
+  private sizeOf(kind: 'A' | 'W'): number {
+    const queue = kind === 'A' ? this.airports : this.fixes;
+    return queue.length + (this.inFlight?.kind === kind ? 1 : 0);
   }
 
   note(): string | null {
@@ -323,8 +397,9 @@ export class NavdataDemand implements NavdataDemandLike {
     this.timer = null;
   }
 
-  private schedule(delayMs: number): void {
+  private schedule(delayMs: number, repoll = false): void {
     this.cancelTimer();
+    this.nextIsRepoll = repoll;
     if (!this.running || this.shuttingDown) return;
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -337,6 +412,10 @@ export class NavdataDemand implements NavdataDemandLike {
   private async tick(): Promise<void> {
     if (!this.running || this.shuttingDown || this.polling) return;
     this.polling = true;
+    const repoll = this.nextIsRepoll;
+    this.nextIsRepoll = false;
+    // A timed poll starts a new cycle, in which everything may be tried once more.
+    if (!repoll) this.unansweredThisCycle.clear();
     let delay = NAVDATA_DEMAND_POLL_MS;
     try {
       delay = await this.poll();
@@ -345,7 +424,8 @@ export class NavdataDemand implements NavdataDemandLike {
     } finally {
       this.polling = false;
     }
-    this.schedule(delay);
+    // Zero is only ever returned for a truncated list worth reading again at once.
+    this.schedule(delay, delay === 0);
   }
 
   private async poll(): Promise<number> {
@@ -353,13 +433,18 @@ export class NavdataDemand implements NavdataDemandLike {
     if (this.serverUrl() === null || this.deps.store() === null) return NAVDATA_DEMAND_POLL_MS;
 
     // A new connection forgives what was parked on the last one, and that has
-    // to happen before the skip list is built, not after the answer arrives.
+    // to happen before the skip lists are built, not after the answer arrives.
     this.noticeContext();
-    const skipAirports = this.skipList();
+    const skipAirports = this.skipList('A');
+    const skipWaypoints = this.skipList('W');
+    const skip: DemandSkip = {
+      ...(skipAirports.length > 0 ? { airports: skipAirports } : {}),
+      ...(skipWaypoints.length > 0 ? { waypoints: skipWaypoints } : {}),
+    };
 
     let outcome: NavdataOutcome;
     try {
-      outcome = await this.client.getDemand(skipAirports.length > 0 ? { airports: skipAirports } : undefined);
+      outcome = await this.client.getDemand(Object.keys(skip).length > 0 ? skip : undefined);
     } catch (err) {
       outcome = { kind: 'transport', errorName: describe(err), errorCode: null };
     }
@@ -392,17 +477,26 @@ export class NavdataDemand implements NavdataDemandLike {
       );
     }
     let airports = demand.airports;
-    if (airports.length > demand.cap) {
-      this.log('debug', `navdata: the server named ${airports.length} airports under a cap of ${demand.cap}`);
+    let waypoints = demand.waypoints;
+    if (airports.length > demand.cap || waypoints.length > demand.cap) {
+      this.log(
+        'debug',
+        `navdata: the server named ${airports.length} airports and ${waypoints.length} fixes under a cap of ${demand.cap}`,
+      );
       airports = airports.slice(0, demand.cap);
+      waypoints = waypoints.slice(0, demand.cap);
     }
-    this.noteWaypoints(demand.waypoints.length);
 
-    const added = this.enqueue(airports);
+    const addedAirports = this.enqueue(airports.map((ident): DemandItem => ({ kind: 'A', ident })));
+    const addedFixes = this.enqueue(
+      waypoints.map((w): DemandItem => ({ kind: 'W', ident: w.ident, region: w.region ?? null })),
+    );
+    const added = addedAirports + addedFixes;
     if (added > 0) {
       this.log(
         'info',
-        `navdata: the server wants ${added} more airport(s) in detail (${this.pending()} pending, cap ${demand.cap})`,
+        `navdata: the server wants ${addedAirports} more airport(s) in detail and ${addedFixes} more fix(es) ` +
+          `with their airways (${this.pending()} airport(s) pending, cap ${demand.cap})`,
       );
       this.deps.onChange();
       this.wake();
@@ -415,9 +509,10 @@ export class NavdataDemand implements NavdataDemandLike {
     // The server truncated. Asking again at once only helps when this page
     // brought something new: an unchanged page means the rest of the list is
     // behind work this side has queued and the server has not yet heard about.
-    if (added > 0 && this.pending() < DEMAND_QUEUE_HIGH_WATER) return 0;
+    const room = this.sizeOf('A') < DEMAND_QUEUE_HIGH_WATER && this.sizeOf('W') < DEMAND_QUEUE_HIGH_WATER;
+    if (added > 0 && room) return 0;
     this.moreWaiting = true;
-    if (this.pending() === 0) {
+    if (this.size() === 0) {
       // Nothing is queued, so there is no drain to wait for.
       this.moreWaiting = false;
     }
@@ -433,12 +528,6 @@ export class NavdataDemand implements NavdataDemandLike {
     return nextDemandDelayMs(this.failures);
   }
 
-  private noteWaypoints(count: number): void {
-    if (count === this.waypointsLogged) return;
-    this.waypointsLogged = count;
-    this.log('info', `navdata: the server wants ${count} fix(es) in detail; this build fetches airports only`);
-  }
-
   /** The server in use, or null while there is no usable config. */
   private serverUrl(): string | null {
     try {
@@ -450,60 +539,76 @@ export class NavdataDemand implements NavdataDemandLike {
   }
 
   /**
-   * The parked airports, for the server to leave out of its answer. Without
-   * this a stateless server that sorts them first hands back the same full
-   * page for ever and the airports behind them are never reached. Sorted, so
-   * a list cut at the limit is the same list every time.
+   * The parked idents of one kind, for the server to leave out of its answer.
+   * Without this a stateless server that sorts them first hands back the same
+   * full page for ever and whatever is behind them is never reached. Sorted, so
+   * a list cut at the limit is the same list every time. A fix is named by its
+   * ident alone, which is all the parameter carries.
    */
-  private skipList(): string[] {
-    const parked = [...this.parked].sort();
+  private skipList(kind: 'A' | 'W'): string[] {
+    const idents = new Set<string>();
+    for (const item of this.parked.values()) if (item.kind === kind) idents.add(item.ident);
+    const parked = [...idents].sort();
     if (parked.length <= DEMAND_SKIP_MAX) {
-      this.skipTruncated = false;
+      this.skipTruncated[kind] = false;
       return parked;
     }
-    if (!this.skipTruncated) {
-      this.skipTruncated = true;
+    if (!this.skipTruncated[kind]) {
+      this.skipTruncated[kind] = true;
       this.log(
         'warn',
-        `navdata: ${parked.length} airports are set aside; the server is told about the first ${DEMAND_SKIP_MAX}`,
+        `navdata: ${parked.length} ${kind === 'A' ? 'airports' : 'fixes'} are set aside; ` +
+          `the server is told about the first ${DEMAND_SKIP_MAX}`,
       );
     }
     return parked.slice(0, DEMAND_SKIP_MAX);
   }
 
   /** Adds what is new and returns how many that was. */
-  private enqueue(idents: readonly string[]): number {
+  private enqueue(items: readonly DemandItem[]): number {
     this.noticeContext();
     const store = this.deps.store();
     let added = 0;
     let overflow = 0;
-    for (const ident of idents) {
-      if (this.queued.has(ident) || this.inFlight === ident || this.parked.has(ident)) continue;
-      if (store !== null && this.held(store, ident)) continue;
-      if (this.pending() >= DEMAND_QUEUE_HIGH_WATER) {
+    for (const item of items) {
+      const key = itemKey(item);
+      if (this.queued.has(key) || this.parked.has(key) || this.unansweredThisCycle.has(key)) continue;
+      if (this.inFlight !== null && itemKey(this.inFlight) === key) continue;
+      if (store !== null && this.held(store, item)) continue;
+      if (this.sizeOf(item.kind) >= DEMAND_QUEUE_HIGH_WATER) {
         // Not lost: the server names it again on a later poll.
         overflow++;
         continue;
       }
-      this.queue.push(ident);
-      this.queued.add(ident);
+      (item.kind === 'A' ? this.airports : this.fixes).push(item);
+      this.queued.add(key);
       added++;
     }
     if (overflow > 0) {
-      this.log('debug', `navdata: the demand queue is full; ${overflow} airport(s) wait for a later poll`);
+      this.log('debug', `navdata: the demand queue is full; ${overflow} item(s) wait for a later poll`);
     }
     return added;
   }
 
   /**
-   * Whether the store already answers for this airport: fetched in detail, or
-   * known to be missing from this install in the current epoch. Absences are
-   * wiped when an epoch is minted, so any row at all is a current one.
+   * Whether the store already answers for this item: an airport fetched in
+   * detail, a fix whose airways are fetched, or either known to be missing from
+   * this install in the current epoch. Absences are wiped when an epoch is
+   * minted, so any row at all is a current one.
+   *
+   * A fix asked for without a region is answered by any fix of that ident;
+   * one asked for in a region only by a fix in that region, so a fix learned
+   * without a region never stands in for a region-qualified one.
    */
-  private held(store: NavdataStore, ident: string): boolean {
+  private held(store: NavdataStore, item: DemandItem): boolean {
     try {
-      if (store.row('nav_airport', { ident })?.detail_state === 'detail') return true;
-      return store.row('nav_absent', { kind: 'A', ident, region: '' }) !== null;
+      if (item.kind === 'A') {
+        if (store.row('nav_airport', { ident: item.ident })?.detail_state === 'detail') return true;
+        return store.row('nav_absent', { kind: 'A', ident: item.ident, region: '' }) !== null;
+      }
+      const fixes = store.waypoints(item.ident, item.region);
+      if (fixes.some((row) => row.routes_state === 'fetched' || row.routes_state === 'absent')) return true;
+      return store.row('nav_absent', { kind: 'W', ident: item.ident, region: item.region ?? '' }) !== null;
     } catch {
       // A lookup that fails costs a fetch, not the queue.
       return false;
@@ -512,42 +617,63 @@ export class NavdataDemand implements NavdataDemandLike {
 
   // ── fetching ────────────────────────────────────────────────────────────────
 
+  private next(): DemandItem | null {
+    return this.airports[0] ?? this.fixes[0] ?? null;
+  }
+
+  private take(): DemandItem {
+    const item = (this.airports.length > 0 ? this.airports : this.fixes).shift() as DemandItem;
+    this.queued.delete(itemKey(item));
+    return item;
+  }
+
   private async pump(): Promise<void> {
     this.pumping = true;
     try {
-      while (!this.shuttingDown && this.queue.length > 0) {
+      while (!this.shuttingDown && this.next() !== null) {
         this.noticeContext();
         const session = this.deps.session();
         const store = this.deps.store();
         if (session === null || store === null) break;
-        const definition = await this.definitionFor(session);
-        if (definition === null || this.shuttingDown) break;
+        const definitions = await this.definitionsFor(session);
+        if (this.shuttingDown) break;
         // The prepare took a while; the connection or the store may have moved.
         // Looked at again after a turn, so this can never become a tight loop.
         if (this.deps.session() !== session || this.deps.store() !== store) {
           await yieldTurn();
           continue;
         }
+        const upcoming = this.next();
+        if (upcoming === null) break;
+        const definition = upcoming.kind === 'A' ? definitions.airport : definitions.fix;
+        // Without its definition nothing of this kind can be fetched on this
+        // session. Airports go first, so a missing fix definition holds up
+        // nothing but fixes.
+        if (definition === null) break;
 
-        const ident = this.queue.shift() as string;
-        this.queued.delete(ident);
-        if (this.held(store, ident)) {
+        const item = this.take();
+        if (this.held(store, item)) {
           this.deps.onChange();
           continue;
         }
 
-        this.inFlight = ident;
+        this.inFlight = item;
         this.deps.onChange();
-        let result: AirportDetailResult | null = null;
-        let thrown: string | null = null;
+        let outcome: Settled = { status: 'thrown', reason: 'unknown', collisions: 0 };
         try {
-          result = await this.fetchDetail(session, store, definition, ident, { log: this.log });
+          if (item.kind === 'A') {
+            const result = await this.fetchDetail(session, store, definition, item.ident, { log: this.log });
+            outcome = { status: result.status, reason: result.reason, collisions: result.collisions };
+          } else {
+            const result = await this.fetchFix(session, store, definition, item.ident, item.region, { log: this.log });
+            outcome = { status: result.status, reason: result.reason, collisions: 0 };
+          }
         } catch (err) {
-          thrown = describe(err);
+          outcome = { status: 'thrown', reason: describe(err), collisions: 0 };
         }
         this.inFlight = null;
         if (this.shuttingDown) break;
-        this.settle(ident, result, thrown, session);
+        this.settle(item, outcome, session);
         this.deps.onChange();
         await yieldTurn();
       }
@@ -556,63 +682,66 @@ export class NavdataDemand implements NavdataDemandLike {
     } finally {
       this.pumping = false;
     }
-    if (this.queue.length === 0 && this.moreWaiting && this.running && !this.shuttingDown) {
+    if (this.next() === null && this.moreWaiting && this.running && !this.shuttingDown) {
       // The truncated list was waiting on this queue; it may say more now.
       this.moreWaiting = false;
-      this.schedule(0);
+      this.schedule(0, true);
     }
   }
 
-  private settle(
-    ident: string,
-    result: AirportDetailResult | null,
-    thrown: string | null,
-    session: FacilitySession,
-  ): void {
-    if (result === null) {
-      this.fault(ident, `the fetch threw (${thrown ?? 'unknown'})`, false);
-      return;
-    }
-    switch (result.status) {
+  private settle(item: DemandItem, outcome: Settled, session: FacilitySession): void {
+    const key = itemKey(item);
+    switch (outcome.status) {
       case 'detail':
-        this.faults.delete(ident);
-        if (result.collisions > 0) {
-          this.collisions += result.collisions;
-          this.collidedAirports.add(ident);
+        this.faults.delete(key);
+        if (outcome.collisions > 0) {
+          this.collisions += outcome.collisions;
+          this.collidedAirports.add(item.ident);
         }
         return;
+      case 'fetched':
       case 'absent':
         // Recorded in the store; the sync carries it back and the server
         // stops asking.
-        this.faults.delete(ident);
+        this.faults.delete(key);
         return;
       case 'aborted':
         if (!isOpen(session)) {
-          // The link went away. Nothing is known about the airport, so it goes
+          // The link went away. Nothing is known about the item, so it goes
           // back where it was and the attempt is not held against it.
-          this.requeue(ident, true);
+          this.requeue(item, true);
           return;
         }
         // The link is still up, so the abort was ours: a decoder that threw, or
         // a buffer that could not be cleared. It goes round again until the
         // limit, which is what stops a deterministic fault spinning for ever.
-        this.fault(ident, 'aborted with the link still up', true);
+        this.fault(item, 'aborted with the link still up', true);
         return;
       case 'disabled':
-        this.requeue(ident, true);
+        this.requeue(item, true);
+        return;
+      case 'thrown':
+        this.fault(item, `the fetch threw (${outcome.reason ?? 'unknown'})`, false);
+        return;
+      case 'ambiguous':
+        // Deterministic: the same ident without a region matches the same set
+        // of candidates every time, and their positions are already stored. No
+        // region is guessed, so there is nothing a second attempt could add.
+        this.faults.delete(key);
+        this.park(item, `because ${outcome.reason ?? 'it matched more than one fix'}`);
         return;
       default:
-        // undecodable, failed or ambiguous: nothing was stored and nothing is
-        // claimed. The server names it again on its next poll if it still
+        // undecodable or failed: nothing was stored as an answer to the
+        // request. The server names it again on its next poll if it still
         // wants it, and the count stops that becoming a loop.
-        this.fault(ident, result.reason ?? result.status, false);
+        this.fault(item, outcome.reason ?? outcome.status, false);
     }
   }
 
   /**
    * Parking lasts for one connection and one store. A new session — a
    * reconnect, a replaced connection — or a different store forgives every
-   * count and gives each parked airport one fresh chance: what failed three
+   * count and gives each parked item one fresh chance: what failed three
    * times on one link can be transient, and a deterministic fault is parked
    * again within three attempts on the next. A moment with no session at all
    * (a bulk pass, a disconnect) is not a new one.
@@ -626,54 +755,77 @@ export class NavdataDemand implements NavdataDemandLike {
     if (session !== null) this.faultSession = session;
     if (store !== null) this.faultStore = store;
     if (this.parked.size > 0) {
-      this.log('info', `navdata: giving ${this.parked.size} parked airport(s) a fresh chance on this connection`);
+      this.log('info', `navdata: giving ${this.parked.size} parked item(s) a fresh chance on this connection`);
     }
     this.parked.clear();
     this.faults.clear();
   }
 
   /** Counts an attempt that failed in this build's own code; parks at the limit. */
-  private fault(ident: string, reason: string, requeue: boolean): void {
-    const count = (this.faults.get(ident) ?? 0) + 1;
+  private fault(item: DemandItem, reason: string, requeue: boolean): void {
+    const key = itemKey(item);
+    // Held back from re-reads of this cycle. An abort on a live link is still
+    // retried at once below: the queue itself puts it back, and parking is
+    // what stops a deterministic one.
+    if (!requeue) this.unansweredThisCycle.add(key);
+    const count = (this.faults.get(key) ?? 0) + 1;
     if (count >= DEMAND_FAULT_PARK_AFTER) {
-      this.faults.delete(ident);
-      this.parked.add(ident);
-      this.log(
-        'warn',
-        `navdata: ${ident} is set aside after ${count} attempts that failed in this client ` +
-          `(last: ${reason}); it is not fetched again on this connection`,
-      );
+      this.faults.delete(key);
+      this.park(item, `after ${count} attempts that failed in this client (last: ${reason})`);
       return;
     }
-    this.faults.set(ident, count);
-    if (requeue) this.requeue(ident, false);
+    this.faults.set(key, count);
+    if (requeue) this.requeue(item, false);
   }
 
-  private requeue(ident: string, front: boolean): void {
-    if (this.queued.has(ident) || this.parked.has(ident)) return;
-    if (front) this.queue.unshift(ident);
-    else this.queue.push(ident);
-    this.queued.add(ident);
+  private park(item: DemandItem, why: string): void {
+    this.parked.set(itemKey(item), item);
+    this.log('warn', `navdata: ${itemLabel(item)} is set aside ${why}; it is not fetched again on this connection`);
+  }
+
+  private requeue(item: DemandItem, front: boolean): void {
+    const key = itemKey(item);
+    if (this.queued.has(key) || this.parked.has(key)) return;
+    const queue = item.kind === 'A' ? this.airports : this.fixes;
+    if (front) queue.unshift(item);
+    else queue.push(item);
+    this.queued.add(key);
   }
 
   /**
-   * The detail definition for this session. Definitions are per connection, so
-   * a new session prepares its own; the promise is kept so every fetch on one
-   * session shares the one prepare.
+   * Both definitions for this session. Definitions are per connection, so a
+   * new session prepares its own, in one pass; the promise is kept so every
+   * fetch on one session shares it. A fix definition the simulator changed in
+   * any way is not used, since its records are read by position.
    */
-  private definitionFor(session: FacilitySession): Promise<FacilityDefinition | null> {
-    if (this.definition === null || this.definition.session !== session) {
-      const ready = session.prepare([airportDetailSpec()]).then(
-        (definitions) => definitions.find((d) => d.name === AIRPORT_DETAIL_DEFINITION) ?? null,
-        (err: unknown) => {
-          this.log('warn', `navdata: the airport detail definition could not be prepared (${describe(err)})`);
-          return null;
+  private definitionsFor(session: FacilitySession): Promise<SessionDefinitions> {
+    if (this.definitions === null || this.definitions.session !== session) {
+      const ready = session.prepare([airportDetailSpec(), fixRoutesSpec()]).then(
+        (definitions): SessionDefinitions => {
+          const airport = definitions.find((d) => d.name === AIRPORT_DETAIL_DEFINITION) ?? null;
+          let fix = definitions.find((d) => d.name === FIX_ROUTES_DEFINITION) ?? null;
+          if (fix !== null && !fixDefinitionUsable(fix)) {
+            this.log('warn', 'navdata: the simulator changed the fix definition; fixes are not fetched on this connection');
+            fix = null;
+          }
+          return { airport, fix };
+        },
+        (err: unknown): SessionDefinitions => {
+          this.log('warn', `navdata: the facility definitions could not be prepared (${describe(err)})`);
+          return { airport: null, fix: null };
         },
       );
-      this.definition = { session, ready };
+      this.definitions = { session, ready };
     }
-    return this.definition.ready;
+    return this.definitions.ready;
   }
+}
+
+/** What one fetch came to, whichever kind it was. */
+interface Settled {
+  readonly status: AirportDetailResult['status'] | FixRoutesResult['status'] | 'thrown';
+  readonly reason: string | null;
+  readonly collisions: number;
 }
 
 function isOpen(session: FacilitySession): boolean {
@@ -684,7 +836,7 @@ function isOpen(session: FacilitySession): boolean {
   }
 }
 
-/** A turn of the event loop between airports, so frames are not held up. */
+/** A turn of the event loop between items, so frames are not held up. */
 function yieldTurn(): Promise<void> {
   return new Promise<void>((resolve) => {
     setImmediate(resolve).unref?.();

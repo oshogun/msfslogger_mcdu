@@ -38,10 +38,12 @@ import {
   nextDemandDelayMs,
   parseDemand,
   type FetchDetail,
+  type FetchFix,
   type NavdataDemandDeps,
 } from '../src/navdata-demand';
 import { openNavdataReader } from '../src/navdata-export';
 import { FacilitySession, type FacilityDefinition } from '../src/navdata-facilities';
+import { FIX_ROUTES_DEFINITION, fixRoutesSpec, type FixRoutesResult, type FixRoutesStatus } from '../src/navdata-fixes';
 import type { NavdataStore } from '../src/navdata-store';
 import {
   buildBatch,
@@ -104,19 +106,42 @@ class FakeClient {
   }
 }
 
-/** Only the two lookups the queue makes, over two sets a test can fill. */
-function fakeStore(): { store: NavdataStore; detail: Set<string>; absent: Set<string> } {
+interface FakeFix {
+  ident: string;
+  region: string;
+  routes_state: string;
+}
+
+/**
+ * Only the lookups the queue makes, over sets a test can fill: airports held in
+ * detail, airport absences, stored fixes, and fix absences keyed `ident|region`.
+ */
+function fakeStore(): {
+  store: NavdataStore;
+  detail: Set<string>;
+  absent: Set<string>;
+  fixes: FakeFix[];
+  absentFixes: Set<string>;
+} {
   const detail = new Set<string>();
   const absent = new Set<string>();
+  const fixes: FakeFix[] = [];
+  const absentFixes = new Set<string>();
   const store = {
-    row(table: string, key: { ident?: string }) {
+    row(table: string, key: { ident?: string; kind?: string; region?: string }) {
       const ident = key.ident ?? '';
       if (table === 'nav_airport') return detail.has(ident) ? { ident, detail_state: 'detail' } : null;
+      if (table === 'nav_absent' && key.kind === 'W') {
+        return absentFixes.has(`${ident}|${key.region ?? ''}`) ? { kind: 'W', ident, region: key.region } : null;
+      }
       if (table === 'nav_absent') return absent.has(ident) ? { kind: 'A', ident, region: '' } : null;
       return null;
     },
+    waypoints(ident: string, region: string | null) {
+      return fixes.filter((f) => f.ident === ident && (region === null || f.region === region));
+    },
   } as unknown as NavdataStore;
-  return { store, detail, absent };
+  return { store, detail, absent, fixes, absentFixes };
 }
 
 const DEFINITION: FacilityDefinition = {
@@ -601,26 +626,6 @@ describe('what is already known', () => {
     expect(prepares()).toBe(1);
   });
 
-  it('says how many fixes the server wants when that changes, and fetches none of them', async () => {
-    vi.useFakeTimers();
-    const client = new FakeClient();
-    const wp = [{ ident: 'ZZWPA' }, { ident: 'ZZWPB', region: 'ZZ' }];
-    client.replies.push(
-      ok(body([], false, { waypoints: wp })),
-      ok(body([], false, { waypoints: wp })),
-      ok(body([], false, { waypoints: [] })),
-    );
-    const demand = newDemand({ client });
-    demand.start();
-    await flush();
-    await vi.advanceTimersByTimeAsync(2 * NAVDATA_DEMAND_POLL_MS);
-    expect(client.calls).toBe(3);
-    expect(logged.filter((line) => line.includes('fix(es) in detail'))).toEqual([
-      'info navdata: the server wants 2 fix(es) in detail; this build fetches airports only',
-      'info navdata: the server wants 0 fix(es) in detail; this build fetches airports only',
-    ]);
-    expect(demand.pending()).toBe(0);
-  });
 });
 
 // ── faults and disconnects ────────────────────────────────────────────────────
@@ -683,7 +688,7 @@ describe('an airport that keeps failing', () => {
     await vi.advanceTimersByTimeAsync(5 * NAVDATA_DEMAND_POLL_MS);
     expect(fetchDetail).toHaveBeenCalledTimes(2 * DEMAND_FAULT_PARK_AFTER);
     expect(logged.filter((line) => line.includes('ZZAA is set aside'))).toHaveLength(2);
-    expect(logged.filter((line) => line.includes('1 parked airport(s) a fresh chance'))).toHaveLength(1);
+    expect(logged.filter((line) => line.includes('1 parked item(s) a fresh chance'))).toHaveLength(1);
   });
 
   it('gives a parked airport a fresh chance when the store changes too', async () => {
@@ -790,12 +795,12 @@ describe('an airport that keeps failing', () => {
     expect(logged.filter((line) => line.includes('ZZAA is set aside after 3 attempts'))).toHaveLength(1);
   });
 
-  it('counts a failed, undecodable or ambiguous answer without re-queueing it', async () => {
+  it('counts a failed or undecodable answer without re-queueing it', async () => {
     vi.useFakeTimers();
     const client = new FakeClient();
     client.fallback = ok(body(['ZZAA']));
     const { session } = fakeSession();
-    const script: AirportDetailStatus[] = ['failed', 'undecodable', 'ambiguous'];
+    const script: AirportDetailStatus[] = ['failed', 'undecodable', 'failed'];
     const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) => result(ident, script.shift() ?? 'detail'));
     const demand = newDemand({ client, session: () => session, fetchDetail });
     demand.start();
@@ -1111,5 +1116,379 @@ describe('the skip list', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(client.calls).toBe(2);
     expect(logged).toEqual(['warn navdata: the demand list was refused (HTTP 400 NAVDATA_BAD_BATCH)']);
+  });
+});
+
+// ── fixes and their airways ───────────────────────────────────────────────────
+
+describe('fixes on the demand list', () => {
+  // Exactly what was asked for, which is the only fix definition the queue uses.
+  const spec = fixRoutesSpec();
+  const FIX_DEFINITION: FacilityDefinition = {
+    name: FIX_ROUTES_DEFINITION,
+    definitionId: 101,
+    members: new Map([
+      [spec.root.entry, spec.root.aliases.map((a) => a[0])],
+      ...(spec.root.children ?? []).map((c): [string, string[]] => [c.entry, c.aliases.map((a) => a[0])]),
+    ]),
+    rejectedEntries: [],
+    rejectedMembers: [],
+  };
+
+  /** A session that prepares both definitions, or only the airport one. */
+  function bothSession(withFix = true): { session: FacilitySession; link: { open: boolean } } {
+    const link = { open: true };
+    const session = {
+      isOpen: () => link.open,
+      prepare: () => Promise.resolve(withFix ? [DEFINITION, FIX_DEFINITION] : [DEFINITION]),
+    } as unknown as FacilitySession;
+    return { session, link };
+  }
+
+  function fixResult(ident: string, region: string | null, status: FixRoutesStatus): FixRoutesResult {
+    return {
+      ident,
+      region,
+      status,
+      routes: 0,
+      legs: 0,
+      written: 0,
+      candidates: 0,
+      messages: 0,
+      ms: 0,
+      exceptionCode: null,
+      reason: null,
+    };
+  }
+
+  const wpt = (ident: string, region?: string | null) => (region === undefined ? { ident } : { ident, region });
+
+  it('fetches the airports first, then the fixes, one at a time, with the region when it is known', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.replies.push(ok(body(['ZZAA', 'ZZAB'], false, { waypoints: [wpt('ZZWPA', 'ZZ'), wpt('ZZWPB')] })));
+    const { session } = bothSession();
+    const order: string[] = [];
+    let out = 0;
+    let most = 0;
+    const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) => {
+      order.push(ident);
+      return result(ident, 'detail');
+    });
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, definition, ident, region) => {
+      out++;
+      most = Math.max(most, out);
+      order.push(`${ident}/${region ?? '-'}`);
+      expect(definition).toBe(FIX_DEFINITION);
+      await Promise.resolve();
+      out--;
+      return fixResult(ident, region, 'fetched');
+    });
+    const demand = newDemand({ client, session: () => session, fetchDetail, fetchFix });
+    demand.start();
+    await flush();
+    expect(order).toEqual(['ZZAA', 'ZZAB', 'ZZWPA/ZZ', 'ZZWPB/-']);
+    expect(most).toBe(1);
+    expect(logged).toContain(
+      'info navdata: the server wants 2 more airport(s) in detail and 2 more fix(es) with their airways (2 airport(s) pending, cap 50)',
+    );
+  });
+
+  it('counts only airports as pending on the axis', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.replies.push(ok(body(['ZZAA'], false, { waypoints: [wpt('ZZWPA'), wpt('ZZWPB')] })));
+    const demand = newDemand({ client });
+    demand.start();
+    await settle();
+    expect(demand.pending()).toBe(1);
+  });
+
+  it('dedupes by ident and region: a fix without a region is its own item', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.replies.push(
+      ok(body([], false, { waypoints: [wpt('ZZWPA', 'ZZ'), wpt('ZZWPA'), wpt('ZZWPA', 'ZZ'), wpt('ZZWPA', null)] })),
+    );
+    const { session } = bothSession();
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => fixResult(ident, region, 'fetched'));
+    const demand = newDemand({ client, session: () => session, fetchFix });
+    demand.start();
+    await flush();
+    expect(fetchFix.mock.calls.map((call) => `${call[3]}/${call[4] ?? '-'}`)).toEqual(['ZZWPA/ZZ', 'ZZWPA/-']);
+  });
+
+  it('asks nothing of a fix the store already answers for, and never lets another region answer for one', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    const { store, fixes, absentFixes } = fakeStore();
+    fixes.push({ ident: 'ZZWPA', region: 'ZZ', routes_state: 'fetched' });
+    fixes.push({ ident: 'ZZWPB', region: 'ZZ', routes_state: 'unknown' });
+    fixes.push({ ident: 'ZZWPC', region: 'ZY', routes_state: 'fetched' });
+    absentFixes.add('ZZWPD|');
+    absentFixes.add('ZZWPE|ZZ');
+    client.replies.push(
+      ok(
+        body([], false, {
+          waypoints: [
+            wpt('ZZWPA', 'ZZ'), // held: fetched in that region
+            wpt('ZZWPA'), // held: any fetched fix of the ident answers a request without a region
+            wpt('ZZWPB', 'ZZ'), // fetched: only a position is known
+            wpt('ZZWPC', 'ZZ'), // fetched: the fetched one is in another region
+            wpt('ZZWPD'), // held: absent without a region
+            wpt('ZZWPD', 'ZZ'), // fetched: an absence without a region says nothing about this one
+            wpt('ZZWPE', 'ZZ'), // held: absent in that region
+            wpt('ZZWPE'), // fetched: an absence in one region is not an absence everywhere
+          ],
+        }),
+      ),
+    );
+    const { session } = bothSession();
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => fixResult(ident, region, 'fetched'));
+    const demand = newDemand({ client, store: () => store, session: () => session, fetchFix });
+    demand.start();
+    await flush();
+    expect(fetchFix.mock.calls.map((call) => `${call[3]}/${call[4] ?? '-'}`)).toEqual([
+      'ZZWPB/ZZ',
+      'ZZWPC/ZZ',
+      'ZZWPD/ZZ',
+      'ZZWPE/-',
+    ]);
+  });
+
+  it('holds fixes, and only fixes, when the simulator will not take the fix definition', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.replies.push(ok(body(['ZZAA'], false, { waypoints: [wpt('ZZWPA')] })));
+    const { session } = bothSession(false);
+    const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) => result(ident, 'detail'));
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => fixResult(ident, region, 'fetched'));
+    const demand = newDemand({ client, session: () => session, fetchDetail, fetchFix });
+    demand.start();
+    await flush();
+    expect(fetchDetail).toHaveBeenCalledTimes(1);
+    expect(fetchFix).not.toHaveBeenCalled();
+  });
+
+  it('does not use a fix definition the simulator changed, since its records are read by position', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.replies.push(ok(body([], false, { waypoints: [wpt('ZZWPA')] })));
+    const changed: FacilityDefinition = {
+      ...FIX_DEFINITION,
+      members: new Map([...FIX_DEFINITION.members].map(([entry, members]) => [entry, members.filter((m) => m !== 'NEXT_REGION')])),
+    };
+    const session = {
+      isOpen: () => true,
+      prepare: () => Promise.resolve([DEFINITION, changed]),
+    } as unknown as FacilitySession;
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => fixResult(ident, region, 'fetched'));
+    const demand = newDemand({ client, session: () => session, fetchFix });
+    demand.start();
+    await flush();
+    expect(fetchFix).not.toHaveBeenCalled();
+    expect(logged.filter((line) => line.includes('changed the fix definition'))).toHaveLength(1);
+  });
+
+  it('puts a fix cut off by a disconnect back, uncounted', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.replies.push(ok(body([], false, { waypoints: [wpt('ZZWPA', 'ZZ')] })));
+    const { session, link } = bothSession();
+    let drops = 0;
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => {
+      if (drops < 4) {
+        drops++;
+        link.open = false;
+        return fixResult(ident, region, 'aborted');
+      }
+      return fixResult(ident, region, 'fetched');
+    });
+    const demand = newDemand({ client, session: () => (link.open ? session : null), fetchFix });
+    demand.start();
+    for (let i = 0; i < 4; i++) {
+      await flush();
+      link.open = true;
+      demand.wake();
+    }
+    await flush();
+    expect(fetchFix).toHaveBeenCalledTimes(5);
+    expect(logged.some((line) => line.includes('set aside'))).toBe(false);
+  });
+
+  it('parks a fix that keeps failing, names it in skipWaypoints, and forgets it on a new session', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.fallback = ok(body(['ZZAB'], false, { waypoints: [wpt('ZZWPB', 'ZZ'), wpt('ZZWPA', 'ZZ'), wpt('ZZWPA')] }));
+    let session: FacilitySession | null = bothSession().session;
+    const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) => result(ident, 'aborted'));
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) =>
+      fixResult(ident, region, ident === 'ZZWPA' ? 'aborted' : 'ambiguous'),
+    );
+    const demand = newDemand({ client, session: () => session, fetchDetail, fetchFix });
+    demand.start();
+    await flush();
+    await vi.advanceTimersByTimeAsync(3 * NAVDATA_DEMAND_POLL_MS);
+    // Aborts are retried at once and parked within the first pass; an
+    // ambiguous fix is parked on its first answer.
+    expect(logged.filter((line) => line.includes('ZZWPA/ZZ is set aside'))).toHaveLength(1);
+    expect(logged.filter((line) => line.includes('ZZWPA is set aside'))).toHaveLength(1);
+    expect(logged.filter((line) => line.includes('ZZWPB/ZZ is set aside'))).toHaveLength(1);
+    // Both regions of ZZWPA collapse to the one ident the parameter can carry.
+    expect(client.skips.at(-1)).toEqual({ airports: ['ZZAB'], waypoints: ['ZZWPA', 'ZZWPB'] });
+
+    const calls = fetchFix.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(2 * NAVDATA_DEMAND_POLL_MS);
+    expect(fetchFix.mock.calls.length).toBe(calls);
+
+    session = bothSession().session;
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    expect(client.skips.at(-1)).toBeUndefined();
+    expect(fetchFix.mock.calls.length).toBeGreaterThan(calls);
+  });
+
+  it('holds a failing fix the same way, and parks an ambiguous one on its first answer', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.fallback = ok(
+      body([], true, { cap: 3, waypoints: [{ ident: 'ZZAMB' }, { ident: 'ZZWPF', region: 'ZZ' }, { ident: 'ZZWPA', region: 'ZZ' }] }),
+    );
+    const { store, fixes } = fakeStore();
+    const { session } = bothSession();
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => {
+      if (ident === 'ZZWPA') fixes.push({ ident, region: region ?? '', routes_state: 'fetched' });
+      return fixResult(ident, region, ident === 'ZZAMB' ? 'ambiguous' : ident === 'ZZWPF' ? 'failed' : 'fetched');
+    });
+    const tries = (ident: string): number => fetchFix.mock.calls.filter((call) => call[3] === ident).length;
+    const demand = newDemand({ client, store: () => store, session: () => session, fetchFix });
+    demand.start();
+    await flush();
+    expect(tries('ZZAMB')).toBe(1);
+    expect(tries('ZZWPF')).toBe(1);
+    expect(logged.filter((line) => line.includes('ZZAMB is set aside because'))).toHaveLength(1);
+    expect(client.skips.at(-1)).toEqual({ waypoints: ['ZZAMB'] });
+
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await flush();
+    expect(tries('ZZAMB')).toBe(1);
+    expect(tries('ZZWPF')).toBe(2);
+  });
+
+  it('treats a region-qualified fix whose airways are recorded absent as answered', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    const { store, fixes } = fakeStore();
+    fixes.push({ ident: 'ZZWPH', region: 'ZZ', routes_state: 'absent' });
+    client.replies.push(ok(body([], false, { waypoints: [wpt('ZZWPH', 'ZZ'), wpt('ZZWPH', 'ZY')] })));
+    const { session } = bothSession();
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => fixResult(ident, region, 'fetched'));
+    const demand = newDemand({ client, store: () => store, session: () => session, fetchFix });
+    demand.start();
+    await flush();
+    expect(fetchFix.mock.calls.map((call) => `${call[3]}/${call[4] ?? '-'}`)).toEqual(['ZZWPH/ZY']);
+  });
+
+  it('bounds each kind on its own, so fixes that cannot be fetched never keep an airport out', async () => {
+    vi.useFakeTimers();
+    const many = Array.from({ length: DEMAND_QUEUE_HIGH_WATER + 30 }, (_, i) => wpt(`ZZ${String(7000 + i)}`, 'ZZ'));
+    const client = new FakeClient();
+    client.replies.push(
+      ok(body([], false, { waypoints: many, cap: many.length })),
+      ok(body(['ZZAA', 'ZZAB', 'ZZAC'], false, { waypoints: many, cap: many.length })),
+    );
+    // The simulator will not take the fix definition, so no fix ever leaves the queue.
+    const { session } = bothSession(false);
+    const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) => result(ident, 'detail'));
+    const demand = newDemand({ client, session: () => session, fetchDetail });
+    demand.start();
+    await flush();
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await flush();
+    expect(fetchDetail.mock.calls.map((call) => call[3])).toEqual(['ZZAA', 'ZZAB', 'ZZAC']);
+  });
+
+  it(`never names more than ${DEMAND_SKIP_MAX} fixes, sorted, and says so once`, async () => {
+    vi.useFakeTimers();
+    const many = Array.from({ length: DEMAND_SKIP_MAX + 20 }, (_, i) => wpt(`ZZ${String(5000 + i)}`, 'ZZ'));
+    const client = new FakeClient();
+    client.fallback = ok(body([], false, { waypoints: [...many].reverse(), cap: many.length }));
+    const { session } = bothSession();
+    const fetchFix = vi.fn<FetchFix>(async (_s, _st, _d, ident, region) => fixResult(ident, region, 'aborted'));
+    const demand = newDemand({ client, session: () => session, fetchFix });
+    demand.start();
+    await flush();
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await flush();
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    const [third, fourth] = client.skips.slice(2);
+    expect(third?.waypoints).toEqual(many.map((w) => w.ident).sort().slice(0, DEMAND_SKIP_MAX));
+    expect(third?.airports).toBeUndefined();
+    expect(fourth).toEqual(third);
+    expect(logged.filter((line) => line.includes('fixes are set aside'))).toHaveLength(1);
+  });
+});
+
+describe('a fix through the real session and store', () => {
+  it('prepares both definitions on one session, asks for the fix as a waypoint, and stores what comes back', async () => {
+    const store = openFixtureStore(scratchDir());
+    stores.push(store);
+    const handle = new FakeFacilityConnection();
+    const session = new FacilitySession(handle as never, { settleMs: 1 });
+    sessions.push(session);
+    const client = new FakeClient();
+    client.replies.push(ok(body([], false, { waypoints: [{ ident: 'ZZAMB' }] })));
+    const demand = newDemand({ client, store: () => store, session: () => session });
+    demand.start();
+    await until(() => handle.dataRequests.length === 1);
+
+    const opened = handle.definitionSends.filter((s) => s.fieldName.startsWith('OPEN ')).map((s) => s.fieldName);
+    expect(opened).toContain('OPEN AIRPORT');
+    expect(opened).toContain('OPEN WAYPOINT');
+    expect(handle.dataRequests[0]).toMatchObject({ ident: 'ZZAMB', icaoType: 'W', region: undefined });
+
+    handle.emitMinimalList(handle.dataRequests[0].requestId, [
+      { icao: { type: 'W', ident: 'ZZAMB', region: 'ZZ', airport: '' }, latLonAlt: { latitude: 3.25, longitude: 4.75, altitude: 0 } },
+      { icao: { type: 'W', ident: 'ZZAMB', region: 'ZY', airport: '' }, latLonAlt: { latitude: -3.25, longitude: -4.75, altitude: 0 } },
+    ]);
+    await until(() => store.count('nav_waypoint') === 2);
+    expect(store.waypoints('ZZAMB', null).every((row) => row.routes_state === 'unknown')).toBe(true);
+  });
+});
+
+describe('an item that fails while the list is truncated', () => {
+  // The live shape: a stateless server re-lists everything it still wants on
+  // every immediate re-read, so an item that just failed came back as "new"
+  // work and was tried three times, and parked, in a fraction of a second.
+  it('is tried once per timed poll, not once per re-read, and parked after three cycles', async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    client.fallback = ok(body(['ZZAA', 'ZZAB', 'ZZAC'], true, { cap: 3 }));
+    const { store, detail } = fakeStore();
+    const { session } = fakeSession();
+    const fetchDetail = vi.fn<FetchDetail>(async (_s, _st, _d, ident) => {
+      if (ident === 'ZZAA') return result(ident, 'failed');
+      detail.add(ident);
+      return result(ident, 'detail');
+    });
+    const demand = newDemand({ client, store: () => store, session: () => session, fetchDetail });
+    const tries = (): number => fetchDetail.mock.calls.filter((call) => call[3] === 'ZZAA').length;
+
+    demand.start();
+    await flush();
+    expect(tries()).toBe(1);
+    expect(logged.some((line) => line.includes('set aside'))).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await flush();
+    expect(tries()).toBe(2);
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    await flush();
+    expect(tries()).toBe(3);
+    expect(logged.filter((line) => line.includes('ZZAA is set aside'))).toHaveLength(1);
+    // From then on the server is told to leave it out, and it is not tried again.
+    expect(client.skips.at(-1)).toEqual({ airports: ['ZZAA'] });
+    await vi.advanceTimersByTimeAsync(NAVDATA_DEMAND_POLL_MS);
+    expect(tries()).toBe(3);
   });
 });

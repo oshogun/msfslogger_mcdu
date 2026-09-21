@@ -160,6 +160,11 @@ export interface NavdataStore {
   meta(): NavdataMeta;
   row<T extends NavdataTable>(table: T, key: NavdataRowInput<T>): NavdataRow<T> | null;
   count(table: NavdataTable): number;
+  /**
+   * The fixes stored under an ident, in one region or in any. `nav_waypoint`
+   * is keyed by position as well, so an ident and region can name several.
+   */
+  waypoints(ident: string, region: string | null): NavdataRow<'nav_waypoint'>[];
   /** One transaction, one rev. Rolls back and rethrows if the body throws. */
   write<T>(fn: (tx: NavdataTx) => T): T;
   /**
@@ -656,6 +661,8 @@ function createStore(db: SqliteDatabase, dbPath: string, now: () => number): Nav
   };
 
   const countStatements = new Map<NavdataTable, SqliteStatement>();
+  let waypointsInRegion: SqliteStatement | null = null;
+  let waypointsAnyRegion: SqliteStatement | null = null;
 
   let inTransaction = false;
   let closed = false;
@@ -687,6 +694,16 @@ function createStore(db: SqliteDatabase, dbPath: string, now: () => number): Nav
         countStatements.set(table, statement);
       }
       return Number(statement.get()?.n ?? 0);
+    },
+
+    waypoints(ident: string, region: string | null): NavdataRow<'nav_waypoint'>[] {
+      requireOpen();
+      if (region === null) {
+        waypointsAnyRegion ??= db.prepare('SELECT * FROM nav_waypoint WHERE ident = ?');
+        return waypointsAnyRegion.all(ident) as NavdataRow<'nav_waypoint'>[];
+      }
+      waypointsInRegion ??= db.prepare('SELECT * FROM nav_waypoint WHERE ident = ? AND region = ?');
+      return waypointsInRegion.all(ident, region) as NavdataRow<'nav_waypoint'>[];
     },
 
     write<T>(fn: (tx: NavdataTx) => T): T {
@@ -814,6 +831,16 @@ function createStore(db: SqliteDatabase, dbPath: string, now: () => number): Nav
             const reset = { ...row, detail_state: 'index' } as NavdataRowInput<typeof table>;
             if (tx.upsert(table, reset)) cleared++;
           }
+        }
+        // A fix's column is `routes_state`, and its weakest claim is 'unknown',
+        // not 'index'. Nothing in this build marks a fix pending — it has no key
+        // until its position arrives — but a store is not only ever written by
+        // this build, and a row left pending would never be fetched again.
+        const staleFixes = db
+          .prepare("SELECT wpt_key FROM nav_waypoint WHERE routes_state = 'pending'")
+          .all();
+        for (const row of staleFixes) {
+          if (tx.upsert('nav_waypoint', { wpt_key: row.wpt_key as string, routes_state: 'unknown' })) cleared++;
         }
         return cleared;
       });

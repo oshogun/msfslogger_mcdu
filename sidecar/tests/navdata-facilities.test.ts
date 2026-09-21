@@ -233,6 +233,22 @@ describe('terminal outcomes', () => {
     const result = await fetching;
     expect(result.outcome).toBe('failed');
     expect(result.exception).toBe('DATA_ERROR(20) index=3');
+    // The number, beside the sentence. A caller that branches on WHICH
+    // exception this was reads the code; the string is for reading in a log,
+    // and rewording it must never change what any caller decides.
+    expect(result.exceptionCode).toBe(20);
+  });
+
+  it('reports no exception code when nothing the simulator said settled it', async () => {
+    const fetching = session.fetch({ definitionId: 101, ident: 'ZZZZ', timeoutMs: 8_000 });
+    await flush();
+    await vi.advanceTimersByTimeAsync(8_000);
+
+    const result = await fetching;
+    expect(result.outcome).toBe('absent');
+    // Silence is not exception zero. A caller comparing the code against a
+    // real exception number must not match a request the simulator ignored.
+    expect(result.exceptionCode).toBeNull();
   });
 
   it('ignores an exception belonging to some other send', async () => {

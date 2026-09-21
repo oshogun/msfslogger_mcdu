@@ -90,6 +90,16 @@ export interface FacilityExceptionMessage {
 
 export interface FacilityDataMessage {
   readonly userRequestId: number;
+  /**
+   * This record's own id, and its parent's. They are the ONLY way to rebuild
+   * the tree a facility definition describes: the definition's member map is
+   * keyed by entry name, so an entry opened under several parents — APPROACH_LEG
+   * hangs off five — collapses to one key and cannot say which list a record
+   * belongs to. Without these, a procedure's legs attach to no parent and the
+   * result is a map that looks plausible with its procedures quietly missing.
+   */
+  readonly uniqueRequestId: number;
+  readonly parentUniqueRequestId: number;
   readonly type: number;
   readonly isListItem: boolean;
   readonly itemIndex: number;
@@ -213,6 +223,19 @@ export interface FacilityFetchResult {
   /** Messages delivered for the attempt that settled the request. */
   readonly messages: number;
   readonly minimal: readonly FacilityMinimalEntry[] | null;
+  /**
+   * The simulator's own exception number, or null when nothing the simulator
+   * said settled the request — a timeout, an abort, or a send that threw here.
+   *
+   * It is beside `exception` rather than parsed out of it because callers
+   * BRANCH on which exception this was, and the string is a human-readable
+   * rendering that exists to be read in a log. Control flow that pattern-matched
+   * the rendering would keep working until someone improved the wording, and
+   * then fail silently: the branch would simply stop being taken, and no test
+   * that builds the string itself could notice. The number is what the wire
+   * carried. The string is for reading.
+   */
+  readonly exceptionCode: number | null;
   readonly exception: string | null;
   readonly ms: number;
 }
@@ -325,6 +348,7 @@ interface PendingFetch {
   sendId: number | null;
   messages: number;
   minimal: readonly FacilityMinimalEntry[] | null;
+  exceptionCode: number | null;
   exception: string | null;
   timer: NodeJS.Timeout | null;
   readonly onMessage?: (recv: FacilityDataMessage) => void;
@@ -377,6 +401,7 @@ export class FacilitySession {
     if (requestId === undefined) return;
     const fetch = this.fetches.get(requestId);
     if (fetch) {
+      fetch.exceptionCode = recv.exception;
       fetch.exception = describeException(recv);
       fetch.settle('failed');
       return;
@@ -640,7 +665,14 @@ export class FacilitySession {
   async fetch(request: FacilityFetchRequest): Promise<FacilityFetchResult> {
     await this.definitionsReady;
     if (this.closed) {
-      return { outcome: 'aborted', messages: 0, minimal: null, exception: null, ms: 0 };
+      return {
+        outcome: 'aborted',
+        messages: 0,
+        minimal: null,
+        exceptionCode: null,
+        exception: null,
+        ms: 0,
+      };
     }
     await this.slots.acquire(request.priority ?? 0);
     try {
@@ -649,7 +681,14 @@ export class FacilitySession {
       // issuing into it would make a rejection impossible to attribute.
       await this.definitionsReady;
       if (this.closed) {
-        return { outcome: 'aborted', messages: 0, minimal: null, exception: null, ms: 0 };
+        return {
+          outcome: 'aborted',
+          messages: 0,
+          minimal: null,
+          exceptionCode: null,
+          exception: null,
+          ms: 0,
+        };
       }
       const first = await this.attempt(request);
       if (first.outcome !== 'partial' || this.closed) return first;
@@ -677,7 +716,14 @@ export class FacilitySession {
       // supervisor eventually sees. If the caller cannot clear its buffer there
       // is nothing safe to fetch into, so the attempt is abandoned, not sent.
       if (!this.safely(`preparing ${request.ident}`, () => request.onAttempt?.())) {
-        resolve({ outcome: 'aborted', messages: 0, minimal: null, exception: null, ms: 0 });
+        resolve({
+          outcome: 'aborted',
+          messages: 0,
+          minimal: null,
+          exceptionCode: null,
+          exception: null,
+          ms: 0,
+        });
         return;
       }
       const pending: PendingFetch = {
@@ -685,6 +731,7 @@ export class FacilitySession {
         sendId: null,
         messages: 0,
         minimal: null,
+        exceptionCode: null,
         exception: null,
         timer: null,
         onMessage: request.onMessage,
@@ -696,6 +743,7 @@ export class FacilitySession {
             outcome,
             messages: pending.messages,
             minimal: pending.minimal,
+            exceptionCode: pending.exceptionCode,
             exception: pending.exception,
             ms: this.now() - started,
           });

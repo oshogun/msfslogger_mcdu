@@ -11,16 +11,30 @@
 // really does reject a text value in a REAL column, and deleting an airport
 // cascades to its runways, procedures, transitions and legs.
 //
-// Synthetic idents only (ZZZA, TESTA, ...). No real navdata, no %APPDATA%, no
-// file on disk: every database here is ':memory:'.
+// And one tripwire on the duplication itself: the embedded DDL is compared, byte
+// for byte, with every other copy of the schema file in the checkout. Those are
+// the only tests here that touch a file on disk, and they only read it.
+//
+// Synthetic idents only (ZZZA, TESTA, ...). No real navdata, no %APPDATA%: every
+// database here is ':memory:'.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
 import {
   NAVDATA_SCHEMA_SQL,
   NAVDATA_SCHEMA_VERSION,
   NAVDATA_TABLE_COLUMNS,
   NAVDATA_TABLES,
 } from '../src/navdata-schema';
+import {
+  REPO_ROOT,
+  describeComparison,
+  differingCopies,
+  findCopies,
+} from './helpers/contract-copies';
 
 // The driver is required the same lazy way the store requires it.
 const Database = require('better-sqlite3');
@@ -168,5 +182,80 @@ describe('the embedded DDL', () => {
     }
     expect(db.prepare("SELECT COUNT(*) AS n FROM nav_waypoint WHERE ident='LOC10'").get()?.n).toBe(3);
     db.close();
+  });
+});
+
+// ── The copy handed to the server ────────────────────────────────────────────
+
+/** The file the embedded DDL is a copy of, wherever it lives in this checkout. */
+const SCHEMA_FILE_NAME = 'navdata-schema.sql';
+
+/**
+ * The embedded DDL as bytes. It is LF by construction, whatever the source file
+ * is checked out with: the language normalises a line break inside a template
+ * literal to LF, so the copy the sidecar actually runs can never be anything
+ * else — which is why the contract is kept LF, and not the other way round.
+ */
+const EMBEDDED = Buffer.from(NAVDATA_SCHEMA_SQL, 'utf8');
+
+const scratch: string[] = [];
+
+afterEach(() => {
+  while (scratch.length > 0) {
+    fs.rmSync(scratch.pop() as string, { recursive: true, force: true, maxRetries: 10 });
+  }
+});
+
+describe('the schema exists in exactly one form', () => {
+  it('is byte-identical to every copy of the schema file in this checkout', () => {
+    const copies = findCopies(REPO_ROOT, SCHEMA_FILE_NAME);
+    console.info(describeComparison(SCHEMA_FILE_NAME, copies));
+    // Strict bytes. A copy differing only in its line endings is a copy that
+    // differs: the other repository reads the bytes, and CRLF against LF is the
+    // one drift that has actually happened to this file.
+    expect(differingCopies(copies, EMBEDDED)).toEqual([]);
+  });
+
+  it('WOULD fail on the drift that actually happened, and on a one-byte one', () => {
+    // The tripwire proving itself. Without this, the test above is green both
+    // when the copies match and when the search silently found nothing.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'navdata-schema-copies-'));
+    scratch.push(root);
+    const place = (directory: string, bytes: Buffer): string => {
+      const file = path.join(root, directory, SCHEMA_FILE_NAME);
+      fs.mkdirSync(path.dirname(file));
+      fs.writeFileSync(file, bytes);
+      return path.resolve(file);
+    };
+    const faithful = place('faithful', EMBEDDED);
+    // Saved on Windows by an editor that writes CRLF: every line ends two bytes
+    // wide, the text is unchanged, and nothing that parses SQL would notice.
+    const crlf = place('crlf', Buffer.from(NAVDATA_SCHEMA_SQL.replace(/\n/g, '\r\n'), 'utf8'));
+    // One column type edited on one side only.
+    const edited = place(
+      'edited',
+      Buffer.from(
+        NAVDATA_SCHEMA_SQL.replace('heading_deg             REAL', 'heading_deg             TEXT'),
+        'utf8',
+      ),
+    );
+    // A trailing newline lost in a copy-paste.
+    const truncated = place('truncated', EMBEDDED.subarray(0, EMBEDDED.length - 1));
+
+    expect(NAVDATA_SCHEMA_SQL).toContain('heading_deg             REAL');
+    expect(findCopies(root, SCHEMA_FILE_NAME).sort()).toEqual(
+      [faithful, crlf, edited, truncated].sort(),
+    );
+    expect(differingCopies(findCopies(root, SCHEMA_FILE_NAME), EMBEDDED).sort()).toEqual(
+      [crlf, edited, truncated].sort(),
+    );
+  });
+
+  it('says so when it had nothing to compare, rather than passing in silence', () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'navdata-schema-none-'));
+    scratch.push(empty);
+    const copies = findCopies(empty, SCHEMA_FILE_NAME);
+    expect(copies).toEqual([]);
+    expect(describeComparison(SCHEMA_FILE_NAME, copies)).toContain('NOT checked');
   });
 });

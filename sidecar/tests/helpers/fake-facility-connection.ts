@@ -130,6 +130,30 @@ export class FakeFacilityConnection {
     }
   }
 
+  /**
+   * One record with its place in the tree. `uniqueRequestId` and
+   * `parentUniqueRequestId` are how a decoder tells an approach transition's
+   * legs from a SID's common legs, since both arrive under the same entry name.
+   */
+  emitRecord(
+    requestId: number,
+    type: number,
+    uniqueRequestId: number,
+    parentUniqueRequestId: number,
+    data: FacilityReader,
+  ): void {
+    this.emitter.emit('facilityData', {
+      userRequestId: requestId,
+      uniqueRequestId,
+      parentUniqueRequestId,
+      type,
+      isListItem: false,
+      itemIndex: 0,
+      listSize: 1,
+      data,
+    });
+  }
+
   emitDataEnd(requestId: number): void {
     this.emitter.emit('facilityDataEnd', { userRequestId: requestId });
   }

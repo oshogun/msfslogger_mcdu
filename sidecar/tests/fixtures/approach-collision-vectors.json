@@ -1,0 +1,250 @@
+{
+  "version": 1,
+  "title": "Procedure key collision ordering — shared vectors",
+  "purpose": [
+    "Two procedures at one airport can produce the same proc_key. Measured across 250",
+    "airports: the simulator declared 2962 approaches and 2954 survived keying. The 8",
+    "lost were 4 colliding pairs, each two approaches of the same type to the same",
+    "runway with the same suffix. Some pairs were identical on every member the API",
+    "exposes; others differed materially.",
+    "",
+    "The fix: proc_key keeps its form, and a disambiguator is appended ONLY when a",
+    "collision actually occurs. The first in the order below keeps the base key, the",
+    "second becomes KEY#2, the third KEY#3. There is never a #1 — a procedure that",
+    "collides with nothing must produce exactly the key it produced before this rule",
+    "existed.",
+    "",
+    "WHICH ONE IS FIRST IS DECIDED FROM THE DATA, NEVER FROM ARRIVAL ORDER. If the base",
+    "key followed arrival order, a navdata update that re-ordered the records would move",
+    "real content between two keys that both still exist, with nothing erroring and",
+    "nothing to compare against.",
+    "",
+    "EVERY VECTOR HERE IS SYNTHETIC. The airports are ZZ-prefixed, the FAF idents are",
+    "invented, and every number was chosen for what it exercises in the comparator,",
+    "not read from a simulator. Each vector reproduces the SHAPE of a case the",
+    "measurement found, and none of its content.",
+    "",
+    "This file is loaded by the test suites of BOTH repositories. Neither may edit it",
+    "alone: the two implementations share no code and must order the same pair the same",
+    "way, so the bytes are the contract."
+  ],
+  "comparator": [
+    "Applied ONLY to a set already sharing airport, kind, name, runway_number,",
+    "runway_designator and suffix — i.e. a set whose base keys are equal.",
+    "1. fafIdent       — absent last; otherwise ascending by ORDINARY CODE-UNIT",
+    "                    comparison (JavaScript `<` on strings). NOT localeCompare:",
+    "                    it disagrees on mixed case and its collation depends on the",
+    "                    ICU build, so two repositories would order the same pair",
+    "                    differently.",
+    "2. nTransitions   — absent last; otherwise ascending numerically",
+    "3. missedLegCount — absent last; otherwise ascending numerically",
+    "4. missedAltM     — absent last; otherwise ascending numerically",
+    "5. arrivalIndex   — ascending; 0-based within one fetch; ALWAYS present",
+    "",
+    "ONE RULE AT EVERY LEVEL: ABSENT SORTS LAST. Absent means null, undefined, an empty",
+    "string, or NaN. NaN is named explicitly because every comparison against it is",
+    "false, which would make the comparator intransitive and let the sort algorithm,",
+    "rather than the data, decide the answer.",
+    "",
+    "The float is next to last on purpose: it only ever separates records that are",
+    "otherwise indistinguishable, so no float is a primary discriminator."
+  ],
+  "conventions": {
+    "absent": "JSON null means absent. The string \"\" is also absent, and is used deliberately in one vector to pin that.",
+    "nan": "JSON has no NaN literal. The string \"NaN\" in a numeric field means the IEEE NaN value, and must be loaded as such.",
+    "arrivalIndex": "Not stored in a vector. It is the record's 0-based position in `records`, and in the reversed feed it is the position in the reversed list.",
+    "expectedReversed": "The same vector fed in the opposite order. It equals `expected` for every vector whose records are distinguishable; `orderIndependent` states which.",
+    "adversarial": "Where one field decides, the fields ranked BELOW it are set to favour the OTHER record. So a vector does not merely show a field deciding; it shows that field outranking everything after it."
+  },
+  "vectors": [
+    {
+      "name": "ZZBA 03 — the FAF decides",
+      "note": "A's FAF sorts first ('ZZFAA' < 'ZZFBB'), and A keeps the base key even though every lower-ranked field favours B.",
+      "baseKey": "ZZBA|APPROACH|2-03|3|0|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": "ZZFAA", "nTransitions": 6, "missedLegCount": 4, "missedAltM": 1350.5 },
+        { "id": "B", "fafIdent": "ZZFBB", "nTransitions": 2, "missedLegCount": 1, "missedAltM": 600.5 }
+      ],
+      "first": "A",
+      "expected": {
+        "A": "ZZBA|APPROACH|2-03|3|0|0",
+        "B": "ZZBA|APPROACH|2-03|3|0|0#2"
+      },
+      "expectedReversed": {
+        "A": "ZZBA|APPROACH|2-03|3|0|0",
+        "B": "ZZBA|APPROACH|2-03|3|0|0#2"
+      }
+    },
+    {
+      "name": "ZZBB 12 — equal FAF, the transition count decides",
+      "note": "B has fewer transitions and takes the base key although it arrives SECOND, and although the missed-leg count and the altitude both favour A.",
+      "baseKey": "ZZBB|APPROACH|2-12|12|0|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": "ZZFCC", "nTransitions": 6, "missedLegCount": 1, "missedAltM": 900.5 },
+        { "id": "B", "fafIdent": "ZZFCC", "nTransitions": 3, "missedLegCount": 4, "missedAltM": 1200.5 }
+      ],
+      "first": "B",
+      "expected": {
+        "B": "ZZBB|APPROACH|2-12|12|0|0",
+        "A": "ZZBB|APPROACH|2-12|12|0|0#2"
+      },
+      "expectedReversed": {
+        "B": "ZZBB|APPROACH|2-12|12|0|0",
+        "A": "ZZBB|APPROACH|2-12|12|0|0#2"
+      }
+    },
+    {
+      "name": "ZZBC 25 — equal FAF and transitions, the missed-leg count decides",
+      "note": "B has fewer missed legs and takes the base key although it arrives second, and although the altitude favours A.",
+      "baseKey": "ZZBC|APPROACH|2-25|25|0|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": "ZZFDD", "nTransitions": 4, "missedLegCount": 5, "missedAltM": 700.5 },
+        { "id": "B", "fafIdent": "ZZFDD", "nTransitions": 4, "missedLegCount": 2, "missedAltM": 1400.5 }
+      ],
+      "first": "B",
+      "expected": {
+        "B": "ZZBC|APPROACH|2-25|25|0|0",
+        "A": "ZZBC|APPROACH|2-25|25|0|0#2"
+      },
+      "expectedReversed": {
+        "B": "ZZBC|APPROACH|2-25|25|0|0",
+        "A": "ZZBC|APPROACH|2-25|25|0|0#2"
+      }
+    },
+    {
+      "name": "ZZBD 30 — equal down to the altitude, and the float decides",
+      "note": "The only vector in which the float separates the records, which is why it is the last discriminator before arrival order. B arrives second and wins.",
+      "baseKey": "ZZBD|APPROACH|2-30|30|0|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": "ZZFEE", "nTransitions": 2, "missedLegCount": 3, "missedAltM": 1100.5 },
+        { "id": "B", "fafIdent": "ZZFEE", "nTransitions": 2, "missedLegCount": 3, "missedAltM": 850.25 }
+      ],
+      "first": "B",
+      "expected": {
+        "B": "ZZBD|APPROACH|2-30|30|0|0",
+        "A": "ZZBD|APPROACH|2-30|30|0|0#2"
+      },
+      "expectedReversed": {
+        "B": "ZZBD|APPROACH|2-30|30|0|0",
+        "A": "ZZBD|APPROACH|2-30|30|0|0#2"
+      }
+    },
+    {
+      "name": "ZZBE 06R — an absent FAF arrives first and still sorts last",
+      "note": "A arrives FIRST, has no FAF, and has the smallest value in every other field — and still does not get the base key, because absent sorts last at the FIRST level. The runway is a padded single-digit number with a designator letter, so the key carries both '06' and 'R'. This is the vector that proves arrival order is unreachable while any discriminator still separates the records.",
+      "baseKey": "ZZBE|APPROACH|2-06R|6|2|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": null, "nTransitions": 1, "missedLegCount": 1, "missedAltM": 500.5 },
+        { "id": "B", "fafIdent": "ZZFFF", "nTransitions": 8, "missedLegCount": 6, "missedAltM": 1500.5 }
+      ],
+      "first": "B",
+      "expected": {
+        "B": "ZZBE|APPROACH|2-06R|6|2|0",
+        "A": "ZZBE|APPROACH|2-06R|6|2|0#2"
+      },
+      "expectedReversed": {
+        "B": "ZZBE|APPROACH|2-06R|6|2|0",
+        "A": "ZZBE|APPROACH|2-06R|6|2|0#2"
+      }
+    },
+    {
+      "name": "ZZAB 09 — an empty string is absent, exactly like null",
+      "note": "C has a FAF and wins, even though its transition count is the highest. A's FAF is an empty string and B's is null: both are ABSENT, so neither outranks the other and the second discriminator separates them. If an empty string were treated as a value, '' < 'ZZF' would give A the base key — so C holding it is what proves the rule.",
+      "baseKey": "ZZAB|APPROACH|2-09|9|0|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": "", "nTransitions": 5, "missedLegCount": 2, "missedAltM": 450.5 },
+        { "id": "B", "fafIdent": null, "nTransitions": 2, "missedLegCount": 2, "missedAltM": 450.5 },
+        { "id": "C", "fafIdent": "ZZF", "nTransitions": 9, "missedLegCount": 2, "missedAltM": 450.5 }
+      ],
+      "first": "C",
+      "expected": {
+        "C": "ZZAB|APPROACH|2-09|9|0|0",
+        "B": "ZZAB|APPROACH|2-09|9|0|0#2",
+        "A": "ZZAB|APPROACH|2-09|9|0|0#3"
+      },
+      "expectedReversed": {
+        "C": "ZZAB|APPROACH|2-09|9|0|0",
+        "B": "ZZAB|APPROACH|2-09|9|0|0#2",
+        "A": "ZZAB|APPROACH|2-09|9|0|0#3"
+      }
+    },
+    {
+      "name": "ZZAC 27 — a NaN altitude sorts last, and does not scramble the order",
+      "note": "A float that failed to decode must not be allowed to order unpredictably: every comparison against NaN is false, which without an explicit rule makes the comparator intransitive.",
+      "baseKey": "ZZAC|APPROACH|2-27|27|0|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": "ZZG", "nTransitions": 1, "missedLegCount": 1, "missedAltM": "NaN" },
+        { "id": "B", "fafIdent": "ZZG", "nTransitions": 1, "missedLegCount": 1, "missedAltM": 300.5 }
+      ],
+      "first": "B",
+      "expected": {
+        "B": "ZZAC|APPROACH|2-27|27|0|0",
+        "A": "ZZAC|APPROACH|2-27|27|0|0#2"
+      },
+      "expectedReversed": {
+        "B": "ZZAC|APPROACH|2-27|27|0|0",
+        "A": "ZZAC|APPROACH|2-27|27|0|0#2"
+      }
+    },
+    {
+      "name": "ZZAD 18 — a three-way collision",
+      "note": "Base, #2 and #3, ordered by FAF: ZZFAA, ZZFBB, ZZFCC. No #1 is ever produced.",
+      "baseKey": "ZZAD|APPROACH|2-18|18|0|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": "ZZFCC", "nTransitions": 2, "missedLegCount": 2, "missedAltM": 750.5 },
+        { "id": "B", "fafIdent": "ZZFAA", "nTransitions": 2, "missedLegCount": 2, "missedAltM": 750.5 },
+        { "id": "C", "fafIdent": "ZZFBB", "nTransitions": 2, "missedLegCount": 2, "missedAltM": 750.5 }
+      ],
+      "first": "B",
+      "expected": {
+        "B": "ZZAD|APPROACH|2-18|18|0|0",
+        "C": "ZZAD|APPROACH|2-18|18|0|0#2",
+        "A": "ZZAD|APPROACH|2-18|18|0|0#3"
+      },
+      "expectedReversed": {
+        "B": "ZZAD|APPROACH|2-18|18|0|0",
+        "C": "ZZAD|APPROACH|2-18|18|0|0#2",
+        "A": "ZZAD|APPROACH|2-18|18|0|0#3"
+      }
+    },
+    {
+      "name": "ZZAE 36 — a genuinely identical pair falls through to arrival order",
+      "note": "The ONLY vector where reversing the input changes which record holds the base key, and that is correct: nothing in the data distinguishes them, so arrival order is the honest answer and is the final tiebreak. Both are kept, because 'identical on every member the API exposes' is not the same as 'the same approach'. orderIndependent is false here, and this is the only vector for which it may be.",
+      "baseKey": "ZZAE|APPROACH|2-36|36|0|0",
+      "orderIndependent": false,
+      "records": [
+        { "id": "A", "fafIdent": "ZZH", "nTransitions": 2, "missedLegCount": 2, "missedAltM": 1050.5 },
+        { "id": "B", "fafIdent": "ZZH", "nTransitions": 2, "missedLegCount": 2, "missedAltM": 1050.5 }
+      ],
+      "first": "A",
+      "expected": {
+        "A": "ZZAE|APPROACH|2-36|36|0|0",
+        "B": "ZZAE|APPROACH|2-36|36|0|0#2"
+      },
+      "expectedReversed": {
+        "B": "ZZAE|APPROACH|2-36|36|0|0",
+        "A": "ZZAE|APPROACH|2-36|36|0|0#2"
+      }
+    },
+    {
+      "name": "ZZAF 01 — no collision at all",
+      "note": "A set of one. The key is byte-identical to what the base derivation produces, and no disambiguator appears. This is the 99.7% case and it must never change.",
+      "baseKey": "ZZAF|APPROACH|2-01|1|0|0",
+      "orderIndependent": true,
+      "records": [
+        { "id": "A", "fafIdent": "ZZI", "nTransitions": 3, "missedLegCount": 2, "missedAltM": 450.5 }
+      ],
+      "first": "A",
+      "expected": { "A": "ZZAF|APPROACH|2-01|1|0|0" },
+      "expectedReversed": { "A": "ZZAF|APPROACH|2-01|1|0|0" }
+    }
+  ]
+}

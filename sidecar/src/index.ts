@@ -155,6 +155,8 @@ class Sidecar {
     }),
     log: (level, message) => this.log(level, message),
     onChange: () => this.touch(),
+    transport: () => this.uplink,
+    sidecarVersion: () => SIDECAR_VERSION,
   });
 
   private statusTimer: NodeJS.Timeout | null = null;

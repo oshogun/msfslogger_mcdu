@@ -34,6 +34,11 @@ import type { SimId } from './config';
 import { BulkAirportIndex, type BulkResult } from './navdata-bulk';
 import { asFacilityConnection, FacilitySession } from './navdata-facilities';
 import {
+  NavdataSync,
+  type NavdataSyncStatus,
+  type NavdataTransport,
+} from './navdata-sync';
+import {
   navdataDatabasePath,
   openNavdataStore,
   type NavdataOpenOptions,
@@ -58,10 +63,29 @@ export interface NavdataServiceDeps {
   log: LogSink;
   /** Something the axis shows has changed and a status line is due. */
   onChange(): void;
+  /**
+   * The uplink, for the sync client, or null while there is no valid config.
+   * Navdata borrows its config and its CA trust and nothing else: it never
+   * starts or stops it and never touches the reachability probe.
+   */
+  transport?: () => NavdataTransport | null;
+  /** This build's version, for the snapshot header. */
+  sidecarVersion?: () => string;
   /** Test seams: a store and a session that never touch a simulator. */
   openStore?: (path: string, options: NavdataOpenOptions) => NavdataStore | null;
   createSession?: (handle: SimConnectConnection) => FacilitySession;
   bulk?: BulkAirportIndex;
+  sync?: NavdataSyncLike;
+}
+
+/** What the service needs from the sync client, so a test can stand in for it. */
+export interface NavdataSyncLike {
+  start(): void;
+  stop(): void;
+  shutdown(): void;
+  onConfigApplied(): void;
+  reportState(axis: Pick<NavdataStatusAxis, 'state' | 'reason' | 'snapshotId' | 'rev'>): void;
+  status(): NavdataSyncStatus;
 }
 
 export class NavdataService {
@@ -71,6 +95,7 @@ export class NavdataService {
   private readonly openStore: (path: string, options: NavdataOpenOptions) => NavdataStore | null;
   private readonly createSession: (handle: SimConnectConnection) => FacilitySession;
   private readonly bulk: BulkAirportIndex;
+  private readonly sync: NavdataSyncLike;
 
   private store: NavdataStore | null = null;
   private storePath: string | null = null;
@@ -102,6 +127,15 @@ export class NavdataService {
     this.createSession =
       deps.createSession ?? ((handle) => new FacilitySession(asFacilityConnection(handle), { log: this.log }));
     this.bulk = deps.bulk ?? new BulkAirportIndex({ log: this.log });
+    this.sync =
+      deps.sync ??
+      new NavdataSync({
+        transport: () => deps.transport?.() ?? null,
+        store: () => this.store,
+        sidecarVersion: () => deps.sidecarVersion?.() ?? 'unknown',
+        log: this.log,
+        onChange: () => this.publish(),
+      });
   }
 
   // ── what the shell sees ─────────────────────────────────────────────────────
@@ -123,6 +157,9 @@ export class NavdataService {
     this.guard('starting navdata', () => {
       this.ensureStore();
     });
+    // Before the publish, so the first state report carries the state the
+    // store's open just settled rather than the one before it.
+    this.guard('starting the navdata sync', () => this.sync.start());
     this.publish();
   }
 
@@ -131,6 +168,9 @@ export class NavdataService {
     this.running = false;
     this.handle = null;
     this.closeSession('the uplink stopped');
+    // Rows stop; the state report does not. A stopped uplink is exactly the
+    // thing the server has no other way of hearing about.
+    this.guard('stopping the navdata sync', () => this.sync.stop());
     this.publish();
   }
 
@@ -163,6 +203,9 @@ export class NavdataService {
           this.startPass(this.handle, store);
         }
       }
+      // The sync cursor is keyed by server URL, so a config naming a different
+      // server resumes against whatever that one last acknowledged.
+      this.sync.onConfigApplied();
     });
     this.publish();
   }
@@ -222,6 +265,7 @@ export class NavdataService {
     this.running = false;
     this.handle = null;
     this.closeSession('the sidecar is shutting down');
+    this.guard('stopping the navdata sync', () => this.sync.shutdown());
     // The axis is computed while the store can still answer, so the last status
     // line the process writes carries counts rather than zeros.
     this.publish();
@@ -359,7 +403,18 @@ export class NavdataService {
   // ── the axis ────────────────────────────────────────────────────────────────
 
   private publish(): void {
-    this.axis = this.buildAxis();
+    const axis = this.buildAxis();
+    this.axis = axis;
+    if (axis !== null) {
+      // The server hears the same vocabulary the shell does, from a report
+      // that reads nothing from the store — which is what makes it able to
+      // say that there is no store.
+      try {
+        this.sync.reportState(axis);
+      } catch (err) {
+        this.log('debug', `navdata: the state could not be reported (${describe(err)})`);
+      }
+    }
     try {
       this.deps.onChange();
     } catch {
@@ -396,26 +451,36 @@ export class NavdataService {
       this.latched = describe(err);
     }
 
+    const sync = this.syncStatus();
     return {
-      state: this.state(),
-      reason: this.latched,
+      state: this.state(sync),
+      reason: this.latched ?? sync.latched,
       snapshotId,
       rev,
-      // Nothing syncs or serves demand yet; these stay at their empty values
-      // until the sync client and the demand queue exist.
-      ackedRev: null,
+      ackedRev: sync.ackedRev,
       airports: this.count('nav_airport'),
       navaids: this.count('nav_navaid'),
       waypoints: this.count('nav_waypoint'),
+      // The demand queue does not exist yet; this stays at its empty value
+      // until it does.
       pendingDemand: 0,
-      lastSyncAt: null,
-      lastSyncError: null,
+      lastSyncAt: sync.lastSyncAt,
+      lastSyncError: sync.lastSyncError,
     };
   }
 
-  private state(): NavdataStatusAxis['state'] {
-    if (this.latched !== null) return 'nav.error';
-    if (this.passing) return 'nav.bulk';
+  private syncStatus(): NavdataSyncStatus {
+    try {
+      return this.sync.status();
+    } catch {
+      return { ackedRev: null, lastSyncAt: null, lastSyncError: null, sending: false, latched: null };
+    }
+  }
+
+  private state(sync: NavdataSyncStatus): NavdataStatusAxis['state'] {
+    if (this.latched !== null || sync.latched !== null) return 'nav.error';
+    // A snapshot export or upload is a bulk operation like the pass itself.
+    if (this.passing || sync.sending) return 'nav.bulk';
     return this.running ? 'nav.ready' : 'nav.off';
   }
 

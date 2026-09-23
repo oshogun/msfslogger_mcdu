@@ -1,8 +1,8 @@
 // ── Navdata schema: the DDL, verbatim ─────────────────────────────────────────
 //
 // NAVDATA_SCHEMA_SQL is a verbatim copy of a schema that lives in two
-// repositories which cannot share code: this file, and src/navdata-schema.sql
-// in the msfslogger server repo. The two copies must stay byte-identical. A
+// repositories which cannot share code: this file, and src/navdata/schema.ts
+// in the Sabiá server repo. The two copies must stay byte-identical. A
 // column added on one side is not a compile error on the other, it is a row
 // that silently stops syncing, so a schema change is one edit, two pastes and
 // a bump of NAVDATA_SCHEMA_VERSION, in one change set. The version travels in
@@ -22,13 +22,13 @@ export const NAVDATA_SCHEMA_VERSION = 2;
 
 /** Applied with `exec`, statement for statement, exactly as written. */
 export const NAVDATA_SCHEMA_SQL = `-- ─────────────────────────────────────────────────────────────────────────────
--- msfslogger navdata schema — THE authoritative copy.
+-- Sabiá navdata schema — THE authoritative copy.
 --
 -- DUPLICATION HAZARD. This file is the single source of truth for a schema
 -- that lives in two repositories which cannot share code:
 --
---   * msfslogger_mcdu (Windows client)  — sidecar/src/navdata-schema.ts
---   * msfslogger      (Linux server)    — src/navdata-schema.sql
+--   * sabia_mcdu  (Windows client)  — sidecar/src/navdata-schema.ts
+--   * sabia       (Linux server)    — src/navdata/schema.ts
 --
 -- Paste it verbatim into both. Do not hand-edit one side. The server repo
 -- already lives with this hazard between src/types.ts and client/src/types.ts,
@@ -57,7 +57,7 @@ PRAGMA foreign_keys = ON;
 
 -- NAVDATA_SCHEMA_VERSION = 2
 -- Mirrored as a constant in sidecar/src/navdata-schema.ts and in the server's
--- src/navdata-schema.ts. Stored in nav_meta.schema_version and sent in every
+-- src/navdata/schema.ts. Stored in nav_meta.schema_version and sent in every
 -- wire payload so a mismatch is refused loudly instead of half-applied.
 --
 -- A PEER WHOSE VERSION DIFFERS IS REFUSED, NOT RECONCILED. A v2 sender against

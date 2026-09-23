@@ -277,7 +277,7 @@ fn main() {
             sayintentions_pdc
         ])
         .build(tauri::generate_context!())
-        .expect("Cannot initialize msfslogger desktop shell");
+        .expect("Cannot initialize Sabiá desktop shell");
     app.run(|handle, event| match event {
         tauri::RunEvent::WindowEvent {
             event: tauri::WindowEvent::CloseRequested { .. },

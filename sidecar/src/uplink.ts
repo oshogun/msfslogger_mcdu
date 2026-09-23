@@ -1,6 +1,6 @@
 // ── Uplink — the HTTP half ────────────────────────────────────────────────────
 //
-// Everything this process sends to the msfslogger server goes through here:
+// Everything this process sends to the Sabiá server goes through here:
 // the ingest posts the CLI agent used to make, plus a reachability probe that
 // exists because when the sim link is down there are no frames, and an axis
 // with no evidence would freeze on a stale value.

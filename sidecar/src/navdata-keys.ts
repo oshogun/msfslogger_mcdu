@@ -1,7 +1,7 @@
 // ── Navdata keys, the coverage grid, and the row merge ────────────────────────
 //
 // Every derived key in the navdata schema is computed here, and the same
-// expressions are implemented by hand in the msfslogger server repo, which
+// expressions are implemented by hand in the Sabiá server repo, which
 // cannot share code with this one. They must agree character for character: a
 // key that differs by one separator does not fail, it silently stores the same
 // facility twice and the two databases stop matching.

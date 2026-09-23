@@ -236,7 +236,7 @@ const MENU_ITEMS = [
 
 registerPage({
   id: 'MENU',
-  title: 'MSFSLOGGER',
+  title: 'SABIÁ',
   group: 'MENU',
   n: 1,
   m: 1,

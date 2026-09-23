@@ -32,7 +32,7 @@ run the sidecar standalone against a different file (see
 | Key | Required | Default | Description | Example | CDU page / LSK |
 |---|---|---|---|---|---|
 | `version` | no | `1` | Must be `1` if present | `1` | not editable |
-| `serverUrl` | yes | — | msfslogger server base URL, `http:`/`https:` only, trailing slash stripped | `"https://192.168.0.30:3000"` | `CFG NETWORK`, L1 |
+| `serverUrl` | yes | — | Sabiá server base URL, `http:`/`https:` only, trailing slash stripped | `"https://192.168.0.30:3000"` | `CFG NETWORK`, L1 |
 | `ingestToken` | yes | — | The server's ingest token; never echoed back once set | `"SENTINEL-TOKEN"` | `CFG NETWORK`, L2 |
 | `certPath` | no | `null` | Path to a PEM for the server's self-signed certificate; must be readable if set | `"C:\\certs\\server.pem"` | `CFG NETWORK`, L3 |
 | `trafficEnabled` | no | `true` | `false` only for `0`/`false`/`off`/`no` (trimmed, case-insensitive); anything else, including absent, is `true` | `false` | `CFG TRAFFIC`, L1 |

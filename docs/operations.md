@@ -68,7 +68,7 @@ the shell running.
   loads and validates a config file, prints it with the token redacted, exits
   0 if the sidecar would accept it or 1 with a one-line reason per bad field.
 - **`node sidecar/dist/inspect-datalink.js --config <path>`** — read-only
-  GETs against the msfslogger server: walks the datalink routes, resolves
+  GETs against the Sabiá server: walks the datalink routes, resolves
   scope, fetches the current thread if one exists, checks SimBrief Pilot ID
   status. Safe to run against a real server.
 - **`node sidecar/dist/inspect-uplink.js --config <path>`** — **WARNING: this
@@ -93,7 +93,7 @@ the shell running.
   other instances or remove a stale temporary file." Close any other running
   instance first; if none is running, delete the `.json.tmp` file and retry.
 - There is nothing else to back up — the client keeps no other local data;
-  the logbook itself lives on the msfslogger server.
+  the logbook itself lives on the Sabiá server.
 
 ## Common operational failures
 

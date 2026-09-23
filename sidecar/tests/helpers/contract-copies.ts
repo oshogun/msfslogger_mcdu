@@ -2,7 +2,7 @@
 // and naming the ones that have drifted.
 //
 // Several files in this cache are duplicated by hand on purpose: a copy lives
-// here, and another is handed to the msfslogger server, which reads the same
+// here, and another is handed to the Sabiá server, which reads the same
 // bytes with no shared code. Hand-kept duplicates drift, and the only defence
 // is a tripwire that fails when they do. These are the tripwire's two halves,
 // kept in one place because a tripwire copied between test files is itself a

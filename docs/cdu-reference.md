@@ -1,7 +1,7 @@
 # CDU reference
 
 Key and LSK conventions, the full page map, and every CDU vocabulary table
-for the msfslogger Windows client's CDU panel (`ui/`). For flow-oriented
+for the Sabiá Windows client's CDU panel (`ui/`). For flow-oriented
 walkthroughs, see [usage](usage.md).
 
 ## Key and LSK conventions
@@ -28,7 +28,7 @@ walkthroughs, see [usage](usage.md).
 
 | Page id | Title | Reached via | LSKs | Shows |
 |---|---|---|---|---|
-| `MENU` | MSFSLOGGER | `MENU` key from anywhere | L1–L6 → STATUS/NETWORK/SIM/TRAFFIC/DL-INDEX/FPLN | Static list |
+| `MENU` | SABIÁ | `MENU` key from anywhere | L1–L6 → STATUS/NETWORK/SIM/TRAFFIC/DL-INDEX/FPLN | Static list |
 | `STATUS` | ACARS STATUS | boot default; L6 from most pages | L6 MENU; R6 start/stop uplink; R5 restart (only while crashed) | 4 axes, traffic line, config path |
 | `NETWORK` (CFG) | CFG NETWORK | MENU L2 | L1 serverUrl, L2 ingestToken, L3 certPath, L6 MENU, R6 save (EXEC also saves) | serverUrl / ingestToken (masked) / certPath |
 | `SIM` (CFG) | CFG SIM | MENU L3 | L1 sim version, L2 autoUplink, L6/R6 as above | sim, autoUplink |
@@ -87,7 +87,7 @@ backend uplink are independent things that fail for different reasons.
 | `SIM LINK ONLINE` | ok | Connected to MSFS | Nothing needed |
 | `SIM LINK RETRY {ss}S` | caution | Last attempt failed (or a live link dropped); reconnecting in `{ss}` seconds, backing off 5s→10s→20s→40s, capping at 60s | Make sure MSFS is running |
 
-### Backend — the msfslogger server (flight-data uplink)
+### Backend — the Sabiá server (flight-data uplink)
 
 | Label | Severity | Meaning | Action |
 |---|---|---|---|

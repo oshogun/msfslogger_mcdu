@@ -1,6 +1,6 @@
 // ── Sidecar entrypoint ────────────────────────────────────────────────────────
 //
-// Reads the config file, talks to SimConnect, posts to the msfslogger server,
+// Reads the config file, talks to SimConnect, posts to the Sabiá server,
 // and reports everything it is doing as one JSON object per line on stdout.
 // Control messages arrive the same way on stdin.
 //

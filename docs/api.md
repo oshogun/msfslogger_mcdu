@@ -1,9 +1,9 @@
 # API reference
 
-Three interface layers connect the CDU panel to the msfslogger server: the
+Three interface layers connect the CDU panel to the Sabiá server: the
 host contract (webview↔host), Tauri commands and events (webview↔shell), and
 the shell↔sidecar protocol (stdio). A fourth layer, the HTTP routes the
-sidecar calls on the msfslogger server, is also documented here since the
+sidecar calls on the Sabiá server, is also documented here since the
 sidecar is the only process that calls them.
 
 The Tauri command/event names and the shell↔sidecar relay-timeout ordering are
@@ -211,9 +211,9 @@ from a specific server body `code` value on a matching HTTP status.
 something unusable. All are documented with the CDU text that renders them in
 [cdu-reference](cdu-reference.md).
 
-## 4. msfslogger server HTTP routes
+## 4. Sabiá server HTTP routes
 
-The sidecar is the only process that calls the msfslogger server. Every
+The sidecar is the only process that calls the Sabiá server. Every
 ingest and datalink request carries the token in an `x-ingest-token` header
 and nothing else authenticates it (no session, cookie or Origin check). The
 one exception is the reachability probe, `GET /api/status`: the sidecar sets
@@ -262,12 +262,12 @@ only route parameters that appear in a URL. A canned-message id or an ICAO
 code is validated against its own pattern but travels only in the JSON
 request body (`{"canned_id": ...}` / `{"icao": ...}`), never in the path or a
 query string, and no trailing slash reaches a URL either. SimBrief and PDC
-clearance are proxied and simulated by the msfslogger server itself; the
+clearance are proxied and simulated by the Sabiá server itself; the
 sidecar never contacts SimBrief or any ACARS network directly.
 
 ### SayIntentions routes (6)
 
-The msfslogger server's optional SayIntentions.AI integration, frozen by a
+The Sabiá server's optional SayIntentions.AI integration, frozen by a
 peer session's contract (`.claude/runs/2026-09-17-mcdu-sayintentions/contracts/server-sayintentions-api.md`)
 and never yet exercised against a live server from this repository (see the
 run's `live-check.md`). Six server-side operations, reachable with the same

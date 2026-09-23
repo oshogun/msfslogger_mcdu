@@ -1,6 +1,6 @@
 # Setup
 
-Bootstrapping a Windows machine to build and run the msfslogger Windows
+Bootstrapping a Windows machine to build and run the Sabiá Windows
 client, and validating that the result works before you go near MSFS.
 
 ## Required versions
@@ -44,7 +44,7 @@ clone and install dependencies:
 
 ```powershell
 git clone <this repository>
-cd msfslogger_mcdu
+cd sabia_mcdu
 npm --prefix sidecar ci
 ```
 

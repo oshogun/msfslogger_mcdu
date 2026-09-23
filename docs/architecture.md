@@ -1,6 +1,6 @@
 # Architecture
 
-The msfslogger Windows client is a Tauri desktop app with two processes and one
+The Sabiá Windows client is a Tauri desktop app with two processes and one
 webview panel. This page maps the components, the runtime flows that connect
 them, and the boundaries the codebase enforces between them.
 
@@ -27,7 +27,7 @@ them, and the boundaries the codebase enforces between them.
                                                     SimConnect|             |HTTP(S)
                                                               v             v
                                                      +----------------+  +-----------------------------+
-                                                     | MSFS           |  | msfslogger server           |
+                                                     | MSFS           |  | Sabiá server                |
                                                      | (node-         |  | (another machine;           |
                                                      |  simconnect)   |  | ingest + datalink/SimBrief/ |
                                                      +----------------+  | PDC/SayIntentions routes)   |
@@ -44,7 +44,7 @@ UI development with no Rust or MSFS running.
 | --- | --- | --- |
 | CDU panel (`ui/`) | `ui/src/app.js` (page router, scratchpad, key dispatch), `ui/src/bridge.js` (host contract), `ui/src/pages/*` (STATUS, CFG, DATALINK, FPLN pages) | Renders the CDU screen and keys, and talks to whatever host it finds through the host contract only |
 | Tauri shell (`src-tauri/`) | `src-tauri/src/main.rs` (commands/events), `supervisor.rs` (sidecar lifecycle), `config.rs` (`ConfigStore`), `datalink.rs` (relay), `protocol.rs`/`framing.rs` (wire decode), `restart.rs` (restart budget) | Owns the window, spawns and supervises the sidecar process, persists `config.json`, relays datalink requests, and is the only place the ingest token is written to disk |
-| sidecar (`sidecar/`) | `index.ts` (entrypoint), `simconnect.ts` (SimConnect), `uplink.ts` (ingest HTTP), `datalink-client.ts`/`datalink-service.ts` (ACARS/SimBrief/clearance/SayIntentions), `sayintentions-model.ts` (SayIntentions classification and result projections), `config.ts` (config load/validate) | Reads MSFS over SimConnect, uplinks flight data to the msfslogger server, and runs the datalink/SimBrief/clearance/SayIntentions poll and request cycle. The only process that ever opens a socket to the server |
+| sidecar (`sidecar/`) | `index.ts` (entrypoint), `simconnect.ts` (SimConnect), `uplink.ts` (ingest HTTP), `datalink-client.ts`/`datalink-service.ts` (ACARS/SimBrief/clearance/SayIntentions), `sayintentions-model.ts` (SayIntentions classification and result projections), `config.ts` (config load/validate) | Reads MSFS over SimConnect, uplinks flight data to the Sabiá server, and runs the datalink/SimBrief/clearance/SayIntentions poll and request cycle. The only process that ever opens a socket to the server |
 | preview harness (`gauge/dev/`) | `gauge/dev/server.mjs`, `gauge/dev/mock-host.js` | Serves the CDU panel in a plain browser against a mock host, for UI iteration without Tauri or MSFS |
 
 ## Runtime flows
@@ -80,7 +80,7 @@ UI development with no Rust or MSFS running.
   capped at 200 objects, only when `trafficEnabled`.
 - **Uplink**: each sampled frame and each ingest event (`connected`,
   `disconnected`, `crashed`, `paused`, `unpaused`, `pause`) is POSTed
-  individually to the msfslogger server as it happens — no batching, no
+  individually to the Sabiá server as it happens — no batching, no
   automatic retry of a failed post.
 - **Probe**: a reachability probe (`GET /api/status`) fires every 15 seconds,
   but only when no ingest traffic has landed in that window, so the Backend
@@ -138,7 +138,7 @@ out.
   sidecar communicate; neither process reaches the other over a network
   socket.
 - **Sidecar -> MSFS**: SimConnect, via `node-simconnect`, local-machine only.
-- **Sidecar -> msfslogger server**: HTTP or HTTPS, per `serverUrl` — the
+- **Sidecar -> Sabiá server**: HTTP or HTTPS, per `serverUrl` — the
   config accepts either scheme. For HTTPS against a self-signed certificate,
   `certPath` supplies the CA to trust. Covers the ingest routes and the 20
   datalink/SimBrief/clearance/SayIntentions routes — seven of which serve the
@@ -153,7 +153,7 @@ out.
 
 - **MSFS / SimConnect**, reached through `node-simconnect` — local IPC to a
   running simulator, not a network dependency.
-- **msfslogger server** — the one remote host the client talks to, holding the
+- **Sabiá server** — the one remote host the client talks to, holding the
   user's logbook and proxying SimBrief, the simulated PDC clearance and
   SayIntentions server-side. The sidecar never contacts SimBrief, any ACARS
   network or SayIntentions directly, and it never holds a SayIntentions API
@@ -180,6 +180,6 @@ out.
   the webview only ever sees a boolean `tokenSet`. See
   [security](security.md) for the full redaction chain.
 - **All network I/O lives in the sidecar**: the shell's webview CSP has no
-  remote `connect-src` at all, so the CDU panel cannot reach the msfslogger
+  remote `connect-src` at all, so the CDU panel cannot reach the Sabiá
   server (or anywhere else) even if a page tried; every HTTP request the
   client makes is the sidecar's job.

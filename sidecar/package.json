@@ -2,7 +2,7 @@
   "name": "msfslogger-sidecar",
   "version": "1.0.0",
   "private": true,
-  "description": "msfslogger Windows client sidecar - SimConnect reader and ingest uplink",
+  "description": "Sabiá Windows client sidecar - SimConnect reader and ingest uplink",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

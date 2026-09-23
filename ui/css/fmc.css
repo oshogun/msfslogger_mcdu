@@ -1,4 +1,4 @@
-/* Skeuomorphic CDU chrome for the msfslogger Windows panel.
+/* Skeuomorphic CDU chrome for the Sabiá Windows panel.
    The unit is a moulded bezel with an inset screen: a fixed --fmc-cols by
    14-row character grid (wider than a real FMC's 24 columns — status and
    config text here run longer than a real CDU's short commands, and 24
@@ -86,6 +86,17 @@ body {
 
 .unit-brand {
   font-weight: 700;
+}
+
+/* The bird mark on the moulded plate. The negative vertical margins shrink
+   what it contributes to the line box, so the plate keeps the height and the
+   baseline it had with the word alone; the mark simply paints over the bezel,
+   which is flat behind it. */
+.unit-mark {
+  height: 1.5em;
+  width: auto;
+  margin: -0.5em 0.5em -0.5em 0;
+  vertical-align: middle;
 }
 
 .unit-type {

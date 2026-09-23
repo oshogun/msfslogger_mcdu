@@ -1,8 +1,8 @@
-# msfslogger Windows client documentation
+# Sabiá Windows client documentation
 
-This is the documentation set for the msfslogger Windows client: the Tauri
+This is the documentation set for the Sabiá Windows client: the Tauri
 shell, sidecar and CDU panel that read MSFS over SimConnect and uplink to the
-msfslogger server. Each page below covers one concern; read [README.md](../README.md)
+Sabiá server. Each page below covers one concern; read [README.md](../README.md)
 first for the quick overview, then follow one of the paths below for whatever
 you're trying to do.
 

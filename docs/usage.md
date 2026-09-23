@@ -1,6 +1,6 @@
 # Usage
 
-Primary flows for running the msfslogger Windows client day to day. For key
+Primary flows for running the Sabiá Windows client day to day. For key
 and page conventions, the full page map and every CDU vocabulary table, see
 [cdu-reference](cdu-reference.md). For build/run/debug commands, see
 [operations](operations.md) and [development](development.md) — this page
@@ -73,7 +73,7 @@ If restarts keep exhausting the budget, see
 ## 5. DATALINK: reading messages
 
 DATALINK is a separate feature from the flight-data uplink above: it reads
-and sends ACARS-style text messages against the msfslogger server, over the
+and sends ACARS-style text messages against the Sabiá server, over the
 same connection settings, with its own state line. `MENU` → `L5` `<DATALINK`
 opens `DL-INDEX` (`ACARS DATALINK`), which shows the current scope and the
 DATALINK state line (its own axis, separate from `STATUS`'s Backend line —
@@ -92,7 +92,7 @@ on screen — there is no background polling and no new-message annunciator
 elsewhere. It works before `START>` is pressed and independently of the
 uplink.
 
-**Requirements**: the msfslogger server must support the DATALINK routes; on
+**Requirements**: the Sabiá server must support the DATALINK routes; on
 an older server, DATALINK pages show `DATALINK UNAVAILABLE` and nothing else
 works on them, with no effect on the regular flight-data uplink (`STATUS`
 keeps reading `ACARS UPLINK`/`ACARS READY` normally). DATALINK uses the same
@@ -125,7 +125,7 @@ are generated per planned leg; a flight scope with no linked leg shows
 
 ## 9. REQUEST CLEARANCE (simulated PDC clearance)
 
-**This is a simulated exchange with the msfslogger server — NOT FOR REAL
+**This is a simulated exchange with the Sabiá server — NOT FOR REAL
 WORLD USE.** It never contacts a real ATC system.
 
 `DL-INDEX` `R5` `CLEARANCE>` requests a simulated pre-departure clearance for
@@ -152,7 +152,7 @@ cleared — the scratchpad reads `CLEARANCE UNAVAILABLE` first, and pressing
 confirm page. See [cdu-reference § CLEARANCE vocabulary](cdu-reference.md)
 for every refusal and error code.
 
-**Requirements**: requesting a clearance needs a msfslogger server build with
+**Requirements**: requesting a clearance needs a Sabiá server build with
 the clearance route, later than DATALINK's own floor. Until then, `SEND*`
 fails with `CLEARANCE UNAVAILABLE` (hint `SERVER UPDATE NEEDED` on the
 reopened confirm page) and every other DATALINK page and the flight-data
@@ -160,7 +160,7 @@ uplink keep working normally.
 
 ## 10. SayIntentions: linking, importing and pushing a PDC
 
-This is a front end to the msfslogger server's own, optional SayIntentions.AI
+This is a front end to the Sabiá server's own, optional SayIntentions.AI
 integration — the server holds the SayIntentions API key and does all the
 talking to SayIntentions; the CDU only ever reads a boolean (`KEY ON FILE` /
 `NO KEY ON FILE`) and never sees, collects or types the key itself. See
@@ -173,7 +173,7 @@ prompt.
 
 **No key configured.** `DL-SI` row 2 reads `NO KEY ON FILE` and row 11 reads
 `SET KEY ON WEB PREFILES PAGE`. This is reachable on the ground, in leg
-scope, before a flight exists — leave the CDU, open the msfslogger web app's
+scope, before a flight exists — leave the CDU, open the Sabiá web app's
 Prefiles page, and save the key there. There is no CDU field for it.
 
 **Link, unlink and import all need a live flight, not just a flight plan.**
@@ -204,7 +204,7 @@ poll.** Unlike the DATALINK thread, which polls the server every 20 seconds
 on its own, nothing on `DL-SI` imports automatically. Every import reaches
 the real SayIntentions upstream, which is undocumented, preview-status and
 carries no documented rate limits of its own; the server's own web client is
-manual for exactly that reason, and the msfslogger server team recommended
+manual for exactly that reason, and the Sabiá server team recommended
 the same restraint here. Press R5 `IMPORT>`, then `SEND*` on the confirm
 page, whenever fresh comms are wanted. A repeat import is always safe — the
 server dedups on its own cursor — but it is never triggered for you.
@@ -238,7 +238,7 @@ page 2 onward shows 8 instead of 9 — so a clearance route of five to nine
 lines pages one more time than it used to. See
 [cdu-reference § Page map](cdu-reference.md) for the exact row layout.
 
-**Requirements**: SayIntentions needs a msfslogger server build with the six
+**Requirements**: SayIntentions needs a Sabiá server build with the six
 SayIntentions routes; on an older server `DL-SI` and the `SEND PDC>` prompt
 read `SAYINTENTIONS NOT SUPPORTED` / `SIDECAR UPDATE REQUIRED` as appropriate,
 with no effect on DATALINK, FPLN or the flight-data uplink. See
@@ -248,14 +248,14 @@ and [api](api.md) for the six routes.
 ## 11. FPLN: SimBrief prefile
 
 FPLN is a separate feature from DATALINK: it imports your latest SimBrief
-OFP into the msfslogger server as a new, trip-less planned leg, which
+OFP into the Sabiá server as a new, trip-less planned leg, which
 DATALINK can then be used against. It shares DATALINK's connection settings
 and ingest token. `MENU` → `L6` `<FPLN` opens `FPLN` (`FLIGHT PLAN`), which
 behaves identically before and after `START>`.
 
 - `FPLN` row 2 shows `CONFIGURED` or `NOT SET` for the SimBrief Pilot ID,
   read fresh each time the page opens. **The Pilot ID is set only on the
-  msfslogger web app** — there is no CDU page to enter or change it; FPLN
+  Sabiá web app** — there is no CDU page to enter or change it; FPLN
   only reads whether one is configured.
 - With a Pilot ID configured, `R6` `PREFILE>` opens `FPLN-CONFIRM`
   (`PREFILE SIMBRIEF`), a staging page — nothing is sent yet.
@@ -268,7 +268,7 @@ behaves identically before and after `START>`.
   unknown after a timeout, pressing PREFILE again is safe — the server
   checks for a duplicate before writing.
 
-**Requirements**: the msfslogger server must support SimBrief prefile —
+**Requirements**: the Sabiá server must support SimBrief prefile —
 later than DATALINK's own floor. Before that, FPLN reads
 `SIMBRIEF UNAVAILABLE` (hint `SERVER UPDATE NEEDED`) and `PREFILE>` stays
 hidden, with no effect on DATALINK or the flight-data uplink.
@@ -294,13 +294,13 @@ PREFILE simply replaces the leg already held.
 
 DATALINK, FPLN, PDC clearance and SayIntentions all use the same ingest token
 already set on `CFG NETWORK` — there is no separate login for any of them,
-and the token is never shown on the CDU. Each feature needs the msfslogger
+and the token is never shown on the CDU. Each feature needs the Sabiá
 server to be running a build that has its corresponding route; on an older
 server the CDU shows the relevant `UNAVAILABLE`/`NOT SUPPORTED` state
 (`DATALINK UNAVAILABLE`, `SIMBRIEF UNAVAILABLE`, `CLEARANCE UNAVAILABLE`, or
 `SAYINTENTIONS NOT SUPPORTED`), and every other feature, including the base
 flight-data uplink, is unaffected. FPLN additionally requires a SimBrief
-Pilot ID configured on the msfslogger server itself, and SayIntentions
+Pilot ID configured on the Sabiá server itself, and SayIntentions
 additionally requires a SayIntentions API key saved on the server's own web
 Prefiles page (never on the CDU, for either). See
 [cdu-reference](cdu-reference.md) for the exact CDU text and hints for every

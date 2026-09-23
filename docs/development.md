@@ -126,13 +126,13 @@ real one.
 | `npm run test:gauge` | Preview harness: mock host, dev server, datalink/SimBrief/clearance/SayIntentions vocab and session modules, and full CDU page-flow tests | Any OS, Node | none |
 | `node ui/tools/render-check.mjs` | Headless-Chromium screenshot and label check against an independent STATUS-state table | Any OS, Node | Needs `puppeteer`, not installed by default |
 | `node ui/tools/host-swap-check.mjs` | Proves a synthetic `window.__FMC_HOST__` can drive the real panel | Any OS, Node | Needs `puppeteer`, not installed by default |
-| Manual test plan (below) | End-to-end behaviour against a real MSFS session and the real msfslogger server | A Windows box with MSFS and WebView2 | A built app, Node 20, a reachable msfslogger server, and a known ingest token |
+| Manual test plan (below) | End-to-end behaviour against a real MSFS session and the real Sabiá server | A Windows box with MSFS and WebView2 | A built app, Node 20, a reachable Sabiá server, and a known ingest token |
 
 ### Manual test plan (run this on the Windows box)
 
 This is the sign-off procedure for the client's five acceptance criteria:
 
-- **AC1** — the client can connect to the msfslogger server
+- **AC1** — the client can connect to the Sabiá server
 - **AC2** — every connection setting is configurable through the UI, no
   required CLI/env var
 - **AC3** — connection status visibly changes in the UI, with the connected
@@ -141,7 +141,7 @@ This is the sign-off procedure for the client's five acceptance criteria:
 - **AC5** — functionally matches an equivalent standalone uplink
 
 Prerequisites: the app built per [setup.md](setup.md), Node 20 available, and
-the msfslogger server reachable with a known ingest token.
+the Sabiá server reachable with a known ingest token.
 
 | # | Step | Expected observation | Proves |
 | --- | --- | --- | --- |
@@ -154,7 +154,7 @@ the msfslogger server reachable with a known ingest token.
 | 7 | Start MSFS and load a flight | Sim line → `SIM LINK ONLINE`; within a second, backend line → `ACARS UPLINK`; the server's web UI header shows `Connected · Idle` (then `Recording · <aircraft>` once a flight starts) and the live map starts moving | AC1, AC3, AC5 |
 | 8 | Press `ESC` in the sim (full pause), then trigger Active Pause | Pause line → `SIM PAUSED`, then `ACTIVE PAUSE`. The server's flight clock stops in both cases | AC5 |
 | 9 | With traffic ON, watch the server's live map at a busy airport | AI aircraft appear and move; parked aircraft don't | AC5 |
-| 10 | Stop the msfslogger server while flying, then restart it | Backend line → `ACARS NO COMM` while sim line stays `SIM LINK ONLINE` — server unreachable | AC3, negative test |
+| 10 | Stop the Sabiá server while flying, then restart it | Backend line → `ACARS NO COMM` while sim line stays `SIM LINK ONLINE` — server unreachable | AC3, negative test |
 | 10b | (continuing from 10) Restart the server | Backend line returns to `ACARS UPLINK` with no action on the Windows box | AC3, AC5 |
 | 11 | Press `STOP>`, then close the window | App line → `UPLINK STOPPED`, backend line → `ACARS STANDBY`. After closing, Task Manager shows **no** `node.exe` left from this app, and the server marks the connection disconnected | AC1 |
 | 12 | Set a deliberately wrong token on `CFG NETWORK`, `SAVE>`, `START>` with MSFS running | Backend line → `ACARS REJECT 401` (server 401); sim line stays `SIM LINK ONLINE` | AC3, negative test |
@@ -183,7 +183,7 @@ A single `main` branch, no CI — every check above runs locally before a
 commit. Commits are small and focused, with an imperative subject line (see
 `git log --oneline`: "Request a simulated PDC clearance from the CDU",
 "Prefile the latest SimBrief plan from a new CDU FPLN page"). Open pull
-requests against `main` on `github.com/oshogun/msfslogger_mcdu`.
+requests against `main` on `github.com/oshogun/sabia_mcdu`.
 
 ## Contribution and review conventions
 

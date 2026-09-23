@@ -2,16 +2,16 @@
 
 ## Threat model, in brief
 
-The msfslogger Windows client is a local desktop app with exactly one secret
-(the ingest token) and exactly one remote host it talks to (the msfslogger
+The Sabiá Windows client is a local desktop app with exactly one secret
+(the ingest token) and exactly one remote host it talks to (the Sabiá
 server configured in `serverUrl`). It runs on the user's own machine, is not
-multi-user, and has no server-side component of its own — the msfslogger
+multi-user, and has no server-side component of its own — the Sabiá
 server is a separate project. The practical risks in scope are: the ingest
 token leaking to another host, another process on the same machine, a log, or
 the webview; the client being tricked into sending data somewhere other than
 the configured server; and TLS verification being silently weakened. Physical
 or OS-level compromise of the user's own machine is out of scope, as is the
-msfslogger server's own security, which this client has no control over.
+Sabiá server's own security, which this client has no control over.
 
 ## Token storage
 
@@ -61,7 +61,7 @@ token reaches the sidecar only by that process reading `config.json` itself.
 
 ## The SayIntentions API key: a second secret this client never touches
 
-The msfslogger server's optional SayIntentions.AI integration holds a second
+The Sabiá server's optional SayIntentions.AI integration holds a second
 secret — the pilot's SayIntentions API key — entirely on the server side.
 This is a deliberate, permanent boundary, not a current limitation:
 
@@ -106,7 +106,7 @@ error against system trust, rather than silently succeeding or hanging.
 
 The webview's CSP (`default-src 'self'; script-src 'self'; style-src 'self'
 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost`)
-grants no remote origin at all — the CDU panel cannot reach the msfslogger
+grants no remote origin at all — the CDU panel cannot reach the Sabiá
 server, or anywhere else, even if a page tried to. All network I/O is the
 sidecar's job, entirely outside the webview's CSP jurisdiction.
 

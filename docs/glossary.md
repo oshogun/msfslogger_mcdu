@@ -19,24 +19,25 @@ Terms used across these docs and in the code, alphabetical. See
 | host contract | The UI↔host seam defined by `ui/src/bridge.js` | [architecture.md](architecture.md), [api.md](api.md) |
 | ICAO | The 4-letter airport code validated for a `WX REQUEST` | [cdu-reference.md](cdu-reference.md) |
 | import (SayIntentions) | `DL-SI` R5 `IMPORT>` — a manual, operator-pressed pull of a linked SayIntentions session's radio/ATC comms into the existing `DL-THREAD`. Nothing imports on its own; a repeat import is always safe, since the server dedups on its own cursor | [usage.md](usage.md), [cdu-reference.md](cdu-reference.md) |
-| ingest token | The shared secret that authenticates the sidecar to the msfslogger server | [configuration.md](configuration.md), [security.md](security.md) |
+| ingest token | The shared secret that authenticates the sidecar to the Sabiá server | [configuration.md](configuration.md), [security.md](security.md) |
 | link (SayIntentions) | `DL-SI` L4 `<LINK` — binds the current flight to whatever SayIntentions session the server's saved key currently holds, either from now or backfilled to session start. Needs a live flight; refused in leg scope | [usage.md](usage.md), [cdu-reference.md](cdu-reference.md) |
 | LSK | Line Select Key — one of the 12 buttons beside the screen, addressed as `L1`–`L6`/`R1`–`R6` | [cdu-reference.md](cdu-reference.md) |
 | METAR | A weather report, shown on `DL-WX-RESULT` | [cdu-reference.md](cdu-reference.md) |
 | mock host | The preview harness's fake host (`gauge/dev/mock-host.js`), distinct from the stub bridge | [gauge/README.md](../gauge/README.md) |
 | OFP | Operational Flight Plan — SimBrief's output, imported by the FPLN prefile feature | [usage.md](usage.md) |
 | Pause_EX1 | The SimConnect event that reports Active Pause, which the legacy `Paused`/`Unpaused` events miss | [troubleshooting.md](troubleshooting.md) |
-| PDC clearance (simulated) | The pre-departure clearance requested from `DL-INDEX` R5 `REQUEST CLEARANCE`. The msfslogger server generates it entirely within the simulation — it never reaches SayIntentions or a live session — and every result carries `NOT FOR REAL WORLD USE` on screen. Distinct from CPDLC, the SayIntentions push of an already-issued PDC clearance into a live session; never call this one CPDLC | [usage.md](usage.md), [cdu-reference.md](cdu-reference.md) |
+| PDC clearance (simulated) | The pre-departure clearance requested from `DL-INDEX` R5 `REQUEST CLEARANCE`. The Sabiá server generates it entirely within the simulation — it never reaches SayIntentions or a live session — and every result carries `NOT FOR REAL WORLD USE` on screen. Distinct from CPDLC, the SayIntentions push of an already-issued PDC clearance into a live session; never call this one CPDLC | [usage.md](usage.md), [cdu-reference.md](cdu-reference.md) |
 | planned leg | A server-side leg record; a flight and a leg are two different datalink scopes | [data-model.md](data-model.md) |
 | prefile / prefiled leg | Importing a SimBrief OFP into the server as a trip-less planned leg | [usage.md](usage.md) |
 | probe | The reachability-only request the sidecar makes when no ingest traffic has landed recently | [operations.md](operations.md) |
 | relay | The shell's id↔reply correlation for datalink requests passed between the webview and the sidecar | [api.md](api.md) |
 | restart budget | The supervisor's allowance of restarts within a rolling window before it crash-latches | [operations.md](operations.md) |
-| SayIntentions | The third-party ATC/comms service the msfslogger server optionally integrates with, reached from `DL-INDEX` R2 `SAYINTENTIONS>` (`DL-SI`). The server holds the SayIntentions API key and does all the talking to it; the client never contacts SayIntentions and never holds the key, only reading whether one is set | [usage.md](usage.md), [cdu-reference.md](cdu-reference.md), [security.md](security.md) |
+| Sabiá | The product name for this Windows client and its server, formerly called msfslogger | [index.md](index.md), [README.md](../README.md) |
+| SayIntentions | The third-party ATC/comms service the Sabiá server optionally integrates with, reached from `DL-INDEX` R2 `SAYINTENTIONS>` (`DL-SI`). The server holds the SayIntentions API key and does all the talking to it; the client never contacts SayIntentions and never holds the key, only reading whether one is set | [usage.md](usage.md), [cdu-reference.md](cdu-reference.md), [security.md](security.md) |
 | scope | Which thread — flight, leg, or none — DATALINK is currently pointed at | [data-model.md](data-model.md) |
 | scratchpad | The CDU's one-line entry and feedback field | [cdu-reference.md](cdu-reference.md) |
 | shell | The Tauri process (`src-tauri/`): window, sidecar supervisor, `ConfigStore` | [architecture.md](architecture.md) |
-| sidecar | The Node process (`sidecar/`) that talks to SimConnect and the msfslogger server | [architecture.md](architecture.md) |
+| sidecar | The Node process (`sidecar/`) that talks to SimConnect and the Sabiá server | [architecture.md](architecture.md) |
 | SimBrief | The third-party flight-planning service the FPLN prefile feature imports an OFP from | [usage.md](usage.md) |
 | SimConnect | Microsoft's MSFS API the sidecar reads simulator state through | [architecture.md](architecture.md) |
 | squawk | The transponder code assigned as part of a PDC clearance | [cdu-reference.md](cdu-reference.md) |

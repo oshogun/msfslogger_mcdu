@@ -601,7 +601,7 @@ export function collisionKey(baseKey: string, index: number): string {
 /**
  * The keys a set of procedures sharing one base key take, parallel to the input.
  *
- * The whole disambiguation rule, in one pure function, because the msfslogger
+ * The whole disambiguation rule, in one pure function, because the Sabiá
  * server has to reproduce it exactly and shares no code with this repository.
  * A set of one gets the base key untouched — that is the 99.7% case and it must
  * keep the key it has.

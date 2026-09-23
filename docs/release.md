@@ -33,7 +33,10 @@ cargo tauri build
 
 This runs `beforeBuildCommand` (`npm --prefix sidecar run build`) first, then
 produces an MSI and an NSIS `.exe` under
-`src-tauri/target/release/bundle/`.
+`src-tauri/target/release/bundle/`. Both artefact names derive from
+`tauri.conf.json`'s `productName` (`Sabiá`) and `version`, e.g.
+`Sabiá_0.1.0_x64_en-US.msi` under `bundle/msi/` and
+`Sabiá_0.1.0_x64-setup.exe` under `bundle/nsis/`.
 
 The bundle embeds `sidecar/dist`, `sidecar/node_modules` and
 `sidecar/package.json` as resources — whatever is on disk in those
@@ -54,10 +57,23 @@ bundle" step.
    app, configure `CFG NETWORK`, confirm the Sim axis reaches
    `SIM LINK ONLINE` and the Backend axis reaches `ACARS UPLINK` against a
    real server.
-4. Server compatibility: confirm the target msfslogger server's version
+4. Server compatibility: confirm the target Sabiá server's version
    supports the sidecar's advertised `features` — an older server simply
    shows the corresponding CDU page as unavailable, but it's worth checking
    deliberately before calling a release done.
+
+## Upgrading from an msfslogger installation
+
+The bundle identifier changed from `com.msfslogger.windows-client` to
+`com.sabia.windows-client` as part of the Sabiá rebrand, and `productName`
+changed from `msfslogger` to `Sabiá`. Windows treats this as a different
+application, not an upgrade in place: installing the Sabiá build does not
+remove or replace an existing msfslogger installation, the old entry stays in
+Add/Remove Programs, and the new build gets its own WebView2 data directory.
+Uninstall the old `msfslogger` entry by hand if you no longer need it. The
+config file at `%APPDATA%\msfslogger\config.json` is unchanged by the rebrand,
+so the existing server URL, ingest token and other settings carry over to the
+new install automatically.
 
 ## Installed-app runtime requirement
 

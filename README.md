@@ -1,8 +1,8 @@
-# msfslogger Windows client
+# Sabiá Windows client
 
 A Tauri desktop client for Windows: it reads Microsoft Flight Simulator over
 SimConnect, shows an FMC-style CDU panel, and uplinks flight data to an
-msfslogger server on another machine. From the same CDU it also drives
+Sabiá server on another machine. From the same CDU it also drives
 DATALINK (ACARS-style messaging), a SimBrief flight-plan prefile, a
 simulated PDC clearance request, and linking a flight to SayIntentions to
 import its comms and push the leg's PDC to a live SayIntentions session as a
@@ -17,7 +17,7 @@ real CPDLC message — all proxied through that server; see
 - Rust ≥ 1.88 (MSVC toolchain) plus the Visual Studio Build Tools C++ workload
 - Tauri CLI 2.x (`cargo tauri`)
 - WebView2 runtime (ships with an up-to-date Windows 10/11)
-- A reachable msfslogger server and its ingest token
+- A reachable Sabiá server and its ingest token
 
 See [docs/setup.md](docs/setup.md) for exact versions, install commands and
 how to check each one.
@@ -26,7 +26,7 @@ how to check each one.
 
 ```powershell
 git clone <this repository>
-cd msfslogger_mcdu
+cd sabia_mcdu
 npm --prefix sidecar ci
 ```
 

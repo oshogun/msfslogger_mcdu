@@ -494,7 +494,11 @@ export class DatalinkService {
           ? {
               kind: 'flight',
               flightId: selection.flightId,
-              plannedLegId: selection.plannedLegId ?? projection.threadPlannedLegId,
+              // The thread body is the flight row itself; the status leg id is a
+              // cache of it that is known to go stale when a leg or trip is
+              // deleted mid-flight. A successful fetch always outranks status,
+              // even when that means publishing null.
+              plannedLegId: projection.threadPlannedLegId,
             }
           : { kind: 'leg', plannedLegId: selection.plannedLegId, source: selection.source };
     } finally {

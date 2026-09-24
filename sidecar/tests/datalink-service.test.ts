@@ -435,6 +435,17 @@ describe('scope resolution in a cycle', () => {
     await flush();
     expect(last()).toMatchObject({ scope: { kind: 'flight', flightId: 92, plannedLegId: 33 } });
   });
+
+  it('a status leg the thread has since nulled is not published (a deleted planned leg or trip mid-flight)', async () => {
+    const client = new ScriptedClient((route) => {
+      if (route.key === 'status') return fromFixture('01a-get-status-flying');
+      return ok(threadBody([1], null));
+    });
+    const service = makeService(client);
+    await service.handle(req('watch', { on: true }));
+    await flush();
+    expect(last()).toMatchObject({ scope: { kind: 'flight', flightId: 92, plannedLegId: null } });
+  });
 });
 
 describe('thread cache, epochs and the thread op', () => {
@@ -1232,14 +1243,14 @@ describe('a cleared prefiled leg leaves no scope or thread behind, even when the
     net.threadDown = true;
     await service.handle(req('refresh', {}));
     await flush();
-    expect(last()).toMatchObject({ state: 'dl.unreachable', scope: { kind: 'flight', flightId: 92 }, thread: null });
+    expect(last()).toMatchObject({ state: 'dl.unreachable', scope: { kind: 'flight', flightId: 92, plannedLegId: 12 }, thread: null });
     await expectNoPrefileLeft(service, epoch);
     net.down = true;
     const made = client.routes.length;
     await service.handle(req('refresh', {}));
     await flush();
     expect(paths(client, made)).toEqual(['GET /api/status']);
-    expect(last()).toMatchObject({ state: 'dl.unreachable', scope: { kind: 'flight', flightId: 92 }, thread: null });
+    expect(last()).toMatchObject({ state: 'dl.unreachable', scope: { kind: 'flight', flightId: 92, plannedLegId: 12 }, thread: null });
     await expectNoPrefileLeft(service, epoch);
     net.flying = false;
     net.threadDown = false;
